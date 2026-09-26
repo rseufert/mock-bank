@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mock-bank"
+version = "0.0.1"
+description = "A mock bank: ISO 20022 payment files in, status reports, statements and returns out, over SQLite, with zero dependencies."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["bank", "iso20022", "pain.001", "pain.002", "camt.053", "camt.054",
+            "pacs.004", "nacha", "bai2", "payments", "mock", "testing",
+            "procure-to-pay", "reconciliation"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Office/Business :: Financial",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Software Development :: Testing :: Mocking",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://rickseufert.com/#projects"
+Repository = "https://github.com/rseufert/mock-bank"
+Issues = "https://github.com/rseufert/mock-bank/issues"
+Changelog = "https://github.com/rseufert/mock-bank/blob/main/CHANGELOG.md"
+
+[project.scripts]
+mock-bank = "mockbank.__main__:main"
+
+[tool.setuptools]
+packages = ["mockbank"]
