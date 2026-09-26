@@ -120,6 +120,27 @@ Every element of every message is declared once in `mockbank/schema.py`, and
 `GET /_mock/dictionary` serves those declarations, with the code sets and the
 choices above, as JSON.
 
+## Validating a file
+
+`POST /_mock/validate` reads a `pain.001` the way the pipeline will and says
+what it finds, one line each, without changing anything:
+
+```
+$ curl -s --data-binary @tests/samples/pain001_broken_iban.xml http://127.0.0.1:8080/_mock/validate
+pain.001.001.09 ACME-20261001-0001: 1 batch, 4 payments, 1 finding
+error AC01 at /Document/CstmrCdtTrfInitn/PmtInf[1]/CdtTrfTxInf[2]/CdtrAcct/Id/IBAN: NL85MOCK0000000003 fails its check digits
+```
+
+Each finding names the element and carries the reason code the `pain.002`
+will report it with: `FF01` for anything structural or a file the mock cannot
+read (it names what it does read), `AM10` for a wrong `CtrlSum`, `AM18` for a
+wrong `NbOfTxs`, `AC01` for an IBAN that fails its check digits, `AM03` for a
+currency that is not the debtor account's (or a request to convert one),
+`AM05` for an `EndToEndId` used twice in one file. Signed and encrypted files
+and DTDs are refused by name. A requested execution date in the past is a
+`DT01` *warning*, not a rejection: banks differ, and the mock follows the
+common SEPA profile of executing on the next business day.
+
 Each payment keeps its `EndToEndId` through every message, so a client can
 match a status, a statement line and a return to the invoice it paid.
 
@@ -187,7 +208,7 @@ like mock-edi's so the two feel the same.
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on | 0.1 |
 | Clock | `POST /_mock/advance` | `?days=N` or `?to=YYYY-MM-DD`; releases statements and returns that come due | 0.1 |
-| Validate only | `POST /_mock/validate` | Findings in prose, nothing changed | 0.1 |
+| Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file | now |
 | Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders | 0.2 |
 
 Anything not built yet answers `404` with a body that names what is supported
@@ -217,8 +238,10 @@ docker run -p 8080:8080 mock-bank
 ```
 mockbank/accounts.py   the account behaviours, and what a valid account is
 mockbank/db.py         the schema, the upgrade, and the seeded accounts
+mockbank/messages.py   reading a pain.001 into a PaymentFile of batches and payments
 mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
-mockbank/server.py     the HTTP surface: control plane, dictionary and accounts today, the pipeline as 0.1 lands
+mockbank/server.py     the HTTP surface: control plane, dictionary, accounts and validation today, the pipeline as 0.1 lands
+mockbank/validate.py   findings about a payment file: refusals, structure, and the mock's own checks
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over

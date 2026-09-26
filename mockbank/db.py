@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import datetime
 import json
-import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Sequence
+
+from . import schema
 
 # Every table, one CREATE per entry. The tables not here yet are named so that
 # a reader does not go looking for them:
@@ -241,12 +242,9 @@ def count(conn: sqlite3.Connection, table: str, where: str = "") -> int:
 # IBANs
 # ---------------------------------------------------------------------------
 #
-# Declared here because the seed builds IBANs and the accounts endpoint refuses
-# them, and both have to agree. The payment reader (#5) renders the same rule
-# as a `pain.002` finding rather than restating it.
-
-IBAN_PATTERN = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z0-9]{1,30}$")
-
+# The seed builds its IBANs here; the check-digit rule itself is ISO 13616's
+# and lives with the other identifier rules in `schema`, so the seed, the
+# accounts endpoint and the payment validator share one copy.
 
 def iban(country: str, bban: str) -> str:
     """An IBAN, from a country code and a BBAN, with its mod-97 check digits.
@@ -256,33 +254,7 @@ def iban(country: str, bban: str) -> str:
     number modulo 97.
     """
     country, bban = country.upper(), bban.upper()
-    return "%s%02d%s" % (country, 98 - _mod97(bban + country + "00"), bban)
-
-
-def iban_is_valid(value: str) -> bool:
-    """Whether an IBAN is one an arriving payment could be matched on.
-
-    Form and checksum only. Whether the country's BBAN is the right length for
-    that country is a national rule per country; this does not claim to know
-    them, which is the honest position rather than a half-filled table.
-    """
-    value = (value or "").replace(" ", "").upper()
-    return bool(IBAN_PATTERN.match(value)) and _mod97(value[4:] + value[:4]) == 1
-
-
-def _mod97(text: str) -> int:
-    """`text` read as digits - letters as 10..35 - modulo 97.
-
-    Reduced as it goes rather than built into one enormous integer, which is
-    the form the standard is written in.
-    """
-    remainder = 0
-    for char in text:
-        value = int(char, 36)
-        # A letter stands for two digits (A is 10, Z is 35), so it shifts the
-        # running remainder by two places and a digit by one.
-        remainder = (remainder * (10 if value < 10 else 100) + value) % 97
-    return remainder
+    return "%s%02d%s" % (country, 98 - schema.mod97(bban + country + "00"), bban)
 
 
 # ---------------------------------------------------------------------------

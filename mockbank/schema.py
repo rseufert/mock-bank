@@ -215,8 +215,37 @@ PATTERNS = {
     "External4Code": r"[A-Za-z0-9]{1,4}",
     "External5Code": r"[A-Za-z0-9]{1,5}",
     "External35Code": r".{1,35}",
-    "MessageNameIdentification": r"[a-z]{4}\.[0-9]{3}\.[0-9]{3}\.[0-9]{2}",
 }
+
+
+
+def iban_is_valid(value: str) -> bool:
+    """Whether an IBAN has the form and the check digits ISO 13616 gives it.
+
+    Form and checksum only. Whether the BBAN is the right length for its
+    country is a national rule per country; this does not claim to know them,
+    which is the honest position rather than a half-filled table. Spaces and
+    case are forgiven, as a person writes an IBAN.
+    """
+    value = (value or "").replace(" ", "").upper()
+    return bool(re.fullmatch(PATTERNS["IBAN2007Identifier"], value)) and \
+        mod97(value[4:] + value[:4]) == 1
+
+
+def mod97(text: str) -> int:
+    """`text` read as digits - letters as 10..35 - modulo 97.
+
+    Reduced as it goes rather than built into one enormous integer, which is
+    the form the standard is written in.
+    """
+    remainder = 0
+    for char in text:
+        value = int(char, 36)
+        # A letter stands for two digits (A is 10, Z is 35), so it shifts the
+        # running remainder by two places and a digit by one.
+        remainder = (remainder * (10 if value < 10 else 100) + value) % 97
+    return remainder
+
 
 # ISO 4217 currencies whose minor unit is not two digits.
 CURRENCY_EXPONENTS = {
@@ -629,7 +658,7 @@ def pain002():
                    agent(v, "DbtrAgt").opt, agent(v, "CdtrAgt").opt, iso="GroupHeader86")
     original_group = Group(
         "OrgnlGrpInfAndSts", Ident("OrgnlMsgId"),
-        Ident("OrgnlMsgNmId", pattern="MessageNameIdentification"),
+        Ident("OrgnlMsgNmId"),
         DateTime("OrgnlCreDtTm").opt, Count("OrgnlNbOfTxs").opt, Dec("OrgnlCtrlSum").opt,
         Code("GrpSts", codes="ExternalPaymentGroupStatus1Code").opt,
         status_reason(v).many(), per_status.many(), iso="OriginalGroupHeader17")
@@ -896,12 +925,30 @@ def _check_value(decl, elem, path, findings):
 
 # -- reading -----------------------------------------------------------------
 
+class Node(dict):
+    """A group read from a file: a dict of its children, and where it was.
+
+    It compares equal to the plain dict ``build`` takes; ``path`` and
+    ``path_of`` are there so a finding about a value can name the element it
+    came from without anyone writing the path out.
+    """
+
+    __slots__ = ("path", "decl")
+
+    def path_of(self, key):
+        """The path of the child ``key``, whether or not the file had it."""
+        for child in self.decl.children:
+            if child.key == key:
+                return "%s/%s" % (self.path, child.name)
+        raise KeyError("%s declares no %s" % (self.decl.name, key))
+
+
 def read(message, root):
     """A received tree as a mapping keyed by element key, the shape ``build``
-    takes: a group is a dict, a repeatable element a list, an amount an
-    ``Amount``, every other value its text. What does not fit is skipped or
+    takes: a group is a ``Node`` (a dict), a repeatable element a list, an
+    amount an ``Amount``, every other value its text. What does not fit is skipped or
     kept as text; ``check`` is what says so. Never raises on a tree."""
-    return _read(message.document, root, "", message.namespace)
+    return _read(message.document, root, "/" + message.document.name, message.namespace)
 
 
 def _read(decl, elem, path, namespace):
@@ -911,7 +958,8 @@ def _read(decl, elem, path, namespace):
             minor = parse_amount(text, elem.get("Ccy", ""))
             return text if minor is None else Amount(minor, elem.get("Ccy"))
         return text
-    out = {}
+    out = Node()
+    out.path, out.decl = path, decl
     for child_decl, child, child_path in _match(decl, elem, path, namespace, []):
         value = _read(child_decl, child, child_path, namespace)
         if child_decl.max == 1:

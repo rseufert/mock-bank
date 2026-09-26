@@ -18,7 +18,7 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from . import db
+from . import db, schema
 
 # name -> what the bank does. Kept in the order the README lists them.
 BEHAVIOURS = {
@@ -107,7 +107,7 @@ def check(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     if "iban" in out:
         value = str(out["iban"]).replace(" ", "").upper()
-        if not db.iban_is_valid(value):
+        if not schema.iban_is_valid(value):
             raise Invalid(
                 "iban %r is not one an arriving payment could be matched on: "
                 "two letters of country, two check digits, then up to 30 "
