@@ -1,9 +1,9 @@
 """SQLite: the schema, the upgrade, and the seeded accounts.
 
 The mock is a *bank*, so its state is the state a bank keeps: the accounts it
-holds, the days it does not settle on, and a log of what was asked of it.
-Everything else - payments, the messages it wrote, the mailbox they wait in -
-arrives with the issues that need those tables.
+holds, the days it does not settle on, a log of what was asked of it, and the
+payment files it received with the payments it decided on. The messages it
+wrote and the mailbox they wait in arrive with the issues that need them.
 
 Three things here are worth knowing:
 
@@ -36,10 +36,9 @@ from . import schema
 # Every table, one CREATE per entry. The tables not here yet are named so that
 # a reader does not go looking for them:
 #
-#   payment, message   the pipeline and the writers (#6, #7); the mailbox
-#                      reads `message` and is built on it (#8)
-#
-# Whoever lands first owns the statement; the other adds to it.
+#   message   the writers (#7); the mailbox reads it and is built on it
+#             (#8). Whoever lands first owns the statement; the other adds
+#             to it.
 SCHEMA = [
     # An account the mock knows about: an IBAN, a balance and a behaviour.
     # There is deliberately no debtor/creditor column. Which side an account
@@ -82,6 +81,50 @@ SCHEMA = [
         at      TEXT NOT NULL
     )
     """,
+    # A payment file the bank received and could read far enough to have a
+    # MsgId, whatever became of it. The duplicate check reads `msg_id`: a
+    # MsgId the bank has seen before is DUPL, even if that first file was
+    # rejected, because that is what a bank's duplicate check does.
+    """
+    CREATE TABLE IF NOT EXISTS file (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        msg_id       TEXT NOT NULL,
+        message      TEXT NOT NULL,
+        received_at  TEXT NOT NULL,
+        -- ACCP, PART or RJCT, and for RJCT the group-level reason
+        status       TEXT NOT NULL,
+        reason       TEXT,
+        -- 0 for a `silent` debtor: decided and booked, never reported (#7)
+        reported     INTEGER NOT NULL DEFAULT 1
+    )
+    """,
+    # One credit transfer the bank decided on. Amounts in minor units. A
+    # rejected payment is kept too, because the pain.002 reports it. An
+    # accepted one debits its debtor account on `settlement_date`; `booked_at`
+    # is when that happened, NULL until then.
+    """
+    CREATE TABLE IF NOT EXISTS payment (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id          INTEGER NOT NULL REFERENCES file (id),
+        pmt_inf_id       TEXT,
+        end_to_end_id    TEXT,
+        instruction_id   TEXT,
+        -- the held debtor account's id, NULL when the bank does not hold it
+        account_id       TEXT,
+        debtor_iban      TEXT,
+        amount           INTEGER,
+        currency         TEXT,
+        creditor_name    TEXT,
+        creditor_iban    TEXT,
+        creditor_bic     TEXT,
+        -- accepted or rejected, and for rejected the ISO 20022 reason code
+        status           TEXT NOT NULL,
+        reason           TEXT,
+        reason_text      TEXT,
+        settlement_date  TEXT,
+        booked_at        TEXT
+    )
+    """,
 ]
 
 # Created after the tables have been brought up to date: an index on a column
@@ -93,13 +136,20 @@ INDEXES = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_account_iban ON account (iban)",
     # The request log is read newest-first and pruned oldest-first.
     "CREATE INDEX IF NOT EXISTS ix_request_log_at ON request_log (at)",
+    # The duplicate check, and a tester looking a payment up by the id their
+    # client matches on.
+    "CREATE INDEX IF NOT EXISTS ix_file_msg_id ON file (msg_id)",
+    "CREATE INDEX IF NOT EXISTS ix_payment_end_to_end_id ON payment (end_to_end_id)",
+    # What is waiting to book, per account: the insufficient-funds check and
+    # the clock both ask it.
+    "CREATE INDEX IF NOT EXISTS ix_payment_due ON payment (account_id, booked_at)",
 ]
 
 # The schema's version, kept in the file as `PRAGMA user_version`. Bump it
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class DatabaseError(Exception):
