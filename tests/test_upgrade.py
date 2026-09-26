@@ -37,7 +37,7 @@ class FromAnOlderFile(FileDatabaseCase):
         conn.execute(
             "INSERT INTO account (id, name, iban, bic, currency, balance,"
             " behaviour) VALUES ('ACME', 'Acme Distribution GmbH',"
-            " 'DE77999000000000000100', 'MOCKDEFFXXX', 'EUR', 9999, 'accept')")
+            " 'DE28999000000000000100', 'MOCKDEFFXXX', 'EUR', 9999, 'accept')")
         conn.commit()
         conn.close()
 

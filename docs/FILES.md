@@ -25,15 +25,24 @@ first.
 | --- | --- |
 | `mockbank/__init__.py` | The package docstring, `__version__` read from `pyproject.toml` in a checkout or from the installed metadata otherwise, and the public names `Config` and `make_server`. |
 | `mockbank/__main__.py` | The command line: `build_parser()` (which `tools/check_docs.py` reads to find every flag) and `main()`. |
-| `mockbank/accounts.py` | `BEHAVIOURS`: every account behaviour with what the bank does, declared once. The command line's epilog, the README's behaviour table check and, later, `decide()` all read it. |
-| `mockbank/server.py` | The HTTP surface: `Config`, the in-process `State`, the request handler with the control plane, the index page, and `make_server()`. Unbuilt surfaces answer 404 naming what is supported and what is planned. |
+| `mockbank/accounts.py` | `BEHAVIOURS`: every account behaviour with what the bank does, declared once - the command line's epilog, the README's behaviour table check and, later, `decide()` all read it. Then the account itself: `FIELDS` (every field a caller may set) and a `check()` that refuses an unknown field or behaviour by naming what would have been accepted, over `create`, `update`, `listing` and the `by_iban` lookup the pipeline uses. |
+| `mockbank/db.py` | SQLite: `SCHEMA` and `INDEXES` as declarations, `SCHEMA_VERSION` recorded in the file, a `connect()` that upgrades an older file and refuses a newer one, the control plane's one timestamp format, the IBAN check digits, and the fixed four-account seed. Balances are integers in minor units; there is no float in it. |
+| `mockbank/server.py` | The HTTP surface: `Config`, the `State` holding the connection and the lock over it, the router, the control plane and the accounts endpoints, the index page built from what this build answers, and `make_server()`. Every answer leaves through one place, so every request is logged before its answer goes out. Unbuilt surfaces answer 404 naming what is supported and what is planned. |
 
 ## `tests/` - end-to-end, over HTTP
 
 | File | What it is |
 | --- | --- |
-| `tests/support.py` | `MockServerCase`: starts a real server on an ephemeral port per test class and offers `get`/`post`/`request` helpers returning a `Response` with `.json()`. Arms a faulthandler watchdog when `MOCKBANK_TEST_WATCHDOG` is set. |
-| `tests/test_server.py` | The control plane: health names the version, state counts requests and lists behaviours, reset starts again, the index is HTML, and an unbuilt surface refuses by name. |
+| `tests/support.py` | `MockServerCase`: starts a real server on an ephemeral port per test class and offers `get`/`post`/`patch`/`put`/`request` helpers returning a `Response` with `.json()`. `FileDatabaseCase` is the same on a `--db` file that a test can restart, for the questions `:memory:` cannot answer. Arms a faulthandler watchdog when `MOCKBANK_TEST_WATCHDOG` is set. |
+| `tests/test_accounts.py` | The accounts surface: the seed is the same four every time and every seeded IBAN passes a check recomputed the long way, a patched behaviour is what the next `GET` says, an unknown behaviour and a balance that is not minor units are refused by name, two accounts cannot share an IBAN, and `POST /_mock/reset` brings the seed back. |
+| `tests/test_server.py` | The control plane: health names the version and the accounts it holds, state counts requests and agrees with what the accounts endpoint lists, reset starts again, the index is HTML, and an unbuilt surface refuses by name. |
+| `tests/test_upgrade.py` | A `--db` file from an earlier schema: it opens, the balance it held is still there, the columns it lacked take the defaults the schema declares, and the seed does not overwrite it. A file from a newer mock is refused before the port is taken. The fingerprint test fails on purpose when `SCHEMA` changes without a version bump. |
+
+### `tests/fixtures/`
+
+| File | What it is |
+| --- | --- |
+| `tests/fixtures/schema-v0.sql` | The schema as a mock-bank before `SCHEMA_VERSION` 1 would have written it, so the upgrade path is tested from the first version rather than from the first time somebody's file breaks. No release shipped it. |
 
 ## `examples/`
 

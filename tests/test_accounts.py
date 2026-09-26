@@ -6,6 +6,9 @@ reaches them: one `PATCH` turns the bank into one that rejects, and `POST
 see and rely on - the seed being the same seed, a balance being a whole number
 of minor units, and a refusal naming what would have been accepted.
 """
+import os
+import re
+
 from support import MockServerCase
 
 from mockbank import db
@@ -205,3 +208,46 @@ class Methods(MockServerCase):
         resp = self.request("DELETE", "/_mock/accounts/ACME")
         self.assertEqual(resp.status, 405)
         self.assertEqual(resp.json()["allowed"], ["GET", "PATCH"])
+
+
+class TheReadmeSaysWhatTheSeedIs(MockServerCase):
+    """The README's seeded-accounts table, held to the running mock.
+
+    `tools/check_docs.py` checks that documentation exists, not that it is
+    true, and a table of hand-copied IBANs is the kind of prose that goes
+    stale silently - a reader who puts one in a `pain.001` and gets nothing
+    back has no way of telling which of the two is wrong. So this reads the
+    table out of the README and compares it with what the mock serves.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def documented(self):
+        with open(os.path.join(self.ROOT, "README.md"), encoding="utf-8") as handle:
+            readme = handle.read()
+        section = re.search(r"### The accounts it starts with\n(.*?)\n\n### |"
+                            r"### The accounts it starts with\n(.*?)\nTwo rules",
+                            readme, re.S)
+        self.assertIsNotNone(section, "the README no longer has the seeded "
+                                      "accounts table this test checks")
+        rows = {}
+        for line in (section.group(1) or section.group(2)).splitlines():
+            cells = [cell.strip(" `") for cell in line.strip().strip("|").split("|")]
+            if len(cells) == 5 and cells[0] not in ("Id", "---"):
+                rows[cells[0]] = cells
+        return rows
+
+    def test_every_seeded_account_has_a_row_and_the_row_is_right(self):
+        served = {row["id"]: row for row in self.get("/_mock/accounts").json()}
+        documented = self.documented()
+        self.assertEqual(sorted(documented), sorted(served))
+        for identifier, cells in documented.items():
+            with self.subTest(account=identifier):
+                _id, iban, balance, behaviour, _why = cells
+                self.assertEqual(iban, served[identifier]["iban"])
+                self.assertEqual(behaviour, served[identifier]["behaviour"])
+                # "125,000.00 EUR" is the same number as 12500000 minor units.
+                amount, currency = balance.rsplit(" ", 1)
+                self.assertEqual(int(amount.replace(",", "").replace(".", "")),
+                                 served[identifier]["balance"])
+                self.assertEqual(currency, served[identifier]["currency"])

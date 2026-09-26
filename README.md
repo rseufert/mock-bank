@@ -121,6 +121,23 @@ reason codes are the ISO 20022 external codes a real bank uses.
 | `silent` | Sends no `pain.002` at all | none | 0.1 |
 | `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point | 0.1 |
 
+### The accounts it starts with
+
+Four, the same four every time, one per failure you are likely to want. The
+IBANs carry real mod-97 check digits and the bank codes are invented, so they
+are valid to parse and belong to nobody.
+
+| Id | IBAN | Balance | Behaviour | Why it is there |
+| --- | --- | --- | --- | --- |
+| `ACME` | `DE28999000000000000100` | 125,000.00 EUR | `accept` | The debtor everything works from |
+| `GLOBEX` | `DE44999000000000000200` | 12.50 EUR | `insufficient-funds` | One ordinary payment breaches it |
+| `INITECH` | `DE33777000000000000300` | 0.00 EUR | `closed-account` | Closed; the creditor a payment is rejected for with `AC04` |
+| `EURODIS` | `DE14888000000000000400` | 0.00 EUR | `bad-bank-id` | A `BIC` of the right shape (`ZZZZDE99XXX`) that resolves to nothing |
+
+Balances are whole numbers of minor units everywhere the mock talks about
+money: 12.50 EUR is `1250`, and `PATCH`ing `12.50` is a `400` rather than a
+rounding. `POST /_mock/reset` brings these four back exactly as they are here.
+
 Two rules hold whatever the behaviour, because real banks apply them:
 
 - A payment received after the cutoff (default 15:00 bank time) settles on the
@@ -137,7 +154,9 @@ like mock-edi's so the two feel the same.
 | Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks | now |
 | Payment file in | `POST /payments` | Answers with a JSON summary: accepted, rejected, what is queued | 0.1 |
 | Collect answers | `GET /_mock/mailbox` | `?leave` to peek, `?raw` for the XML | 0.1 |
-| Accounts | `GET/POST /_mock/accounts`, `PATCH /_mock/accounts/<id>` | Balances, behaviour, holiday list | 0.1 |
+| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
+| Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
+| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on | 0.1 |
 | Clock | `POST /_mock/advance` | `?days=N` or `?to=YYYY-MM-DD`; releases statements and returns that come due | 0.1 |
 | Validate only | `POST /_mock/validate` | Findings in prose, nothing changed | 0.1 |
 | Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders | 0.2 |
@@ -167,8 +186,9 @@ docker run -p 8080:8080 mock-bank
 ## Layout
 
 ```
-mockbank/accounts.py   the account behaviours, declared once
-mockbank/server.py     the HTTP surface: control plane today, the pipeline as 0.1 lands
+mockbank/accounts.py   the account behaviours, and what a valid account is
+mockbank/db.py         the schema, the upgrade, and the seeded accounts
+mockbank/server.py     the HTTP surface: control plane and accounts today, the pipeline as 0.1 lands
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
