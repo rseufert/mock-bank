@@ -36,7 +36,11 @@ rehearse. This is the counterparty that does them on demand.
   a duplicate, a late return, a silent bank, a statement with a hole in it —
   each one `PATCH` away, never a code change.
 - **It validates its own output.** Every message the mock writes is checked
-  against the same rules it checks yours against. There is a test for it.
+  against the same rules it checks yours against, for every account behaviour:
+  that is `GeneratedMessagesAreValid` in `tests/test_dictionary.py`. And
+  because those rules could be wrong in the same way the writers are, the
+  dictionary is held to files from outside the project and, by
+  `tools/check_xsd.py`, to the published XSDs.
 - **No sleeping.** Settlement dates, cutoffs and returns move on a clock that
   `POST /_mock/advance` moves, so a three-day return is a test line, not a wait.
 

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ISO 20022 example — camt.054.001.08 (BankToCustomerDebitCreditNotification).
+  Stress exercise for the parser's grammar corners: a prefixed namespace binding
+  (xmlns:ntfy) instead of a default xmlns, multiple entries mixing credit and
+  debit, currency attributes, nested bank-transaction-code hierarchies,
+  entry-detail transaction references, and a SupplementaryData envelope carrying
+  proprietary extension elements.
+-->
+<ntfy:Document xmlns:ntfy="urn:iso:std:iso:20022:tech:xsd:camt.054.001.08">
+  <ntfy:BkToCstmrDbtCdtNtfctn>
+    <ntfy:GrpHdr>
+      <ntfy:MsgId>NTFY-20260116-0001</ntfy:MsgId>
+      <ntfy:CreDtTm>2026-01-16T18:00:00</ntfy:CreDtTm>
+    </ntfy:GrpHdr>
+    <ntfy:Ntfctn>
+      <ntfy:Id>NTFY-001</ntfy:Id>
+      <ntfy:Acct>
+        <ntfy:Id><ntfy:IBAN>DE89370400440532013000</ntfy:IBAN></ntfy:Id>
+        <ntfy:Ccy>EUR</ntfy:Ccy>
+      </ntfy:Acct>
+      <ntfy:Ntry>
+        <ntfy:Amt Ccy="EUR">1500.00</ntfy:Amt>
+        <ntfy:CdtDbtInd>CRDT</ntfy:CdtDbtInd>
+        <ntfy:Sts><ntfy:Cd>BOOK</ntfy:Cd></ntfy:Sts>
+        <ntfy:BookgDt><ntfy:DtTm>2026-01-16T17:45:00</ntfy:DtTm></ntfy:BookgDt>
+        <ntfy:BkTxCd>
+          <ntfy:Domn>
+            <ntfy:Cd>PMNT</ntfy:Cd>
+            <ntfy:Fmly>
+              <ntfy:Cd>RCDT</ntfy:Cd>
+              <ntfy:SubFmlyCd>ESCT</ntfy:SubFmlyCd>
+            </ntfy:Fmly>
+          </ntfy:Domn>
+        </ntfy:BkTxCd>
+        <ntfy:NtryDtls>
+          <ntfy:TxDtls>
+            <ntfy:Refs>
+              <ntfy:EndToEndId>E2E-0001</ntfy:EndToEndId>
+              <ntfy:TxId>TX-20260116-0001</ntfy:TxId>
+            </ntfy:Refs>
+            <ntfy:AmtDtls>
+              <ntfy:TxAmt><ntfy:Amt Ccy="EUR">1500.00</ntfy:Amt></ntfy:TxAmt>
+            </ntfy:AmtDtls>
+            <ntfy:RltdPties>
+              <ntfy:Dbtr><ntfy:Pty><ntfy:Nm>Example Corp</ntfy:Nm></ntfy:Pty></ntfy:Dbtr>
+            </ntfy:RltdPties>
+            <ntfy:RmtInf><ntfy:Ustrd>Invoice 2026-0042</ntfy:Ustrd></ntfy:RmtInf>
+          </ntfy:TxDtls>
+        </ntfy:NtryDtls>
+      </ntfy:Ntry>
+      <ntfy:Ntry>
+        <ntfy:Amt Ccy="USD">42.50</ntfy:Amt>
+        <ntfy:CdtDbtInd>DBIT</ntfy:CdtDbtInd>
+        <ntfy:Sts><ntfy:Cd>BOOK</ntfy:Cd></ntfy:Sts>
+        <ntfy:BookgDt><ntfy:DtTm>2026-01-16T17:50:00</ntfy:DtTm></ntfy:BookgDt>
+        <ntfy:BkTxCd>
+          <ntfy:Domn>
+            <ntfy:Cd>PMNT</ntfy:Cd>
+            <ntfy:Fmly>
+              <ntfy:Cd>ICDT</ntfy:Cd>
+              <ntfy:SubFmlyCd>XBCT</ntfy:SubFmlyCd>
+            </ntfy:Fmly>
+          </ntfy:Domn>
+        </ntfy:BkTxCd>
+        <ntfy:NtryDtls>
+          <ntfy:TxDtls>
+            <ntfy:Refs>
+              <ntfy:EndToEndId>E2E-0002</ntfy:EndToEndId>
+            </ntfy:Refs>
+            <ntfy:Chrgs>
+              <ntfy:TtlChrgsAndTaxAmt Ccy="USD">1.25</ntfy:TtlChrgsAndTaxAmt>
+            </ntfy:Chrgs>
+          </ntfy:TxDtls>
+        </ntfy:NtryDtls>
+      </ntfy:Ntry>
+    </ntfy:Ntfctn>
+    <ntfy:SplmtryData>
+      <ntfy:Envlp>
+        <ChannelInfo xmlns="urn:example:bank:extensions">
+          <Channel>MOBILE</Channel>
+          <SessionRef>SESS-8842</SessionRef>
+        </ChannelInfo>
+      </ntfy:Envlp>
+    </ntfy:SplmtryData>
+  </ntfy:BkToCstmrDbtCdtNtfctn>
+</ntfy:Document>
