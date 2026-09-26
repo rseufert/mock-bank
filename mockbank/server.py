@@ -25,6 +25,7 @@ import binascii
 import hmac
 import html
 import json
+import socketserver
 import sqlite3
 import sys
 import threading
@@ -795,6 +796,28 @@ class _Server(ThreadingHTTPServer):
 
     daemon_threads = True
     state: State
+
+    def server_bind(self):
+        """Bind without asking DNS what this machine is called.
+
+        ``HTTPServer.server_bind`` sets ``server_name`` from
+        ``socket.getfqdn(host)``, a reverse lookup on the bind address. On a
+        host with no reverse record for what it is binding - a CI runner, a
+        container on a network with no resolver for ``0.0.0.0`` - that lookup
+        waits for DNS to time out, and the mock does not finish starting until
+        it does. It cost a minute on the macOS runner, which is how it was
+        found: the exposure warning appeared and the "listening on" banner did
+        not, with only the bind between them.
+
+        Nothing here needs the FQDN. ``server_name`` and ``server_port`` are
+        read by the CGI handlers in ``http.server``, which this does not use, so
+        the address as given is both cheaper and more honest: it is what the
+        mock was told to bind.
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
     def server_close(self):
         super().server_close()

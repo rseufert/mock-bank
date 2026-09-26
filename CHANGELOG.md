@@ -10,6 +10,14 @@ says so where it does.
 
 ### Fixed
 
+- **Binding `0.0.0.0` no longer waits for DNS before the mock finishes
+  starting.** `http.server` sets its `server_name` from a reverse lookup on the
+  bind address; on a host with no reverse record for what it is binding - a CI
+  runner, or a container on a network with no resolver for `0.0.0.0`, which is
+  what the image binds - that lookup waited for DNS to time out first. It cost a
+  minute on a macOS runner. Nothing in the mock needs the name, so the address
+  as given is used instead.
+
 - **A field sent as the wrong JSON type is a `400` naming that field**, not a
   `500` with a traceback. `POST /_mock/accounts` with `{"id": 5}`, or a `name`
   sent as an object or an `iban` as a list, used to reach SQLite and fail

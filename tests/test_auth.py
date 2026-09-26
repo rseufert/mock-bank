@@ -346,6 +346,28 @@ class TheWarningAtStartup(unittest.TestCase):
         self.assertNotIn("WARNING", err)
 
 
+class StartingUpDoesNotWaitForDns(unittest.TestCase):
+    """The bind must not ask DNS what this machine is called.
+
+    `HTTPServer.server_bind` sets `server_name` from `socket.getfqdn(host)`. On
+    a host with no reverse record for the address it is binding, that waits for
+    DNS to time out before the mock finishes starting - a minute on the macOS
+    runner, where it was found. A timing assertion would be flaky, so this pins
+    the thing that made it slow: the name is the address as given, not something
+    a resolver invented.
+    """
+
+    def test_the_server_name_is_the_address_it_was_told_to_bind(self):
+        from mockbank.server import Config, make_server
+        httpd = make_server(Config(host="127.0.0.1", port=0, quiet=True))
+        try:
+            self.assertEqual(httpd.server_name, "127.0.0.1")
+            # What the lookup would have produced instead.
+            self.assertNotIn("arpa", httpd.server_name)
+        finally:
+            httpd.server_close()
+
+
 class AuthThatCouldNeverWork(unittest.TestCase):
     """`--auth secret` looks like it works, and then nothing can authenticate."""
 
