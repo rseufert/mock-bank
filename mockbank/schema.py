@@ -88,6 +88,7 @@ CHOICES = {
 CODE_SETS = {
     "ExternalPaymentGroupStatus1Code": {
         "ACCP": "AcceptedCustomerProfile: preceding checks passed, the customer profile too",
+        "ACCC": "AcceptedCreditSettlementCompleted: the creditor's account has been credited",
         "ACSC": "AcceptedSettlementCompleted: the debtor's account has been debited",
         "ACSP": "AcceptedSettlementInProcess: all checks passed, settlement is under way",
         "ACTC": "AcceptedTechnicalValidation: the file passed syntactic and semantic validation",
@@ -99,6 +100,7 @@ CODE_SETS = {
     },
     "ExternalPaymentTransactionStatus1Code": {
         "ACCP": "AcceptedCustomerProfile: preceding checks passed, the customer profile too",
+        "ACCC": "AcceptedCreditSettlementCompleted: the creditor's account has been credited",
         "ACSC": "AcceptedSettlementCompleted: the debtor's account has been debited",
         "ACSP": "AcceptedSettlementInProcess: all checks passed, settlement is under way",
         "ACTC": "AcceptedTechnicalValidation: the payment passed syntactic and semantic validation",
@@ -214,6 +216,7 @@ PATTERNS = {
     "LEIIdentifier": r"[A-Z0-9]{18}[0-9]{2}",
     "UUIDv4Identifier": r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}",
     "External4Code": r"[A-Za-z0-9]{1,4}",
+    "Exact4AlphaNumeric": r"[a-zA-Z0-9]{4}",
     "External5Code": r"[A-Za-z0-9]{1,5}",
     "External35Code": r".{1,35}",
 }
@@ -438,7 +441,11 @@ def country(name="Ctry"):
 
 def postal_address(v, name="PstlAdr"):
     if v >= 9:
-        adr_tp = code_or_proprietary("AdrTp", codes="AddressType2Code").opt
+        # AddressType3Choice: the proprietary alternative is an identifier
+        # with its issuer, not a line of text (GenericIdentification30).
+        adr_tp = Choice("AdrTp", Code("Cd", codes="AddressType2Code"),
+                        Group("Prtry", Ident("Id", 4, pattern="Exact4AlphaNumeric"),
+                              Text("Issr", 35), Text("SchmeNm", 35).opt)).opt
     else:
         adr_tp = Code("AdrTp", codes="AddressType2Code").opt
     lines = [adr_tp, Text("Dept", 70).opt, Text("SubDept", 70).opt,
@@ -571,7 +578,7 @@ def entry():
     v = 9
     refs = Group("Refs", Ident("MsgId").opt, Ident("AcctSvcrRef").opt,
                  Ident("PmtInfId").opt, Ident("InstrId").opt, Ident("EndToEndId").opt,
-                 Ident("UETR", pattern="UUIDv4Identifier").opt, Ident("TxId").opt,
+                 Ident("UETR", 36, pattern="UUIDv4Identifier").opt, Ident("TxId").opt,
                  iso="TransactionReferences6")
     instructed = Group("InstdAmt", Amt("Amt"))
     amount_details = Group("AmtDtls", instructed.opt, Group("TxAmt", Amt("Amt")).opt)
@@ -625,7 +632,7 @@ def pain001(v):
                    iso="GroupHeader85" if v >= 9 else "GroupHeader32")
     if v >= 9:
         payment_id = Group("PmtId", Ident("InstrId").opt, Ident("EndToEndId"),
-                           Ident("UETR", pattern="UUIDv4Identifier").opt)
+                           Ident("UETR", 36, pattern="UUIDv4Identifier").opt)
     else:
         payment_id = Group("PmtId", Ident("InstrId").opt, Ident("EndToEndId"))
     equivalent = Group("EqvtAmt", Amt("Amt"), currency("CcyOfTrf"))
@@ -672,7 +679,7 @@ def pain002():
         iso="OriginalTransactionReference28")
     transaction = Group(
         "TxInfAndSts", Ident("StsId").opt, Ident("OrgnlInstrId").opt,
-        Ident("OrgnlEndToEndId").opt, Ident("OrgnlUETR", pattern="UUIDv4Identifier").opt,
+        Ident("OrgnlEndToEndId").opt, Ident("OrgnlUETR", 36, pattern="UUIDv4Identifier").opt,
         Code("TxSts", codes="ExternalPaymentTransactionStatus1Code").opt,
         status_reason(v).many(), DateTime("AccptncDtTm").opt,
         Ident("AcctSvcrRef").opt, Ident("ClrSysRef").opt, original_tx.opt,

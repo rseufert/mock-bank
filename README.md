@@ -36,7 +36,11 @@ rehearse. This is the counterparty that does them on demand.
   a duplicate, a late return, a silent bank, a statement with a hole in it —
   each one `PATCH` away, never a code change.
 - **It validates its own output.** Every message the mock writes is checked
-  against the same rules it checks yours against. There is a test for it.
+  against the same rules it checks yours against, for every account behaviour:
+  that is `GeneratedMessagesAreValid` in `tests/test_dictionary.py`. And
+  because those rules could be wrong in the same way the writers are, the
+  dictionary is held to files from outside the project and, by
+  `tools/check_xsd.py`, to the published XSDs.
 - **No sleeping.** Settlement dates, cutoffs and returns move on a clock that
   `POST /_mock/advance` moves, so a three-day return is a test line, not a wait.
 
@@ -310,15 +314,22 @@ Every flag `mock-bank --help` lists:
 | `--clock` | now | Start bank time at `YYYY-MM-DDTHH:MM` instead of now, for a run whose settlement dates are reproducible. `POST /_mock/reset` returns here. |
 | `--allow-duplicates` | off | Accept a file whose `MsgId` the bank has already received. Off, it is rejected with `DUPL`, as a real bank does. |
 | `--status-delay-ms` | `0` | How long after a file arrives its `pain.002` is due. `0` so a test sees it at once; a real bank takes a few minutes. |
-| `--quiet`, `-q` | off | Log nothing per request. |
+| `--auth` | off | Require HTTP basic `USER:PASSWORD` on every request, including `/_mock/health` and `/`. Without it, anyone who can reach the port can reset the bank. A value with no colon, or an empty user or password, is refused at startup rather than accepted as a credential nothing could match. |
+| `--quiet`, `-q` | off | Log nothing per request. Does not silence the startup warning about an unguarded non-loopback bind. |
 | `--version` | | Print the version and exit. |
 
 ## Docker
 
 ```bash
 docker build -t mock-bank .
-docker run -p 8080:8080 mock-bank
+docker run -p 8080:8080 mock-bank --auth tester:s3cret
 ```
+
+The image binds `0.0.0.0`, because `127.0.0.1` inside a container cannot be
+reached from outside it. That means anyone who can reach the port can
+`POST /_mock/reset`, rewrite every account's balance and behaviour, and read
+every message the bank has written — so pass `--auth`, and the mock says so on
+stderr at startup if you do not. `-q` does not silence that warning.
 
 ## Layout
 

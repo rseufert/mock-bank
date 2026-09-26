@@ -1,13 +1,18 @@
-"""The ISO 20022 dictionary: what it serves, and how it builds a message."""
+"""The ISO 20022 dictionary: what it serves, how it builds a message, and
+GeneratedMessagesAreValid - everything the mock writes, checked against the
+dictionary and the dictionary against samples from outside the project."""
 import datetime
+import glob
 import json
 import os
+import re
 import unittest
 from xml.etree import ElementTree as ET
 
 from support import MockServerCase
 
 from mockbank import schema
+from mockbank.accounts import BEHAVIOURS
 
 SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 CLEAN = os.path.join(SAMPLES, "pain001_four_payments.xml")
@@ -150,6 +155,182 @@ def _replace(mapping, header, **changes):
             changed[key] = value
     body = dict(mapping["CstmrCdtTrfInitn"], GrpHdr=changed)
     return {"CstmrCdtTrfInitn": body}
+
+
+
+
+# -- the mock's own output, and samples from outside the project -----------------
+
+PAIN002 = schema.MESSAGES["pain.002.001.10"]
+CAMT054 = schema.MESSAGES["camt.054.001.08"]
+CAMT053 = schema.MESSAGES["camt.053.001.08"]
+EXTERNAL = os.path.join(SAMPLES, "external")
+ZONED = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
+
+
+class GeneratedMessagesAreValid(MockServerCase):
+    """Every message the mock writes walks against its own dictionary with no
+    finding at all - not even a warning, since the mock only writes what it
+    declares - for every behaviour an account can have.
+
+    For each behaviour the sample file is sent, the clock is advanced through
+    its settlement and a statement, and the mailbox is collected. The kinds and
+    numbers of message each behaviour must produce are pinned in EXPECTED, so a
+    path that stops producing messages fails rather than passing because it
+    produced nothing to check.
+    """
+
+    config_kwargs = {"clock": "2026-10-01T09:00"}       # a Thursday, before the cutoff
+    FRIDAY = "2026-10-02"
+
+    # behaviour -> (the account it is set on, other fields to PATCH, how many
+    # times the sample is sent, {message: how many the bank sends}). The sample
+    # pays GLOBEX, INITECH (closed), EURODIS (bad-bank-id) and a creditor at
+    # another bank; three open accounts each get Thursday's statement.
+    EXPECTED = {
+        "accept": ("ACME", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+        "closed-account": ("GLOBEX", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+        "insufficient-funds": ("ACME", {"balance": 200000}, 1,
+                               {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+        "bad-bank-id": ("GLOBEX", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+        "return-later": ("ACME", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+        "reject-file": ("ACME", {}, 1, {PAIN002: 1, CAMT053: 3}),
+        "duplicate-file": ("ACME", {}, 2, {PAIN002: 2, CAMT054: 1, CAMT053: 3}),
+        "silent": ("ACME", {}, 1, {CAMT054: 1, CAMT053: 3}),
+        "statement-gap": ("ACME", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+    }
+
+    def collect_for(self, behaviour):
+        account, fields, sends, _ = self.EXPECTED[behaviour]
+        self.post("/_mock/reset")
+        resp = self.request("PATCH", "/_mock/accounts/" + account,
+                            body=dict(fields, behaviour=behaviour))
+        self.assertEqual(resp.status, 200, resp.body)
+        for _ in range(sends):
+            self.post("/payments", body=sample_text())
+        self.assertEqual(self.post("/_mock/advance?to=" + self.FRIDAY).status, 200)
+        return self.get("/_mock/mailbox").json()
+
+    def test_every_behaviour_is_exercised(self):
+        self.assertEqual(set(self.EXPECTED), set(BEHAVIOURS),
+                         "a behaviour whose output this test does not check")
+
+    def test_every_message_walks_clean_for_every_behaviour(self):
+        checked = 0
+        for behaviour in sorted(BEHAVIOURS):
+            with self.subTest(behaviour):
+                collected = self.collect_for(behaviour)
+                counts = {}
+                for item in collected:
+                    root = ET.fromstring(item["body"].encode("utf-8"))
+                    message = schema.identify(root)
+                    self.assertIsNotNone(message, item["type"])
+                    self.assertEqual(schema.check(message, root), [],
+                                     "%s under %s" % (item["type"], behaviour))
+                    counts[message] = counts.get(message, 0) + 1
+                    checked += 1
+                self.assertEqual(counts, self.EXPECTED[behaviour][3])
+        self.assertEqual(checked, sum(sum(e[3].values()) for e in self.EXPECTED.values()))
+
+    def test_every_seeded_account_as_a_debtor(self):
+        from test_payments import UMBRELLA, pain001
+        accounts = self.get("/_mock/accounts").json()
+        self.assertEqual(len(accounts), 4)
+        for account in accounts:
+            with self.subTest(account["id"]):
+                self.post("/_mock/reset")
+                self.post("/payments", body=pain001(
+                    "DEBTOR-" + account["id"], account["iban"], [("E1", 100, UMBRELLA)],
+                    when=datetime.date(2026, 10, 1)))
+                self.post("/_mock/advance?to=" + self.FRIDAY)
+                collected = self.get("/_mock/mailbox").json()
+                self.assertIn(PAIN002.name, [m["type"] for m in collected])
+                for item in collected:
+                    root = ET.fromstring(item["body"].encode("utf-8"))
+                    self.assertEqual(schema.check(schema.identify(root), root), [])
+
+    def test_elements_sit_where_the_standard_puts_them(self):
+        """Checked by position, which a shared dictionary cannot satisfy by
+        accident: these are the standard's rules, not the declaration's."""
+        collected = self.collect_for("accept")
+        seen = set()
+        for item in collected:
+            root = ET.fromstring(item["body"].encode("utf-8"))
+            message = schema.identify(root)
+            seen.add(message.name)
+            body = root[0]
+            names = [schema.split_tag(e.tag)[1] for e in body]
+            self.assertEqual(names[0], "GrpHdr", message.name)
+            if message is PAIN002:
+                self.assertLess(names.index("OrgnlGrpInfAndSts"),
+                                names.index("OrgnlPmtInfAndSts"))
+            for report in body[1:]:
+                parts = [schema.split_tag(e.tag)[1] for e in report]
+                if "Bal" in parts and "Ntry" in parts:
+                    self.assertLess(max(i for i, n in enumerate(parts) if n == "Bal"),
+                                    min(i for i, n in enumerate(parts) if n == "Ntry"))
+            for path, decl, elem in schema.walk(message, root):
+                if decl.type == "amount":
+                    self.assertTrue(elem.get("Ccy"), path)
+                if decl.type == "datetime":
+                    self.assertRegex(elem.text, ZONED, path)
+        self.assertEqual(seen, {PAIN002.name, CAMT054.name, CAMT053.name})
+
+
+class ExternalSamples(unittest.TestCase):
+    """Files written outside this project, which the published XSD accepts (or,
+    in invalid/, rejects). tests/samples/external/SOURCES.md says where each
+    came from; tools/check_xsd.py confirms the XSD's verdict."""
+
+    def walk(self, path):
+        root = ET.parse(path).getroot()
+        message = schema.identify(root)
+        self.assertIsNotNone(message, path)
+        return message, schema.check(message, root)
+
+    def test_every_valid_sample_walks_without_an_error(self):
+        paths = sorted(glob.glob(os.path.join(EXTERNAL, "*.xml")))
+        spoken = set()
+        for path in paths:
+            with self.subTest(os.path.basename(path)):
+                message, findings = self.walk(path)
+                spoken.add(message.name)
+                self.assertEqual([f for f in findings if f.level == "error"], [])
+        # at least one outside sample for every message the mock writes, and
+        # for the pain.001 it reads
+        self.assertLessEqual({"pain.001.001.09", PAIN002.name, CAMT054.name, CAMT053.name},
+                             spoken)
+
+    def test_every_invalid_sample_is_rejected(self):
+        paths = sorted(glob.glob(os.path.join(EXTERNAL, "invalid", "*.xml")))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(os.path.basename(path)):
+                _, findings = self.walk(path)
+                self.assertTrue([f for f in findings if f.level == "error"])
+
+    def test_the_xsd_sources_agree_with_the_tool_that_fetches_them(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "check_xsd.py")
+        spec = importlib.util.spec_from_file_location("check_xsd", path)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        with open(os.path.join(EXTERNAL, "SOURCES.md"), encoding="utf-8") as handle:
+            sources = handle.read()
+        for name, (url, digest) in tool.XSDS.items():
+            with self.subTest(name):
+                commit = url.split("/")[5]
+                self.assertIn("`%s.xsd`" % name, sources)
+                self.assertIn(commit, sources)
+                self.assertIn(digest, sources)
+
+    def test_every_sample_is_accounted_for(self):
+        with open(os.path.join(EXTERNAL, "SOURCES.md"), encoding="utf-8") as handle:
+            sources = handle.read()
+        for path in glob.glob(os.path.join(EXTERNAL, "**", "*.xml"), recursive=True):
+            relative = os.path.relpath(path, EXTERNAL).replace(os.sep, "/")
+            self.assertIn("`%s`" % relative, sources, "no source recorded for " + relative)
 
 
 if __name__ == "__main__":
