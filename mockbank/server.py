@@ -588,8 +588,15 @@ class Handler(BaseHTTPRequestHandler):
         params: List[Any] = []
         wanted = _first(query, "path")
         if wanted:
-            sql += " WHERE path LIKE ?"
-            params.append(wanted + "%")
+            # A literal prefix, not a LIKE pattern. With LIKE, `_` and `%` in
+            # the caller's input are wildcards, so `?path=/%mock` matched
+            # `/xmock/zzz` - and every `/_mock` path contains an `_`, so the
+            # filter could show requests the client never sent. LIKE ignores
+            # ASCII case too. The request log exists to answer "what did my
+            # client actually send", and a filter that answers with more than
+            # was asked for defeats the whole point of it.
+            sql += " WHERE substr(path, 1, length(?)) = ?"
+            params.extend([wanted, wanted])
         params.append(REQUEST_LOG_PAGE)
         return db.rows(conn=self.state.conn,
                        sql=sql + " ORDER BY id DESC LIMIT ?", params=params)

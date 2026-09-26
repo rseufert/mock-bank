@@ -10,6 +10,7 @@ behaviour, and sent through the real pipeline where the point is that the two
 agree. A test that only ever inserted rows could not tell that the mailbox and
 the writers disagree about a column.
 """
+import urllib.parse
 from xml.etree import ElementTree as ET
 
 # test_payments brings in support, which puts the checkout on sys.path
@@ -129,6 +130,16 @@ class FilteringByType(MailboxCase):
         self.get("/_mock/mailbox?type=pain.002")
         left = self.get("/_mock/mailbox").json()
         self.assertEqual([item["type"] for item in left], [CAMT054])
+
+    def test_the_type_filter_is_a_literal_prefix_too(self):
+        for pattern in ("pain%", "pain_002", "PAIN.002", "%"):
+            with self.subTest(type=pattern):
+                self.assertEqual(
+                    self.get("/_mock/mailbox?leave&type=%s"
+                             % urllib.parse.quote(pattern)).json(), [],
+                    "%r matched something" % pattern)
+        # Nothing was taken while all that was being refused.
+        self.assertEqual(len(self.get("/_mock/mailbox?leave").json()), 2)
 
     def test_a_type_nothing_matches_is_an_empty_list_not_an_error(self):
         resp = self.get("/_mock/mailbox?type=camt.053")
@@ -288,6 +299,23 @@ class TheRequestLog(PipelineCase):
         self.get("/_mock/health")
         rows = self.get("/_mock/requests?path=/payments").json()
         self.assertEqual({row["path"] for row in rows}, {"/payments"})
+
+    def test_the_filter_is_a_literal_prefix_not_a_pattern(self):
+        # With LIKE, `_` and `%` in the caller's input are wildcards and case is
+        # ignored, so `?path=/%mock` matched paths the client never sent - and
+        # every /_mock path contains an `_`. The log exists to answer "what did
+        # my client actually send"; a filter that answers with more than it was
+        # given defeats the point of it.
+        self.get("/_mock/health")
+        self.send(sample("pain001_four_payments.xml"))
+        for pattern in ("/%mock", "/_%", "/%", "/_ock", "/PAYMENTS", "/paymentsX"):
+            with self.subTest(path=pattern):
+                self.assertEqual(self.get("/_mock/requests?path=%s"
+                                          % urllib.parse.quote(pattern)).json(), [],
+                                 "%r matched something" % pattern)
+        # And the literal one still works, underscore and all.
+        rows = self.get("/_mock/requests?path=/_mock/health").json()
+        self.assertEqual({row["path"] for row in rows}, {"/_mock/health"})
 
     def test_a_path_nothing_matches_is_an_empty_list(self):
         self.assertEqual(self.get("/_mock/requests?path=/nope").json(), [])

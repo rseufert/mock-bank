@@ -114,8 +114,13 @@ def collect(conn, now, leave=False, kind="") -> List[Dict[str, Any]]:
            " FROM message WHERE released_at IS NOT NULL AND taken_at IS NULL")
     params: List[Any] = []
     if kind:
-        sql += " AND type LIKE ?"
-        params.append(kind + "%")
+        # A literal prefix, not a LIKE pattern. LIKE would make `_` and `%` in
+        # the caller's own input into wildcards - and every message type is full
+        # of dots and would soon have had an `_` in it - and LIKE is
+        # case-insensitive for ASCII, so `PAIN.002` would match too. A filter
+        # that quietly matches more than it was given is worse than no filter.
+        sql += " AND substr(type, 1, length(?)) = ?"
+        params.extend([kind, kind])
     rows = db.rows(conn, sql + " ORDER BY id", params)
     if rows and not leave:
         conn.execute("UPDATE message SET taken_at = ? WHERE id IN (%s)"
