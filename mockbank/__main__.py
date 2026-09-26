@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-duplicates", action="store_true",
                    help="accept a file whose MsgId the bank has seen before "
                         "(by default it is rejected with DUPL, as a real bank does)")
+    p.add_argument("--status-delay-ms", type=int, default=0, metavar="MS",
+                   help="how long after a file arrives its pain.002 is due "
+                        "(default: 0, so a test sees it at once; a few minutes "
+                        "is what a real bank takes)")
     p.add_argument("-q", "--quiet", action="store_true", help="log nothing per request")
     p.add_argument("--version", action="version", version="mock-bank " + __version__)
     return p
@@ -46,7 +50,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = Config(host=args.host, port=args.port, db_path=args.db_path,
                     quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
-                    clock=args.clock, allow_duplicates=args.allow_duplicates)
+                    clock=args.clock, allow_duplicates=args.allow_duplicates,
+                    status_delay_ms=args.status_delay_ms)
     try:
         httpd = make_server(config)
     except Invalid as error:

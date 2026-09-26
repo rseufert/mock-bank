@@ -376,21 +376,15 @@ class Decision:
         return [d for d in self.payments if d.outcome == REJECTED]
 
 
-def settlement_date(requested, today):
-    """The day an accepted payment debits its account.
-
-    Until the clock owns it this is the later of the requested execution
-    date and today, in UTC: a past date executes today, as the validator's
-    DT01 warning says. The cutoff, weekends and holidays are in
-    `clock.settlement_date`, which #7 switches this over to.
-    """
-    if requested is None or requested < today:
-        return today
-    return requested
-
-
-def decide(payment_file, findings, conn, today, allow_duplicates=False):
+def decide(payment_file, findings, conn, clock, received_at, allow_duplicates=False):
     """Decide a payment file. Reads the accounts; changes nothing.
+
+    Each accepted payment settles on ``clock.settlement_date(received_at,
+    requested)``: the later of the requested execution date and the day the
+    bank can start on (today before the cutoff, the next business day at or
+    after it), rolled past weekends and holidays. A past requested date
+    therefore settles as soon as the bank can, as the validator's DT01
+    warning says.
 
     A behaviour describes the account it is set on: ``DEBTOR_SIDE`` ones are
     read from the batch's debtor account, ``CREDITOR_SIDE`` ones from the
@@ -459,7 +453,7 @@ def decide(payment_file, findings, conn, today, allow_duplicates=False):
     decided = []
     for batch in payment_file.batches:
         debtor = debtors[id(batch)]
-        when = settlement_date(batch.requested_execution_date, today)
+        when = clock.settlement_date(received_at, batch.requested_execution_date)
         for payment in batch.payments:
             reason, text = _payment_reason(conn, debtor, batch, payment, errors, available)
             if reason:
@@ -517,10 +511,12 @@ def _pending(conn, account_id):
     return int(found["total"])
 
 
-def book(conn, decision, today):
-    """Record a decided file and its payments, then book what is due.
+def book(conn, decision):
+    """Record a decided file and its payments.
 
-    A file the mock could not read far enough to have a MsgId is not
+    Booking the debits is ``book_due``'s, which ``outbox.release_due`` calls
+    straight after, so the ``camt.054`` for what books is written in the same
+    step. A file the mock could not read far enough to have a MsgId is not
     recorded: there is nothing a duplicate check could match it on. Returns
     the file's row id, or None.
     """
@@ -545,7 +541,6 @@ def book(conn, decision, today):
              p.amount, p.currency, p.creditor_name, p.creditor_account, p.creditor_bic,
              d.outcome, d.reason, d.reason_text,
              d.settlement_date.isoformat() if d.settlement_date else None))
-    book_due(conn, today, commit=False)
     conn.commit()
     return file_id
 
@@ -553,8 +548,8 @@ def book(conn, decision, today):
 def book_due(conn, today, commit=True):
     """Debit every accepted payment whose settlement date has come.
 
-    Called when a file is booked, and the hook the clock (#4, #7) calls as
-    it moves. Returns the payments booked, oldest first.
+    ``outbox.release_due`` calls it when a file arrives and as the clock
+    moves. Returns the payments booked, oldest first.
     """
     due = db.rows(conn, "SELECT * FROM payment WHERE status = ? AND booked_at IS NULL"
                         " AND settlement_date <= ? AND account_id IS NOT NULL ORDER BY id",

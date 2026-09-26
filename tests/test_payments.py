@@ -91,7 +91,8 @@ class TheSampleFile(PipelineCase):
         paid = amounts(text)
         self.assertEqual(before - self.balance("ACME"), paid[0] + paid[3])
 
-    def test_the_readme_example_three_accepted_and_one_ac04(self):
+    def test_the_done_when_case_with_eurodis_patched_to_accept(self):
+        """#6's done-when: with EURODIS accepting, three accepted and one AC04."""
         self.patch_account("EURODIS", behaviour="accept")
         before = self.balance("ACME")
         text = sample("pain001_four_payments.xml")
@@ -296,6 +297,12 @@ class Booking(PipelineCase):
         self.assertEqual((one["status"], one["reason"], one["msg_id"]),
                          ("rejected", "AC04", "ACME-20261001-0001"))
         self.assertEqual(one["amount"], 340050)
+        again = self.send(pain001("SECOND", ACME, [("INV-2026-0102", 100, UMBRELLA)])).json()
+        self.assertEqual(again["accepted"], 1)
+        newest = self.get("/_mock/payments/INV-2026-0102").json()
+        self.assertEqual((newest["msg_id"], newest["status"]), ("SECOND", "accepted"))
+        both = self.get("/_mock/payments/INV-2026-0102?all").json()
+        self.assertEqual([p["msg_id"] for p in both], ["SECOND", "ACME-20261001-0001"])
         missing = self.get("/_mock/payments/NOPE")
         self.assertEqual(missing.status, 404)
         self.assertIn("INV-2026-0101", missing.json()["known"])

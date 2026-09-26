@@ -7,6 +7,11 @@ the two versions alike; the one shape they still differ in, the requested
 execution date (a date in ``.03``, a date-or-datetime choice in ``.09``), is
 evened out here.
 
+The writer half builds what the bank sends back - ``write_pain002`` and
+``write_camt054`` - as mappings handed to ``schema.serialize``, which puts
+every element in the order the dictionary declares. No writer here names an
+element order or concatenates XML; if one does, the declaration is missing.
+
 The reader is forgiving on purpose: what does not fit the declaration is left
 as None rather than raised, because ``validate`` is where a file is judged
 and it has to be able to say what is wrong with any file. Amounts are
@@ -188,3 +193,127 @@ def _requested_date(value) -> Optional[datetime.date]:
         return datetime.date.fromisoformat(value) if isinstance(value, str) else None
     except ValueError:
         return None
+
+
+# -- writing -----------------------------------------------------------------
+
+PAIN002 = schema.MESSAGES["pain.002.001.10"]
+CAMT054 = schema.MESSAGES["camt.054.001.08"]
+
+# The bank's own BIC, as the sample files name it and the seed holds it.
+BANK_BIC = "MOCKNL2A"
+
+
+def _decimal_sum(amounts) -> str:
+    """Amounts [(minor, ccy)] as a decimal string: a control sum."""
+    total = sum((Decimal(minor).scaleb(-schema.exponent(ccy)) for minor, ccy in amounts),
+                Decimal(0))
+    return str(total)
+
+
+def _reason(code, text):
+    """A StsRsnInf: the code, and the prose cut to the 105 characters allowed."""
+    out = {"Rsn": {"Cd": code}}
+    if text:
+        out["AddtlInf"] = [text[:105]]
+    return out
+
+
+def write_pain002(decision, msg_id, created_at) -> bytes:
+    """The status report for a decided file: ``pain.002.001.10``.
+
+    ``OrgnlGrpInfAndSts`` carries the original ``MsgId`` and the group status
+    (``ACCP``, ``PART`` or ``RJCT``). A file rejected outright has that and
+    its reason only. Otherwise there is one ``OrgnlPmtInfAndSts`` per batch,
+    with the batch's own status, and a ``TxInfAndSts`` per payment carrying
+    ``OrgnlEndToEndId``, ``TxSts`` and, for a rejection, ``StsRsnInf/Rsn/Cd``.
+    """
+    payment_file = decision.payment_file
+    payments = payment_file.payments
+    group = {"OrgnlMsgId": payment_file.msg_id,
+             "OrgnlMsgNmId": payment_file.message,
+             "OrgnlNbOfTxs": len(payments),
+             "OrgnlCtrlSum": _decimal_sum((p.amount, p.currency) for p in payments
+                                          if p.amount is not None),
+             "GrpSts": decision.status}
+    if decision.rejected_outright:
+        group["StsRsnInf"] = [_reason(decision.reason, decision.reason_text)]
+    batches = []
+    if not decision.rejected_outright:
+        for batch in payment_file.batches:
+            mine = [d for d in decision.payments if d.batch is batch]
+            accepted = sum(1 for d in mine if d.outcome == "accepted")
+            transactions = []
+            for d in mine:
+                tx = {"OrgnlEndToEndId": d.payment.end_to_end_id,
+                      "TxSts": "ACCP" if d.outcome == "accepted" else "RJCT"}
+                if d.payment.instruction_id:
+                    tx["OrgnlInstrId"] = d.payment.instruction_id
+                if d.outcome != "accepted":
+                    tx["StsRsnInf"] = [_reason(d.reason, d.reason_text)]
+                transactions.append(tx)
+            batches.append({
+                "OrgnlPmtInfId": batch.pmt_inf_id,
+                "OrgnlNbOfTxs": len(mine),
+                "OrgnlCtrlSum": _decimal_sum((d.payment.amount, d.payment.currency)
+                                             for d in mine),
+                "PmtInfSts": ("ACCP" if accepted == len(mine)
+                              else "RJCT" if not accepted else "PART"),
+                "TxInfAndSts": transactions})
+    return schema.serialize(PAIN002, {"CstmrPmtStsRpt": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at,
+                   "DbtrAgt": {"FinInstnId": {"BICFI": BANK_BIC}}},
+        "OrgnlGrpInfAndSts": group,
+        "OrgnlPmtInfAndSts": batches}})
+
+
+def write_camt054(account, payments, day, msg_id, created_at) -> bytes:
+    """The debit notification for one account and one booking:
+    ``camt.054.001.08``.
+
+    One notification per account each time payments book, with an ``Ntry``
+    per payment: everything that books together - on receipt, or as one move
+    of the clock crosses its settlement date - is reported together. That is
+    a choice: banks also send one per payment, and the README says which
+    profile the mock follows. Each entry
+    keeps its ``EndToEndId`` in ``NtryDtls/TxDtls/Refs``, carries the bank
+    transaction code ``schema.BOOKED_DEBIT``, and is booked and valued on
+    ``day``.
+
+    ``account`` is the account row; ``payments`` are its booked payment rows
+    for ``day``, with the original ``msg_id`` joined in.
+    """
+    domain, family, sub = schema.BOOKED_DEBIT
+    entries = []
+    for p in payments:
+        amount = schema.Amount(p["amount"], p["currency"])
+        refs = {"MsgId": p["msg_id"], "EndToEndId": p["end_to_end_id"]}
+        if p["pmt_inf_id"]:
+            refs["PmtInfId"] = p["pmt_inf_id"]
+        if p["instruction_id"]:
+            refs["InstrId"] = p["instruction_id"]
+        tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": "DBIT"}
+        parties = {}
+        if p["creditor_name"]:
+            parties["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
+        if p["creditor_iban"]:
+            parties["CdtrAcct"] = {"Id": (
+                {"IBAN": p["creditor_iban"]} if schema.iban_is_valid(p["creditor_iban"])
+                else {"Othr": {"Id": p["creditor_iban"]}})}
+        if parties:
+            tx["RltdPties"] = parties
+        if p["creditor_bic"]:
+            tx["RltdAgts"] = {"CdtrAgt": {"FinInstnId": {"BICFI": p["creditor_bic"]}}}
+        entries.append({
+            "Amt": amount, "CdtDbtInd": "DBIT", "Sts": {"Cd": "BOOK"},
+            "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
+            "AcctSvcrRef": "MB-PMT-%d" % p["id"],
+            "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
+            "NtryDtls": [{"TxDtls": [tx]}]})
+    return schema.serialize(CAMT054, {"BkToCstmrDbtCdtNtfctn": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at},
+        "Ntfctn": [{"Id": msg_id, "CreDtTm": created_at,
+                    "Acct": {"Id": {"IBAN": account["iban"]}, "Ccy": account["currency"],
+                             "Ownr": {"Nm": account["name"][:140]},
+                             "Svcr": {"FinInstnId": {"BICFI": BANK_BIC}}},
+                    "Ntry": entries}]}})

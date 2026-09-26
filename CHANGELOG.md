@@ -35,6 +35,20 @@ says so where it does.
   Python 3.8 a named zone is refused rather than quietly treated as `UTC`),
   `--cutoff HH:MM` and `--clock YYYY-MM-DDTHH:MM`; `POST /_mock/reset` returns
   bank time to where `--clock` put it rather than to real time.
+- **The bank answers** (#7). A decided file gets a `pain.002.001.10`: the
+  group status with the original `MsgId`, a status per batch, and a
+  `TxInfAndSts` per payment with its `EndToEndId` and, for a rejection, its
+  reason code; a file rejected outright gets its group status and reason
+  only, and a `silent` account none. Each time payments book, the debtor
+  account gets a `camt.054.001.08` with an entry per payment, carrying its
+  `EndToEndId` and `PMNT`/`ICDT`/`ESCT`. Both are built from the dictionary.
+  They wait in a new `message` table (schema version 3) until due -
+  `--status-delay-ms` holds the `pain.002` back - and `GET /_mock/mailbox`
+  collects what is released. `POST /payments` says what is queued and for
+  when, and `GET /_mock/payments/<EndToEndId>` now always answers with the
+  newest payment, `?all` with every one. The README's example now shows what
+  the seed does: two accepted, one `AC04`, one `RC01`.
+
 - **Deciding and booking payments** (#6). `POST /payments` reads, validates
   and decides a `pain.001`, books what is due, and answers `202` with each
   payment's outcome, reason code and settlement date (`422` when the file is
