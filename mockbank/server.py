@@ -580,19 +580,37 @@ class Handler(BaseHTTPRequestHandler):
         if not expected:
             return True
         header = self.headers.get("Authorization", "")
-        if not header.startswith("Basic "):
+        # The scheme name is case-insensitive (RFC 7235), and some clients send
+        # it lowercase.
+        if header[:6].lower() != "basic ":
             return False
         try:
-            given = base64.b64decode(header[6:], validate=True).decode("utf-8")
-        except (binascii.Error, ValueError, UnicodeDecodeError):
+            given = base64.b64decode(header[6:], validate=True)
+        except (binascii.Error, ValueError):
             return False
+        # Bytes, not text, and this is not only tidiness: `compare_digest`
+        # *raises* TypeError on a str containing non-ASCII rather than
+        # returning False, and it is called outside the handler's try. So a
+        # curl with an accented username used to drop the connection, and an
+        # --auth with one could never be satisfied by anything - the operator
+        # believing the port was guarded while nothing could get in, which is
+        # the failure check_auth exists to prevent.
+        #
         # Constant time over the whole `user:password`, so the comparison does
         # not leak how much of the credential was right. The stakes here are
         # low; the one-line version of the right answer costs nothing.
-        return hmac.compare_digest(given, expected)
+        return hmac.compare_digest(given, expected.encode("utf-8"))
 
     def _challenge(self) -> None:
-        """A 401 that says how to authenticate, and nothing about the endpoint."""
+        """A 401 that says how to authenticate, and nothing about the endpoint.
+
+        The request body is deliberately never read - that is the point of
+        refusing before reading it - which leaves bytes on the socket that a
+        kept-alive connection would take for the next request. So the
+        connection is closed rather than reused. Today the server speaks
+        HTTP/1.0 and closes anyway; this does not depend on that staying true.
+        """
+        self.close_connection = True
         self._log_before_answering(401)
         payload = json.dumps({
             "error": "this mock-bank was started with --auth, so every request "
@@ -600,6 +618,7 @@ class Handler(BaseHTTPRequestHandler):
         }, indent=2).encode("utf-8") + b"\n"
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="mock-bank"')
+        self.send_header("Connection", "close")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()

@@ -120,6 +120,23 @@ class WithAuth(MockServerCase):
                 self.assertEqual(self.get("/_mock/health", headers=header).status,
                                  401)
 
+    def test_a_non_ascii_wrong_credential_is_a_clean_401(self):
+        # `hmac.compare_digest` raises TypeError on a str with non-ASCII in it
+        # rather than returning False, and the check runs outside the handler's
+        # try, so this used to drop the connection with no response at all.
+        resp = self.get("/_mock/health", headers=basic(user="b\u00e4nk"))
+        self.assertEqual(resp.status, 401)
+
+    def test_a_lowercase_scheme_name_authenticates(self):
+        # RFC 7235: the scheme is case-insensitive, and some clients send it
+        # lowercase.
+        raw = base64.b64encode(CREDENTIAL.encode()).decode()
+        for scheme in ("Basic", "basic", "BASIC", "BaSiC"):
+            with self.subTest(scheme=scheme):
+                resp = self.get("/_mock/health",
+                                headers={"Authorization": scheme + " " + raw})
+                self.assertEqual(resp.status, 200)
+
     def test_an_unauthenticated_payment_file_is_not_read(self):
         # The check runs before the body, so a file from someone with no
         # credentials is never parsed - and nothing is recorded about it.
@@ -135,6 +152,30 @@ class WithAuth(MockServerCase):
         self.get("/_mock/health")
         after = self.get("/_mock/state", headers=basic()).json()["requests"]
         self.assertEqual(after, before + 2)
+
+
+class WithNonAsciiAuth(MockServerCase):
+    """A credential with an accent in it has to work, or the port is bricked.
+
+    `--auth b\u00e4nk:...` passed `check_auth`, so the operator believes the mock
+    is guarded - and before the comparison moved to bytes, nothing could ever
+    authenticate against it and every request dropped its connection.
+    """
+
+    config_kwargs = {"auth": "b\u00e4nk:gr\u00fc\u00dfe"}
+
+    def test_it_accepts_itself(self):
+        resp = self.get("/_mock/health",
+                        headers=basic(user="b\u00e4nk", password="gr\u00fc\u00dfe"))
+        self.assertEqual(resp.status, 200)
+
+    def test_and_still_refuses_the_wrong_one(self):
+        self.assertEqual(
+            self.get("/_mock/health",
+                     headers=basic(user="b\u00e4nk", password="wrong")).status, 401)
+        self.assertEqual(
+            self.get("/_mock/health",
+                     headers=basic(user="bank", password="gr\u00fc\u00dfe")).status, 401)
 
 
 class TheExposureWarning(unittest.TestCase):
