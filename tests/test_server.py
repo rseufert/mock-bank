@@ -39,10 +39,10 @@ class ControlPlane(MockServerCase):
         self.assertIn(b"mock-bank", resp.body)
 
     def test_unbuilt_surfaces_refuse_by_name(self):
-        resp = self.get("/_mock/mailbox")
+        resp = self.get("/_mock/requests")
         self.assertEqual(resp.status, 404)
         body = resp.json()
-        self.assertIn("GET /_mock/mailbox", body["planned"])
+        self.assertIn("GET /_mock/requests", body["planned"])
         self.assertIn("GET /_mock/health", body["supported"])
 
     def test_the_state_it_reports_is_the_state_it_has(self):

@@ -30,7 +30,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Tuple
 
-from . import (__version__, accounts, clock as clock_module, db, schema,
+from . import (__version__, accounts, clock as clock_module, db, outbox, schema,
                validate)
 from .accounts import BEHAVIOURS
 
@@ -49,11 +49,11 @@ SUPPORTED = [
     "POST /_mock/validate",
     "POST /payments",
     "GET /_mock/payments", "GET /_mock/payments/<EndToEndId>",
+    "GET /_mock/mailbox",
 ]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
 PLANNED = [
-    "GET /_mock/mailbox",
     "GET /_mock/requests",
 ]
 
@@ -76,6 +76,8 @@ NOTES = {
     "POST /payments": "send a pain.001: the bank decides each payment, books "
                       "what is due and answers with a JSON summary",
     "GET /_mock/payments": "every payment the bank decided on, newest first",
+    "GET /_mock/mailbox": "the messages the bank has sent and you have not "
+                          "collected, oldest first; collecting takes them",
 }
 
 # A request body larger than this is refused rather than read into memory. A
@@ -88,10 +90,12 @@ class Config:
 
     def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
                  timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock="",
-                 allow_duplicates=False):
+                 allow_duplicates=False, status_delay_ms=0):
         self.host = host
         # A MsgId seen before is DUPL unless this is set, as at a real bank.
         self.allow_duplicates = allow_duplicates
+        # How long after receipt the pain.002 is due; 0 so a test sees it at once.
+        self.status_delay_ms = status_delay_ms
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
@@ -115,8 +119,15 @@ class State:
         self.clock = clock_module.Clock(
             zone=config.timezone, cutoff=config.cutoff, start=config.clock,
             holidays=self._holidays)
+        # As the clock moves, book what came due and release what is due.
+        # release_due is idempotent over "due and not yet done", so a hook
+        # that failed half-way is finished by the next advance.
+        self.clock.on_advance.append(self._on_advance)
         self.started = db.utcnow()
         self.resets = 0
+
+    def _on_advance(self, before, after):
+        outbox.release_due(self.conn, after.replace(microsecond=0), after.date())
 
     def _holidays(self):
         return [row["day"] for row in db.rows(
@@ -129,16 +140,25 @@ class State:
         mock on ``--db`` keeps being the same mock at the same path.
         """
         with self.lock:
-            for table in ("payment", "file", "request_log", "holiday", "account"):
+            for table in ("message", "payment", "file", "request_log", "holiday",
+                          "account"):
                 self.conn.execute("DELETE FROM %s" % table)
             self.conn.commit()
             db.seed(self.conn)
             self.clock.reset()
             self.resets += 1
 
+    def now(self):
+        """The bank's now, to the second: the clock's, so a test can move it."""
+        return self.clock.now().replace(microsecond=0)
+
     def today(self):
         """The bank's today, which is the clock's - so a test can move it."""
         return self.clock.today()
+
+    def release(self):
+        """Book what is due and release what is due; see outbox.release_due."""
+        return outbox.release_due(self.conn, self.now(), self.today())
 
     def close(self) -> None:
         """Close the database, under the lock every request takes.
@@ -164,6 +184,12 @@ class State:
                 "holidays": db.count(self.conn, "holiday"),
                 "clock": self.clock.snapshot(),
                 "payments": accounts.payment_counts(self.conn),
+                "messages": {
+                    "queued": db.count(self.conn, "message", "released_at IS NULL"),
+                    "waiting": db.count(self.conn, "message",
+                                        "released_at IS NOT NULL AND taken_at IS NULL"),
+                    "taken": db.count(self.conn, "message", "taken_at IS NOT NULL"),
+                },
                 "behaviours": sorted(BEHAVIOURS),
                 "supported": SUPPORTED,
                 "planned": PLANNED,
@@ -311,7 +337,17 @@ class Handler(BaseHTTPRequestHandler):
                                         "known": sorted({p["end_to_end_id"] for p in
                                                          accounts.payments(conn)
                                                          if p["end_to_end_id"]})})
-            return self._json(200, found[0] if len(found) == 1 else found)
+            # Always one shape: the newest payment with that id, or with
+            # ?all every one, newest first.
+            return self._json(200, found if "all" in query else found[0])
+
+        if head == "mailbox" and not rest:
+            if method != "GET":
+                return self._method_not_allowed(method, ["GET"])
+            # Release first, so a pain.002 held back by --status-delay-ms
+            # appears once its time has come without anything else happening.
+            self.state.release()
+            return self._json(200, outbox.collect(conn, self.state.now()))
 
         if head == "validate" and not rest:
             if method != "POST":
@@ -433,11 +469,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _payments_in(self, body: bytes) -> None:
         """POST /payments: read, validate, decide, book; answer in JSON."""
-        conn, today = self.state.conn, self.state.today()
+        conn, now, today = self.state.conn, self.state.now(), self.state.today()
         payment_file, findings = validate.inspect(body, self.headers.get("Content-Type"), today)
-        decision = accounts.decide(payment_file, findings, conn, today,
+        decision = accounts.decide(payment_file, findings, conn, self.state.clock, now,
                                    self.state.config.allow_duplicates)
-        file_id = accounts.book(conn, decision, today)
+        file_id = accounts.book(conn, decision)
+        queued = outbox.queue_status(conn, decision, file_id, now,
+                                     self.state.config.status_delay_ms)
+        released = {row["id"] for row in self.state.release()}
+        queued = [dict(q, released=q["id"] in released) for q in queued]
+        queued += outbox.upcoming(conn, file_id) if file_id else []
         # the rows went in in decision order, so they line up one for one
         booked = [r["booked_at"] is not None for r in db.rows(
             conn, "SELECT booked_at FROM payment WHERE file_id = ? ORDER BY id", (file_id,))]
@@ -452,8 +493,10 @@ class Handler(BaseHTTPRequestHandler):
             "payments": [dict(d.to_json(), booked=done)
                          for d, done in zip(decision.payments, booked)],
             "findings": [f._asdict() for f in findings],
-            # What the bank will send, and when: the writers are #7.
-            "queued": [],
+            # What the bank will send, and when: the pain.002 (released at
+            # once unless --status-delay-ms says otherwise) and a camt.054
+            # for each account and settlement date still to come.
+            "queued": queued,
         }
         return self._json(422 if decision.rejected_outright else 202, answer)
 

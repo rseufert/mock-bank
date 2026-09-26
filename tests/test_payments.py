@@ -20,7 +20,11 @@ ACME, GLOBEX = "NL41MOCK0000000001", "NL14MOCK0000000002"
 INITECH, EURODIS = "NL84MOCK0000000003", "NL57MOCK0000000004"
 UMBRELLA = "NL30MOCK0000000005"          # at another bank: not held
 
-TODAY = datetime.datetime.now(datetime.timezone.utc).date()
+# Bank time is pinned: Thursday 2026-10-01, 09:00 UTC, before the 15:00
+# cutoff - the date the sample asks for. Every date below is relative to it.
+BANK_START = "2026-10-01T09:00"
+TODAY = datetime.date(2026, 10, 1)
+assert TODAY.weekday() == 3, "the tests assume a Thursday"
 
 
 def sample(name, when=TODAY):
@@ -58,6 +62,7 @@ def pain001(msg_id, debtor, payments, when=TODAY, ccy="EUR"):
 
 
 class PipelineCase(MockServerCase):
+    config_kwargs = {"clock": BANK_START}
 
     def setUp(self):
         self.post("/_mock/reset")
@@ -91,7 +96,8 @@ class TheSampleFile(PipelineCase):
         paid = amounts(text)
         self.assertEqual(before - self.balance("ACME"), paid[0] + paid[3])
 
-    def test_the_readme_example_three_accepted_and_one_ac04(self):
+    def test_the_done_when_case_with_eurodis_patched_to_accept(self):
+        """#6's done-when: with EURODIS accepting, three accepted and one AC04."""
         self.patch_account("EURODIS", behaviour="accept")
         before = self.balance("ACME")
         text = sample("pain001_four_payments.xml")
@@ -122,7 +128,7 @@ class TheSampleFile(PipelineCase):
 
 
 class AllowingDuplicates(PipelineCase):
-    config_kwargs = {"allow_duplicates": True}
+    config_kwargs = dict(PipelineCase.config_kwargs, allow_duplicates=True)
 
     def test_the_same_file_twice_books_twice(self):
         text = pain001("DUP-1", ACME, [("D1", 1000, UMBRELLA)])
@@ -239,7 +245,7 @@ class Precedence(PipelineCase):
 
     def test_4f_counts_what_is_accepted_and_not_yet_booked(self):
         self.patch_account("GLOBEX", balance=10000)
-        later = TODAY + datetime.timedelta(days=5)
+        later = TODAY + datetime.timedelta(days=5)          # Tuesday
         first = self.send(pain001("IF-2", GLOBEX, [("L1", 8000, UMBRELLA)], when=later)).json()
         self.assertEqual(self.outcomes(first), [("L1", "accepted", None)])
         self.assertEqual(self.balance("GLOBEX"), 10000)      # not booked yet
@@ -273,7 +279,7 @@ class Precedence(PipelineCase):
 class Booking(PipelineCase):
 
     def test_a_later_settlement_date_is_accepted_and_waits(self):
-        later = TODAY + datetime.timedelta(days=3)
+        later = TODAY + datetime.timedelta(days=5)          # Tuesday
         before = self.balance("ACME")
         answer = self.send(pain001("LT-1", ACME, [("W1", 500, UMBRELLA)], when=later)).json()
         self.assertEqual(answer["payments"][0]["settlement_date"], later.isoformat())
@@ -296,6 +302,12 @@ class Booking(PipelineCase):
         self.assertEqual((one["status"], one["reason"], one["msg_id"]),
                          ("rejected", "AC04", "ACME-20261001-0001"))
         self.assertEqual(one["amount"], 340050)
+        again = self.send(pain001("SECOND", ACME, [("INV-2026-0102", 100, UMBRELLA)])).json()
+        self.assertEqual(again["accepted"], 1)
+        newest = self.get("/_mock/payments/INV-2026-0102").json()
+        self.assertEqual((newest["msg_id"], newest["status"]), ("SECOND", "accepted"))
+        both = self.get("/_mock/payments/INV-2026-0102?all").json()
+        self.assertEqual([p["msg_id"] for p in both], ["SECOND", "ACME-20261001-0001"])
         missing = self.get("/_mock/payments/NOPE")
         self.assertEqual(missing.status, 404)
         self.assertIn("INV-2026-0101", missing.json()["known"])
