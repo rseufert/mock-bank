@@ -109,6 +109,7 @@ CODE_SETS = {
     },
     "ExternalStatusReason1Code": {
         "AC01": "IncorrectAccountNumber: the account number is invalid or missing",
+        "AC02": "InvalidDebtorAccountNumber: the debtor account is invalid or not held by the bank",
         "AC04": "ClosedAccountNumber: the account has been closed on the bank's books",
         "AC06": "BlockedAccount: the account is blocked",
         "AG01": "TransactionForbidden: the transaction is forbidden on this account type",

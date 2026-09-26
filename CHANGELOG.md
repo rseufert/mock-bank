@@ -10,6 +10,21 @@ says so where it does.
 
 ### Added
 
+- **Deciding and booking payments** (#6). `POST /payments` reads, validates
+  and decides a `pain.001`, books what is due, and answers `202` with each
+  payment's outcome, reason code and settlement date (`422` when the file is
+  rejected outright). A behaviour describes the account it is set on:
+  `closed-account` (`AC04`) and `bad-bank-id` (`RC01`) are read from a held
+  creditor account, the rest from the debtor account. A `MsgId` seen before is
+  `DUPL` unless `--allow-duplicates`; a debtor account the bank does not hold
+  is `AC02`; a payment in another currency than its account is `AM03`; only
+  `insufficient-funds` (`AM04`) looks at the balance. Accepted payments debit
+  their account on the settlement date, debit side only.
+  `GET /_mock/payments` and `/_mock/payments/<EndToEndId>` show what was
+  decided, and `/_mock/state` counts it. The database gains `file` and
+  `payment` tables (schema version 2); an older `--db` file is upgraded in
+  place.
+
 - **SQLite state and the accounts endpoints** (#3). The mock now keeps what it
   knows: `mockbank/db.py` declares the schema and the indexes, records the
   schema version in the file, upgrades a `--db` file written by an older

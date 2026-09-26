@@ -44,11 +44,12 @@ SUPPORTED = [
     "GET /_mock/accounts", "POST /_mock/accounts",
     "GET /_mock/accounts/<id>", "PATCH /_mock/accounts/<id>",
     "POST /_mock/validate",
+    "POST /payments",
+    "GET /_mock/payments", "GET /_mock/payments/<EndToEndId>",
 ]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
 PLANNED = [
-    "POST /payments",
     "GET /_mock/mailbox",
     "POST /_mock/advance",
     "GET /_mock/holidays", "PUT /_mock/holidays",
@@ -67,6 +68,9 @@ NOTES = {
     "POST /_mock/reset": "back to the four seeded accounts",
     "POST /_mock/validate": "send a pain.001, get its findings as prose, one "
                             "line each; nothing is stored",
+    "POST /payments": "send a pain.001: the bank decides each payment, books "
+                      "what is due and answers with a JSON summary",
+    "GET /_mock/payments": "every payment the bank decided on, newest first",
 }
 
 # A request body larger than this is refused rather than read into memory. A
@@ -77,8 +81,11 @@ MAX_BODY = 32 * 1024 * 1024
 class Config:
     """Everything the server can be told, with the defaults it runs with."""
 
-    def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False):
+    def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
+                 allow_duplicates=False):
         self.host = host
+        # A MsgId seen before is DUPL unless this is set, as at a real bank.
+        self.allow_duplicates = allow_duplicates
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
@@ -104,11 +111,15 @@ class State:
         mock on ``--db`` keeps being the same mock at the same path.
         """
         with self.lock:
-            for table in ("request_log", "holiday", "account"):
+            for table in ("payment", "file", "request_log", "holiday", "account"):
                 self.conn.execute("DELETE FROM %s" % table)
             self.conn.commit()
             db.seed(self.conn)
             self.resets += 1
+
+    def today(self):
+        """The bank's today: the UTC date until the clock (#4) owns it."""
+        return db.utcnow().date()
 
     def close(self) -> None:
         """Close the database, under the lock every request takes.
@@ -132,6 +143,7 @@ class State:
                 # Per currency, in minor units. See accounts.totals.
                 "balances": accounts.totals(self.conn),
                 "holidays": db.count(self.conn, "holiday"),
+                "payments": accounts.payment_counts(self.conn),
                 "behaviours": sorted(BEHAVIOURS),
                 "supported": SUPPORTED,
                 "planned": PLANNED,
@@ -204,6 +216,10 @@ class Handler(BaseHTTPRequestHandler):
             if method != "GET":
                 return self._method_not_allowed(method, ["GET"])
             return self._text(200, index_page(), "text/html; charset=utf-8")
+        if path == "/payments":
+            if method != "POST":
+                return self._method_not_allowed(method, ["POST"])
+            return self._payments_in(body)
         if path.startswith("/_mock"):
             return self._control(method, path, query, body)
         return self._not_found()
@@ -253,6 +269,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if head == "accounts":
             return self._accounts(method, rest, body)
+
+        if head == "payments":
+            if method != "GET":
+                return self._method_not_allowed(method, ["GET"])
+            if not rest:
+                return self._json(200, accounts.payments(conn))
+            if len(rest) > 1:
+                return self._not_found()
+            found = accounts.payments(conn, rest[0])
+            if not found:
+                return self._json(404, {"error": "no payment with EndToEndId %r" % rest[0],
+                                        "known": sorted({p["end_to_end_id"] for p in
+                                                         accounts.payments(conn)
+                                                         if p["end_to_end_id"]})})
+            return self._json(200, found[0] if len(found) == 1 else found)
 
         if head == "validate" and not rest:
             if method != "POST":
@@ -305,6 +336,32 @@ class Handler(BaseHTTPRequestHandler):
                                         "behaviours": sorted(BEHAVIOURS)})
             return self._json(200, row)
         return self._method_not_allowed(method, ["GET", "PATCH"])
+
+    def _payments_in(self, body: bytes) -> None:
+        """POST /payments: read, validate, decide, book; answer in JSON."""
+        conn, today = self.state.conn, self.state.today()
+        payment_file, findings = validate.inspect(body, self.headers.get("Content-Type"), today)
+        decision = accounts.decide(payment_file, findings, conn, today,
+                                   self.state.config.allow_duplicates)
+        file_id = accounts.book(conn, decision, today)
+        # the rows went in in decision order, so they line up one for one
+        booked = [r["booked_at"] is not None for r in db.rows(
+            conn, "SELECT booked_at FROM payment WHERE file_id = ? ORDER BY id", (file_id,))]
+        answer = {
+            "msg_id": decision.msg_id,
+            "status": decision.status,
+            "reason": decision.reason,
+            "reason_text": decision.reason_text,
+            "reported": decision.reported,
+            "accepted": len(decision.accepted),
+            "rejected": len(decision.rejected),
+            "payments": [dict(d.to_json(), booked=done)
+                         for d, done in zip(decision.payments, booked)],
+            "findings": [f._asdict() for f in findings],
+            # What the bank will send, and when: the writers are #7.
+            "queued": [],
+        }
+        return self._json(422 if decision.rejected_outright else 202, answer)
 
     def _validate(self, body: bytes) -> None:
         """POST /_mock/validate: the findings as prose, nothing stored."""

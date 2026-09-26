@@ -21,6 +21,7 @@ from mockbank.server import Config, make_server            # noqa: E402
 from support import FileDatabaseCase                        # noqa: E402
 
 OLD_SCHEMA = os.path.join(HERE, "fixtures", "schema-v0.sql")
+SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -76,6 +77,34 @@ class FromAnOlderFile(FileDatabaseCase):
         self.assertEqual(self.get("/_mock/state").json()["holidays"], 0)
 
 
+class FromVersionOne(FileDatabaseCase):
+    """A file written before the bank kept payments: it gains the tables, and
+    what it held is still there and still works."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V1, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME Corporation', 'NL41MOCK0000000001', 'MOCKNL2A',"
+            " 'EUR', 424242, 'accept')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_payment_tables_and_keeps_the_account(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        state = self.get("/_mock/state").json()
+        self.assertEqual(state["payments"], {"files": 0, "accepted": 0, "rejected": 0,
+                                             "booked": 0})
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 424242)
+        self.assertEqual(self.get("/_mock/payments").json(), [])
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -110,7 +139,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (1, "55cf699e1e1a63c1")
+    FINGERPRINT = (2, "8cdecd4e3f697b87")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())
