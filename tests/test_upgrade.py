@@ -23,6 +23,7 @@ from support import FileDatabaseCase                        # noqa: E402
 OLD_SCHEMA = os.path.join(HERE, "fixtures", "schema-v0.sql")
 SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
 SCHEMA_V2 = os.path.join(HERE, "fixtures", "schema-v2.sql")
+SCHEMA_V3 = os.path.join(HERE, "fixtures", "schema-v3.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -138,6 +139,35 @@ class FromVersionTwo(FileDatabaseCase):
         self.assertEqual(self.get("/_mock/mailbox").json(), [])
 
 
+class FromVersionThree(FileDatabaseCase):
+    """A file written before the bank issued statements: it gains the
+    statement and counter tables, and a message it held is still there."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V3, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME Corporation', 'NL41MOCK0000000001', 'MOCKNL2A',"
+            " 'EUR', 1000, 'accept')")
+        conn.execute("INSERT INTO message (type, account, due_at, released_at, body)"
+                     " VALUES ('pain.002.001.10', 'ACME', '2026-09-01T09:00:00Z',"
+                     " '2026-09-01T09:00:00Z', '<Document/>')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_statement_tables_and_keeps_its_messages(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        self.assertEqual(self.get("/_mock/accounts/ACME/statements").json(), [])
+        self.assertEqual([m["type"] for m in self.get("/_mock/mailbox").json()],
+                         ["pain.002.001.10"])
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -172,7 +202,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (3, "e363507d335ba6e5")
+    FINGERPRINT = (4, "558042c3b4cebbbe")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

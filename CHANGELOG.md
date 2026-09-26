@@ -21,6 +21,18 @@ says so where it does.
 
 ### Added
 
+- **The end-of-day statement** (#9). As the clock passes the end of a
+  business day, every open account gets a `camt.053.001.08` for it, in
+  order, empty days included: `OPBD` and `CLBD`, an entry per booked debit
+  with its `EndToEndId`, and `TxsSummry`. The closing balance is the opening
+  less the entries to the cent, and each statement opens where the last
+  closed. `statement-gap` leaves one entry off and keeps the balances true.
+  `GET /_mock/accounts/<id>/statements` lists what was issued; a new
+  `statement` table (schema version 4) means a restart on `--db` neither
+  renumbers nor re-issues. Statement numbers and `camt.054` `MsgId`s now come
+  from a persistent counter rather than a count of messages, so pruning can
+  never make one repeat.
+
 - **The bank clock** (#4). `mockbank/clock.py` keeps bank time, and nothing in
   the mock waits for it: `POST /_mock/advance?days=N` moves it by calendar days
   and `?to=YYYY-MM-DD` to midnight on a date, and either way the answer lists

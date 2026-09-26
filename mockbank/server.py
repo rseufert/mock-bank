@@ -44,6 +44,7 @@ SUPPORTED = [
     "GET /_mock/behaviours",
     "GET /_mock/accounts", "POST /_mock/accounts",
     "GET /_mock/accounts/<id>", "PATCH /_mock/accounts/<id>",
+    "GET /_mock/accounts/<id>/statements",
     "POST /_mock/advance",
     "GET /_mock/holidays", "PUT /_mock/holidays",
     "POST /_mock/validate",
@@ -76,6 +77,8 @@ NOTES = {
     "POST /payments": "send a pain.001: the bank decides each payment, books "
                       "what is due and answers with a JSON summary",
     "GET /_mock/payments": "every payment the bank decided on, newest first",
+    "GET /_mock/accounts/<id>/statements": "the camt.053 statements issued "
+                                           "for an account, oldest first",
     "GET /_mock/mailbox": "the messages the bank has sent and you have not "
                           "collected, oldest first; collecting takes them",
 }
@@ -127,7 +130,11 @@ class State:
         self.resets = 0
 
     def _on_advance(self, before, after):
-        outbox.release_due(self.conn, after.replace(microsecond=0), after.date())
+        # Book first, so a day's statement sees that day's bookings.
+        now = after.replace(microsecond=0)
+        outbox.release_due(self.conn, now, after.date())
+        outbox.issue_statements(
+            self.conn, self.clock, outbox.ended_business_days(self.clock, before, after), now)
 
     def _holidays(self):
         return [row["day"] for row in db.rows(
@@ -140,8 +147,8 @@ class State:
         mock on ``--db`` keeps being the same mock at the same path.
         """
         with self.lock:
-            for table in ("message", "payment", "file", "request_log", "holiday",
-                          "account"):
+            for table in ("statement", "counter", "message", "payment", "file",
+                          "request_log", "holiday", "account"):
                 self.conn.execute("DELETE FROM %s" % table)
             self.conn.commit()
             db.seed(self.conn)
@@ -377,6 +384,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._method_not_allowed(method, ["GET", "POST"])
 
         identifier = rest[0]
+        if rest[1:] == ["statements"]:
+            if method != "GET":
+                return self._method_not_allowed(method, ["GET"])
+            if accounts.get(conn, identifier) is None:
+                return self._unknown_account(identifier)
+            return self._json(200, outbox.statements(conn, identifier))
         if len(rest) > 1:
             return self._not_found()
         if method == "GET":

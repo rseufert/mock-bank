@@ -2,8 +2,8 @@
 
 The mock is a *bank*, so its state is the state a bank keeps: the accounts it
 holds, the days it does not settle on, a log of what was asked of it, and the
-payment files it received with the payments it decided on, and the messages
-it sends back, queued until they are due.
+payment files it received with the payments it decided on, the messages it
+sends back, queued until they are due, and the statements it has issued.
 
 Three things here are worth knowing:
 
@@ -142,6 +142,30 @@ SCHEMA = [
         body         TEXT NOT NULL
     )
     """,
+    # A camt.053 the bank issued: one per account per business day, never
+    # twice, so a restart on --db neither renumbers nor re-issues. Balances
+    # in minor units, signed.
+    """
+    CREATE TABLE IF NOT EXISTS statement (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        account     TEXT NOT NULL,
+        day         TEXT NOT NULL,
+        number      INTEGER NOT NULL,
+        opening     INTEGER NOT NULL,
+        closing     INTEGER NOT NULL,
+        entries     INTEGER NOT NULL,
+        message_id  INTEGER REFERENCES message (id)
+    )
+    """,
+    # Sequences that must never repeat, by name - a camt.054 MsgId or a
+    # statement number per account. Kept apart from the rows they number so
+    # that pruning messages (#17) cannot make a number come round again.
+    """
+    CREATE TABLE IF NOT EXISTS counter (
+        name   TEXT PRIMARY KEY,
+        value  INTEGER NOT NULL
+    )
+    """,
 ]
 
 # Created after the tables have been brought up to date: an index on a column
@@ -164,13 +188,16 @@ INDEXES = [
     # not yet taken.
     "CREATE INDEX IF NOT EXISTS ix_message_due ON message (released_at, due_at)",
     "CREATE INDEX IF NOT EXISTS ix_message_mailbox ON message (released_at, taken_at)",
+    # One statement per account per day; the unique index is what makes
+    # issuing twice impossible rather than merely avoided.
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_statement_day ON statement (account, day)",
 ]
 
 # The schema's version, kept in the file as `PRAGMA user_version`. Bump it
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class DatabaseError(Exception):
@@ -390,3 +417,13 @@ def seed(conn: sqlite3.Connection) -> None:
             (identifier, name, iban(country, bban), bic, currency, balance,
              behaviour, json.dumps({}), closed))
     conn.commit()
+
+
+def next_value(conn: sqlite3.Connection, name: str) -> int:
+    """The next number in the sequence `name`, starting at 1. Never repeats,
+    whatever is deleted elsewhere; the caller commits."""
+    # Two statements rather than an upsert, which needs SQLite 3.24.
+    conn.execute("INSERT OR IGNORE INTO counter (name, value) VALUES (?, 0)", (name,))
+    conn.execute("UPDATE counter SET value = value + 1 WHERE name = ?", (name,))
+    return int(conn.execute("SELECT value FROM counter WHERE name = ?",
+                            (name,)).fetchone()[0])
