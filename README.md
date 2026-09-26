@@ -138,12 +138,23 @@ choices above, as JSON.
 ## Validating a file
 
 `POST /_mock/validate` reads a `pain.001` the way the pipeline will and says
-what it finds, one line each, without changing anything:
+what it finds, one line each, without changing anything. The sample below asks
+for execution on 2026-10-01, so the mock is started with bank time before that
+date — otherwise the answer gains a `DT01` warning and this example stops
+matching what you see:
 
 ```
+$ python3 -m mockbank --port 8080 --clock 2026-09-30T09:00 &
 $ curl -s --data-binary @tests/samples/pain001_broken_iban.xml http://127.0.0.1:8080/_mock/validate
 pain.001.001.09 ACME-20261001-0001: 1 batch, 4 payments, 1 finding
 error AC01 at /Document/CstmrCdtTrfInitn/PmtInf[1]/CdtTrfTxInf[2]/CdtrAcct/Id/IBAN: NL85MOCK0000000003 fails its check digits
+```
+
+Run it without `--clock` after that date and you get the warning as well, which
+is the mock being right rather than the example being wrong:
+
+```
+warning DT01 at /Document/CstmrCdtTrfInitn/PmtInf[1]/ReqdExctnDt: the requested execution date 2026-10-01 is in the past; the bank executes on the next business day instead
 ```
 
 Each finding names the element and carries the reason code the `pain.002`
