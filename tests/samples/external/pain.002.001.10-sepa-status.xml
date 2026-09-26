@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fileset member: the payment status report. One transaction was accepted, the other
+  rejected with a reason code — facts that exist only here, keyed by the initiation's
+  MsgId and EndToEndIds.
+-->
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr>
+      <MsgId>STS-20260824-0007</MsgId>
+      <CreDtTm>2026-08-24T11:15:00</CreDtTm>
+      <InitgPty><Nm>ABN AMRO</Nm></InitgPty>
+    </GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>MSG-20260824-0007</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001.001.09</OrgnlMsgNmId>
+      <OrgnlCreDtTm>2026-08-24T09:00:00</OrgnlCreDtTm>
+      <OrgnlNbOfTxs>2</OrgnlNbOfTxs>
+      <OrgnlCtrlSum>8600.00</OrgnlCtrlSum>
+      <GrpSts>PART</GrpSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>BATCH-0007</OrgnlPmtInfId>
+      <PmtInfSts>PART</PmtInfSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>SUP-0007-A</OrgnlEndToEndId>
+        <TxSts>ACCP</TxSts>
+        <OrgnlTxRef>
+          <Amt><InstdAmt Ccy="EUR">5100.00</InstdAmt></Amt>
+          <ReqdExctnDt><Dt>2026-08-26</Dt></ReqdExctnDt>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>SUP-0007-B</OrgnlEndToEndId>
+        <TxSts>RJCT</TxSts>
+        <StsRsnInf>
+          <Rsn><Cd>AC01</Cd></Rsn>
+          <AddtlInf>Creditor account number is invalid</AddtlInf>
+        </StsRsnInf>
+        <OrgnlTxRef>
+          <Amt><InstdAmt Ccy="EUR">3500.00</InstdAmt></Amt>
+          <CdtrAcct><Id><IBAN>BE71096123456769</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>

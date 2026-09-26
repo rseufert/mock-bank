@@ -62,6 +62,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tools/check_docs.py
+      - name: The dictionary and the mock's output agree with the published XSDs
+        run: |
+          command -v xmllint >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q libxml2-utils; }
+          python tools/check_xsd.py --require
       - name: The changelog is well formed and has lost nothing
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
