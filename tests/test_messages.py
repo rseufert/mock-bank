@@ -108,7 +108,7 @@ class StatusReport(MessageCase):
 
 
 class DelayedStatus(MessageCase):
-    config_kwargs = {"status_delay_ms": 60000}
+    config_kwargs = dict(PipelineCase.config_kwargs, status_delay_ms=60000)
 
     def test_the_pain002_is_queued_not_released(self):
         answer = self.send(pain001("DEL-1", ACME, [("D1", 100, UMBRELLA)])).json()
@@ -150,7 +150,7 @@ class DebitNotification(MessageCase):
         self.assertEqual(before - self.balance("ACME"), sum(on_wire))
 
     def test_a_later_settlement_date_brings_no_camt054_yet(self):
-        later = TODAY + datetime.timedelta(days=4)
+        later = TODAY + datetime.timedelta(days=4)          # Monday
         answer = self.send(pain001("LATE-1", ACME, [("L1", 100, UMBRELLA)], when=later)).json()
         self.assertIn({"type": CAMT054.name, "account": "ACME", "due_on": later.isoformat()},
                       answer["queued"])
@@ -165,3 +165,90 @@ class DebitNotification(MessageCase):
                for n in notices]
         self.assertEqual(len(ids), 2)
         self.assertEqual(len(set(ids)), 2, "each notification has its own MsgId")
+
+
+class OnTheClock(MessageCase):
+    """What comes due as the clock moves: #7's done-when, over /_mock/advance."""
+
+    MONDAY = TODAY + datetime.timedelta(days=4)
+
+    def advance(self, **query):
+        resp = self.post("/_mock/advance?" + "&".join("%s=%s" % kv for kv in query.items()))
+        self.assertEqual(resp.status, 200, resp.body)
+        return resp.json()
+
+    def test_advancing_to_the_settlement_date_releases_the_debits(self):
+        self.patch_account("EURODIS", behaviour="accept")   # the done-when's three
+        before = self.balance("ACME")
+        text = sample("pain001_four_payments.xml", when=self.MONDAY)
+        answer = self.send(text).json()
+        self.assertEqual({p["settlement_date"] for p in answer["payments"]
+                          if p["outcome"] == "accepted"}, {self.MONDAY.isoformat()})
+        first = self.mailbox()
+        self.assertEqual([item["type"] for item in first], [PAIN002.name])
+        self.assertEqual(self.balance("ACME"), before)
+
+        self.advance(to=self.MONDAY.isoformat())
+        notices = self.of_type(self.mailbox(), CAMT054)
+        self.assertEqual(len(notices), 1)
+        m = ns(CAMT054)
+        entries = notices[0].findall("m:BkToCstmrDbtCdtNtfctn/m:Ntfctn/m:Ntry", m)
+        self.assertEqual(
+            [e.findtext("m:NtryDtls/m:TxDtls/m:Refs/m:EndToEndId", namespaces=m) for e in entries],
+            ["INV-2026-0101", "INV-2026-0103", "INV-2026-0104"])
+        self.assertEqual({e.findtext("m:BookgDt/m:Dt", namespaces=m) for e in entries},
+                         {self.MONDAY.isoformat()})
+        paid = amounts(text)
+        self.assertEqual(before - self.balance("ACME"), paid[0] + paid[2] + paid[3])
+
+    def test_the_advance_itself_books_and_releases(self):
+        # Checked without collecting, because collecting releases too: the
+        # hook on the clock is what has to have done it by the time the
+        # advance answers.
+        before = self.balance("ACME")
+        self.send(pain001("HOOK-1", ACME, [("K1", 300, UMBRELLA)], when=self.MONDAY))
+        self.mailbox()
+        self.advance(to=self.MONDAY.isoformat())
+        self.assertEqual(before - self.balance("ACME"), 300)
+        self.assertEqual(self.get("/_mock/state").json()["messages"]["waiting"], 1)
+
+    def test_advancing_again_releases_nothing_twice(self):
+        self.send(pain001("IDEM-1", ACME, [("I1", 100, UMBRELLA)], when=self.MONDAY))
+        self.mailbox()
+        self.advance(to=self.MONDAY.isoformat())
+        self.assertEqual(len(self.of_type(self.mailbox(), CAMT054)), 1)
+        self.advance(days=1)
+        self.assertEqual(self.mailbox(), [])
+        self.assertEqual(self.get("/_mock/state").json()["payments"]["booked"], 1)
+
+    def test_a_holiday_moves_the_settlement_date(self):
+        resp = self.request("PUT", "/_mock/holidays", body=[self.MONDAY.isoformat()])
+        self.assertEqual(resp.status, 200, resp.body)
+        answer = self.send(pain001("HOL-1", ACME, [("H1", 100, UMBRELLA)],
+                                   when=self.MONDAY)).json()
+        tuesday = self.MONDAY + datetime.timedelta(days=1)
+        self.assertEqual(answer["payments"][0]["settlement_date"], tuesday.isoformat())
+        self.advance(to=self.MONDAY.isoformat())
+        self.assertEqual(self.of_type(self.mailbox(), CAMT054), [])
+        self.advance(to=tuesday.isoformat())
+        self.assertEqual(len(self.of_type(self.mailbox(), CAMT054)), 1)
+
+
+class AfterTheCutoff(MessageCase):
+    config_kwargs = dict(PipelineCase.config_kwargs, clock="2026-10-01T16:00")
+
+    def test_a_payment_for_today_received_after_the_cutoff_settles_tomorrow(self):
+        answer = self.send(pain001("CUT-1", ACME, [("C1", 100, UMBRELLA)])).json()
+        friday = TODAY + datetime.timedelta(days=1)
+        self.assertEqual(answer["payments"][0]["settlement_date"], friday.isoformat())
+        self.assertEqual(self.of_type(self.mailbox(), CAMT054), [])
+
+
+class DelayedStatusOnTheClock(MessageCase):
+    config_kwargs = dict(PipelineCase.config_kwargs, status_delay_ms=5 * 60 * 1000)
+
+    def test_the_pain002_arrives_when_bank_time_passes_its_due_time(self):
+        self.send(pain001("DLY-1", ACME, [("Y1", 100, UMBRELLA)]))
+        self.assertEqual(self.of_type(self.mailbox(), PAIN002), [])
+        self.post("/_mock/advance?days=1")
+        self.assertEqual(len(self.of_type(self.mailbox(), PAIN002)), 1)

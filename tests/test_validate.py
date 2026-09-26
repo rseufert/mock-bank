@@ -1,5 +1,4 @@
 """POST /_mock/validate: the reader and the validator, over the wire."""
-import datetime
 import os
 import random
 import re
@@ -10,16 +9,15 @@ SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 BODY = "/Document/CstmrCdtTrfInitn"
 PAYMENT = BODY + "/PmtInf[1]/CdtTrfTxInf[%d]"
 
-# The samples ask for execution on 2026-10-01. Until the clock (#4) lets a
-# test pin the bank's today, the tests move that date a fortnight ahead of
-# the host's, so the clean file stays clean whatever day the suite runs.
+# The samples ask for execution on 2026-10-01; ValidateCase pins bank time
+# the day before, so that date is never in the past.
 SAMPLE_DATE = "2026-10-01"
-FUTURE = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
+
 
 
 def sample(name):
     with open(os.path.join(SAMPLES, name), encoding="utf-8") as handle:
-        return handle.read().replace(SAMPLE_DATE, FUTURE)
+        return handle.read()
 
 
 # Each broken sample and the one finding its name promises:
@@ -42,6 +40,9 @@ BROKEN = {
 
 
 class ValidateCase(MockServerCase):
+    # Bank time pinned the day before the samples' execution date, so the
+    # clean files are clean whatever day the suite runs.
+    config_kwargs = {"clock": "2026-09-30T09:00"}
 
     def validate(self, body, **headers):
         return self.post("/_mock/validate", body=body, headers=headers or None)
@@ -80,7 +81,7 @@ class CleanFiles(ValidateCase):
         self.assertEqual(payments[0]["creditor_account"], "NL14MOCK0000000002")
         self.assertEqual(payments[0]["creditor_bic"], "MOCKNL2A")
         batch = reading["batches"][0]
-        self.assertEqual(batch["requested_execution_date"], FUTURE)
+        self.assertEqual(batch["requested_execution_date"], SAMPLE_DATE)
         self.assertEqual((batch["debtor_account"], batch["debtor_account_currency"]),
                          ("NL41MOCK0000000001", "EUR"))
 
@@ -184,7 +185,7 @@ class BrokenFiles(ValidateCase):
         cases = {
             "<IBAN>NL14MOCK0000000002</IBAN>": "<IBAN>not an iban</IBAN>",
             '<InstdAmt Ccy="EUR">1250.00</InstdAmt>': '<InstdAmt Ccy="EUR">1250.001</InstdAmt>',
-            "<Dt>%s</Dt>" % FUTURE: "<Dt>2026-02-30</Dt>",
+            "<Dt>%s</Dt>" % SAMPLE_DATE: "<Dt>2026-02-30</Dt>",
             "<PmtMtd>TRF</PmtMtd>": "<PmtMtd>WIRE</PmtMtd>",
             "<CreDtTm>2026-09-30T09:30:00+02:00</CreDtTm>": "<CreDtTm>2026-09-30 09:30</CreDtTm>",
         }

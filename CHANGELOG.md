@@ -47,7 +47,9 @@ says so where it does.
   collects what is released. `POST /payments` says what is queued and for
   when, and `GET /_mock/payments/<EndToEndId>` now always answers with the
   newest payment, `?all` with every one. The README's example now shows what
-  the seed does: two accepted, one `AC04`, one `RC01`.
+  the seed does: two accepted, one `AC04`, one `RC01`. Payments now settle
+  on the clock's settlement date - the cutoff, weekends and holidays count -
+  and advancing the clock books what comes due and releases its messages.
 
 - **Deciding and booking payments** (#6). `POST /payments` reads, validates
   and decides a `pain.001`, books what is due, and answers `202` with each
