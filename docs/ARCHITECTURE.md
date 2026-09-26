@@ -1,41 +1,61 @@
 # How mock-bank fits together
 
 If you want to know *what each file is*, read [FILES.md](FILES.md). This
-document is about why the pieces are shaped the way they are. It describes the
-0.1 design; the parts not yet built are named as such, and the issue that
-builds each one is the place to argue with it.
+document is about why the pieces are shaped the way they are. It describes
+what 0.1 actually does; the two or three things it deliberately does not do yet
+are named as such, and the issue that builds each one is the place to argue
+with it.
 
 ## The one idea
 
 Everything is derived from a dictionary.
 
-`schema.py` describes ISO 20022 the way the standard
-does: a message is a namespaced tree of elements, an element is typed,
-bounded and may carry a code list from the external code sets. Nothing else in
-the package hard-codes an element path. The reader names elements from it, the
-validator checks against it, the writers build messages in the order it gives,
-and `/_mock/dictionary` serves it. The test that matters most,
-`GeneratedMessagesAreValid`, checks every message the mock writes against the
-same dictionary it checks yours against, and against sample files from
-outside the project so a declaration that is wrong against the standard is
-caught too.
+`schema.py` describes ISO 20022 the way the standard does: a message is a
+namespaced tree of elements, an element is typed, bounded and may carry a code
+list from the external code sets. Nothing else in the package hard-codes an
+element path. `validate.py` reads a file by naming elements from it,
+`messages.py` writes one in the order it gives, and `/_mock/dictionary` serves
+it. The test that matters most, `GeneratedMessagesAreValid` in
+`tests/test_dictionary.py`, checks every message the mock writes against the same
+dictionary it checks yours against, and against the published XSDs, so a
+declaration that is wrong about the standard is caught rather than
+self-consistent.
 
 ## One pipeline, two doors
 
-A `pain.001` arrives by `POST /payments` today and by a drop directory in 0.2.
-Both feed the same pipeline: read, validate, decide, book, queue. The decision
-(`accounts.decide`) looks at the debtor account's behaviour and the balance and
-produces, per payment, an outcome and a reason code. Booking moves balances.
-Queueing puts the `pain.002` in the mailbox now and the `camt.054`,
-`camt.053` and any `pacs.004` on the clock for the date they are due.
+A `pain.001` arrives by `POST /payments`; a drop directory is the second door
+and is 0.2. The pipeline is read, validate, decide, book, queue.
+`accounts.decide` reads the behaviour of whichever account the rule is about -
+debtor-side ones from the debtor, `closed-account` and `bad-bank-id` from a
+creditor account the bank holds - and produces an outcome and a reason code per
+payment. `accounts.book` moves balances, debit side only. `outbox.queue_status`
+puts the `pain.002` on the `message` table due `--status-delay-ms` after
+receipt, and the `camt.054` and `camt.053` are written as the clock reaches
+them rather than predicted in advance, because a later file can add payments to
+the same account and day.
 
 ## A clock, not a sleep
 
-Nothing in the mock waits. Settlement dates, the 15:00 cutoff, weekends,
-holidays and return windows are all computed against a bank-time clock that
-`POST /_mock/advance` moves. Advancing releases whatever came due: the
-notifications for that settlement date, the statement for each business day
-crossed, the returns whose window elapsed. A three-day return is a test line.
+Nothing in the mock waits. Settlement dates, the cutoff (15:00 by default),
+weekends and holidays are all computed against a bank-time clock that
+`POST /_mock/advance` moves; `clock.py` knows nothing about payments, and what
+happens when a date arrives belongs to the hooks the pipeline registers in
+`on_advance`. Advancing books what came due, writes the notifications for it,
+and closes a statement for every business day whose end it passed. The clock
+holds an offset from real time rather than a stored instant, so it keeps ticking
+between advances; and it does not go backwards, because whatever was queued for
+a date it had passed would come due a second time. The return window that makes
+a three-day return a test line is 0.2.
+
+## Refusing, and saying who is asking
+
+The control plane can reset the bank, rewrite every balance and behaviour and
+read every message it wrote, so `--auth` puts HTTP basic on every request
+including `/_mock/health` - a mock that answers an unauthenticated probe has
+told whoever is probing that it is there. The check runs before the body is
+read and before routing, so an unauthenticated file is never parsed and a `404`
+cannot be used to map what exists. Binding an address other machines can reach
+without `--auth` says so on stderr at startup, and `-q` does not silence it.
 
 ## Findings, not exceptions
 
@@ -47,5 +67,13 @@ what a bank does.
 ## What is deliberately absent
 
 No transport that needs cryptography (EBICS, SWIFT), no signed or encrypted
-files, no screening, no ledger beyond balances, no direct debits yet. Each is
-refused by name. The README's out-of-scope table is the authority.
+files, no screening, no ledger beyond balances, no direct debits, no credit side
+to a booking, and no returns yet. Each is refused by name rather than ignored:
+an encrypted body, an unknown message type and a payment from an account the
+bank does not hold all produce an answer that says what *is* supported. The
+README's out-of-scope table is the authority.
+
+There is also no debtor/creditor field on an account, which is a smaller
+decision of the same kind: which side an account stands on belongs to a
+payment, not to the account, and the sample file pays the same `GLOBEX` that an
+insufficient-funds test sends from.

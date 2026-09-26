@@ -82,10 +82,18 @@ that from tangling:
 - **Say when you are blocked.** If an issue depends on another that is not
   merged yet, say so on the issue and take the next one; do not build on an
   unmerged branch.
+- **Keeping up with `main`: rebase before the pull request exists, merge after.**
+  While a branch is only yours, rebase it onto `main` as often as you like. Once
+  a pull request is open and a review has started, bring `main` in with a merge
+  commit instead: rebasing a pushed branch means a force-push, which rewrites
+  the commits a reviewer has already read and can lose their comments' place.
+  The maintainer squashes on merge, so the merge commits do not survive into
+  `main` either way. This came up on every branch in 0.1, because `main` moved
+  under each of them more than once.
 - **Do not merge.** Pull requests are merged by the maintainer, after CI is
-  green and a review. Do not rebase or force-push once a review has started;
-  push follow-up commits instead. Do not tag releases or edit
-  `pyproject.toml`'s version; that is part of the release.
+  green and a review. Never force-push over a review; push follow-up commits
+  instead. Do not tag releases or edit `pyproject.toml`'s version; that is part
+  of the release.
 - **The junior developer's pull requests get the senior developer's review
   first**, as a comment on the pull request, before the maintainer looks. The
   senior developer's pull requests go straight to the maintainer.

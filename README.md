@@ -60,37 +60,41 @@ use them together. mock-bank is the third leg: `po_bridge` sends the order,
 `invoice_check` approves the invoice, and `payment_run` (coming in 0.2) moves
 the money.
 
-> **Status: 0.1 is being built.** The control plane runs today; the payment
-> pipeline is tracked in the [0.1 milestone](https://github.com/rseufert/mock-bank/milestone/1).
-> Everything below that is not yet true is marked with the release it lands in.
-
 ---
 
 ## Quick start
+
+Install it and start a bank:
 
 ```bash
 pip install mock-bank
 mock-bank --port 8080
 ```
 
+Then, in another terminal:
+
 ```bash
 curl http://127.0.0.1:8080/_mock/health
-bash examples/demo.sh          # the whole choreography, in curl
-python3 examples/client.py     # the same thing as a client you would copy
+curl http://127.0.0.1:8080/_mock/accounts
 ```
 
-`demo.sh` sends one file and shows you every message the bank sends back, then
-breaks it on purpose. `client.py` does the same in Python and matches each
-answer to the payment it is about by `EndToEndId`, which is what your own
-integration has to do. Both take `BANK_AUTH=user:password` for a mock started
-with `--auth`, and both ask the mock what it supports rather than assuming.
-
-Or from a checkout, with nothing to install:
+The guided tour lives in the repository rather than in the installed package,
+so it needs a checkout — which needs nothing installed either:
 
 ```bash
-python3 -m mockbank --port 8080
+git clone https://github.com/rseufert/mock-bank && cd mock-bank
+python3 -m mockbank --port 8080 &
+bash examples/demo.sh          # the whole choreography, in curl
+python3 examples/client.py     # the same thing, as a client you would copy
 python3 -m unittest discover -s tests -v
 ```
+
+`demo.sh` sends one payment file and shows you every message the bank sends
+back, then breaks it on purpose so you see a rejection and a duplicate too.
+`client.py` does the same in Python and matches each answer to the payment it
+is about by `EndToEndId`, which is what your own integration has to do. Both
+take `BANK_AUTH=user:password` for a mock started with `--auth`, and both ask
+the mock what it supports rather than assuming.
 
 ## Formats and choreography
 
@@ -98,14 +102,14 @@ ISO 20022 comes first; NACHA and BAI2 follow in 0.3. You send one payment file
 and the mock answers with the messages a real bank sends, in the order it
 sends them.
 
-| Message | Direction | When the mock sends it | What it carries | Release |
-| --- | --- | --- | --- | --- |
-| `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors | 0.1 |
-| `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only | now |
-| `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` | now |
-| `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included | now |
-| `pacs.004` | Out | Days later, on a return behaviour | A payment that had settled, coming back with a return reason | 0.2 |
-| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH | 0.3 |
+| Message | Direction | When the mock sends it | What it carries |
+| --- | --- | --- | --- |
+| `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors |
+| `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
+| `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
+| `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
+| `pacs.004` | Out | Days later, on a return behaviour | A payment that had settled, coming back with a return reason **(not yet — 0.2)** |
+| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(not yet — 0.3)** |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
@@ -116,7 +120,8 @@ mock says which it made:
 
 - **Bank transaction code.** Every debit the mock books carries
   `PMNT`/`ICDT`/`ESCT` (payments, issued credit transfer, SEPA credit
-  transfer); 0.1 speaks euro credit transfers.
+  transfer). Euro credit transfers are what this release speaks; other
+  rails are listed under what is out of scope.
 - **Coverage.** The dictionary declares the elements the mock reads and
   writes and those a real bank's file commonly carries, not every optional
   element of the XSD. An element the standard allows but the dictionary does
@@ -179,17 +184,17 @@ Each seeded account has a behaviour, changed at runtime with
 `PATCH /_mock/accounts/<id>`, the same way mock-edi changes a partner. The
 reason codes are the ISO 20022 external codes a real bank uses.
 
-| Behaviour | What the bank does | Codes | Release |
-| --- | --- | --- | --- |
-| `accept` | Accepts every payment and settles it on the requested date | `ACCP`, then booked | 0.1 |
-| `closed-account` | Rejects payments to one creditor account in `pain.002` | `AC04` | 0.1 |
-| `insufficient-funds` | Rejects payments once the debtor's balance would go negative | `AM04` | 0.1 |
-| `bad-bank-id` | Rejects a payment whose creditor bank identifier does not resolve | `RC01` | 0.1 |
-| `return-later` | Accepts and settles, then returns the payment N business days later | `pacs.004`, `AC04` or `MD07` | 0.2 |
-| `reject-file` | Rejects the whole file at group level | `RJCT`, `FF01` | 0.1 |
-| `duplicate-file` | Rejects a file whose `MsgId` it has already seen | `DUPL` | 0.1 |
-| `silent` | Sends no `pain.002` at all | none | 0.1 |
-| `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point | now |
+| Behaviour | What the bank does | Codes |
+| --- | --- | --- |
+| `accept` | Accepts every payment and settles it on the requested date | `ACCP`, then booked |
+| `closed-account` | Rejects payments to one creditor account in `pain.002` | `AC04` |
+| `insufficient-funds` | Rejects payments once the debtor's balance would go negative | `AM04` |
+| `bad-bank-id` | Rejects a payment whose creditor bank identifier does not resolve | `RC01` |
+| `return-later` | Accepts and settles, then returns the payment N business days later | `pacs.004`, `AC04` or `MD07` **(not yet — 0.2)** |
+| `reject-file` | Rejects the whole file at group level | `RJCT`, `FF01` |
+| `duplicate-file` | Rejects a file whose `MsgId` it has already seen | `DUPL` |
+| `silent` | Sends no `pain.002` at all | none |
+| `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point |
 
 ### The accounts it starts with
 
@@ -244,7 +249,7 @@ at another bank - a well-formed IBAN the mock does not hold - is not something
 a bank can check at acceptance, so a payment to it settles.
 
 An accepted payment debits its account on its settlement date, not on
-receipt. In 0.1 the mock books the **debit side only**: a payment into an
+receipt. The mock books the **debit side only**: a payment into an
 account it holds does not credit that account, so every balance change has a
 statement entry to explain it. That is a choice, and it is stated here.
 
@@ -276,23 +281,23 @@ thinks it means when that date is today. `--clock YYYY-MM-DDTHH:MM` pins where i
 Two ways in, both feeding one pipeline, plus a `/_mock` control plane shaped
 like mock-edi's so the two feel the same.
 
-| Surface | Endpoint | Notes | Release |
-| --- | --- | --- | --- |
-| Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks | now |
-| Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets | now |
-| Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright | now |
-| Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) | now |
-| Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine | now |
-| One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected | now |
-| Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice | now |
-| What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent | now |
-| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
-| Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown | now |
-| Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
-| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole | now |
-| Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due | now |
-| Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file | now |
-| Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders | 0.2 |
+| Surface | Endpoint | Notes |
+| --- | --- | --- |
+| Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks |
+| Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets |
+| Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright |
+| Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) |
+| Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
+| One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
+| Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
+| What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
+| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters |
+| Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
+| Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
+| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole |
+| Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
+| Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
+| Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders **(not yet — 0.2)** |
 
 `GET /_mock/mailbox?raw` returns the message bodies one after another, each
 with its own XML declaration — what a bank's drop directory looks like to a
@@ -304,7 +309,7 @@ learnt something no real bank sends. Parse one message at a time, or use
 
 Anything not built yet answers `404` with a body that names what is supported
 and what is planned, rather than pretending. With the mailbox and the request
-log, every endpoint 0.1 promised answers, so that list is now empty.
+log, every endpoint this release promised answers, so that list is empty.
 
 ## Configuration
 
@@ -346,7 +351,7 @@ mockbank/db.py         the schema, the upgrade, and the seeded accounts
 mockbank/messages.py   reading a pain.001 into a PaymentFile, and writing the pain.002 and camt.054 the bank sends back
 mockbank/outbox.py     what the bank sends and when: the message queue, release as the clock moves, the mailbox
 mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
-mockbank/server.py     the HTTP surface: control plane, dictionary, accounts and validation today, the pipeline as 0.1 lands
+mockbank/server.py     the HTTP surface: the control plane, the dictionary, the accounts, the pipeline and the mailbox
 mockbank/validate.py   findings about a payment file: refusals, structure, and the mock's own checks
 ```
 
@@ -373,7 +378,7 @@ than half-supporting it.
 
 | Release | Scope | Done when |
 | --- | --- | --- |
-| 0.1 | ISO 20022 credit transfers: `pain.001` in; `pain.002`, `camt.054`, `camt.053` out; accounts, balances, cutoff, holidays, clock; every behaviour above except `return-later`; HTTP only | Every message the mock writes validates against its own dictionary; the demo tour runs in CI |
+| 0.1 | ISO 20022 credit transfers: `pain.001` in; `pain.002`, `camt.054`, `camt.053` out; accounts, balances, cutoff, holidays, clock; every behaviour above except `return-later`; HTTP only | **Done.** Every message the mock writes validates against its own dictionary and against the published XSDs; the tour and the example client run in CI |
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, the `payment_run` example with its six tests | `payment_run` passes in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | The same `payment_run` tests pass in NACHA mode |
 
