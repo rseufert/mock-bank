@@ -20,8 +20,12 @@ written after the response is a row that test can lose on a slow runner.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 import html
 import json
+import socketserver
 import sqlite3
 import sys
 import threading
@@ -93,12 +97,15 @@ class Config:
 
     def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
                  timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock="",
-                 allow_duplicates=False, status_delay_ms=0):
+                 allow_duplicates=False, status_delay_ms=0, auth=""):
         self.host = host
         # A MsgId seen before is DUPL unless this is set, as at a real bank.
         self.allow_duplicates = allow_duplicates
         # How long after receipt the pain.002 is due; 0 so a test sees it at once.
         self.status_delay_ms = status_delay_ms
+        # "user:password", or empty for a mock anyone who can reach the port
+        # may reset. Checked by Handler._authorised.
+        self.auth = auth
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
@@ -240,6 +247,11 @@ class Handler(BaseHTTPRequestHandler):
         path, query = _split(self.path)
         self._head = method == "HEAD"
         self._begin_log(method, path)
+        if not self._authorised():
+            # Before the body is read, so an unauthenticated POST /payments
+            # does not get its file parsed, and before routing, so there is no
+            # endpoint whose existence an unauthenticated caller can confirm.
+            return self._challenge()
         try:
             body = self._read_body()
         except _BodyError as error:
@@ -614,6 +626,65 @@ class Handler(BaseHTTPRequestHandler):
                                   % (len(body), length))
         return body
 
+    # -- who is asking ----------------------------------------------------
+
+    def _authorised(self) -> bool:
+        """Whether the request carries the credentials `--auth` asked for.
+
+        Every endpoint, including `/_mock/health` and the index: a mock that
+        answers an unauthenticated probe has told whoever is probing that it is
+        there and which version it is, and the whole point of the flag is that
+        the port is reachable by people who should not be reaching it.
+        """
+        expected = self.state.config.auth
+        if not expected:
+            return True
+        header = self.headers.get("Authorization", "")
+        # The scheme name is case-insensitive (RFC 7235), and some clients send
+        # it lowercase.
+        if header[:6].lower() != "basic ":
+            return False
+        try:
+            given = base64.b64decode(header[6:], validate=True)
+        except (binascii.Error, ValueError):
+            return False
+        # Bytes, not text, and this is not only tidiness: `compare_digest`
+        # *raises* TypeError on a str containing non-ASCII rather than
+        # returning False, and it is called outside the handler's try. So a
+        # curl with an accented username used to drop the connection, and an
+        # --auth with one could never be satisfied by anything - the operator
+        # believing the port was guarded while nothing could get in, which is
+        # the failure check_auth exists to prevent.
+        #
+        # Constant time over the whole `user:password`, so the comparison does
+        # not leak how much of the credential was right. The stakes here are
+        # low; the one-line version of the right answer costs nothing.
+        return hmac.compare_digest(given, expected.encode("utf-8"))
+
+    def _challenge(self) -> None:
+        """A 401 that says how to authenticate, and nothing about the endpoint.
+
+        The request body is deliberately never read - that is the point of
+        refusing before reading it - which leaves bytes on the socket that a
+        kept-alive connection would take for the next request. So the
+        connection is closed rather than reused. Today the server speaks
+        HTTP/1.0 and closes anyway; this does not depend on that staying true.
+        """
+        self.close_connection = True
+        self._log_before_answering(401)
+        payload = json.dumps({
+            "error": "this mock-bank was started with --auth, so every request "
+                     "needs HTTP basic credentials",
+        }, indent=2).encode("utf-8") + b"\n"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="mock-bank"')
+        self.send_header("Connection", "close")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if not self._head:
+            self.wfile.write(payload)
+
     # -- the request log --------------------------------------------------
 
     # One request's row, in the making. A handler object can serve more than
@@ -728,6 +799,28 @@ class _Server(ThreadingHTTPServer):
 
     daemon_threads = True
     state: State
+
+    def server_bind(self):
+        """Bind without asking DNS what this machine is called.
+
+        ``HTTPServer.server_bind`` sets ``server_name`` from
+        ``socket.getfqdn(host)``, a reverse lookup on the bind address. On a
+        host with no reverse record for what it is binding - a CI runner, a
+        container on a network with no resolver for ``0.0.0.0`` - that lookup
+        waits for DNS to time out, and the mock does not finish starting until
+        it does. It cost a minute on the macOS runner, which is how it was
+        found: the exposure warning appeared and the "listening on" banner did
+        not, with only the bind between them.
+
+        Nothing here needs the FQDN. ``server_name`` and ``server_port`` are
+        read by the CGI handlers in ``http.server``, which this does not use, so
+        the address as given is both cheaper and more honest: it is what the
+        mock was told to bind.
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
     def server_close(self):
         super().server_close()

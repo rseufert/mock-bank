@@ -10,6 +10,14 @@ says so where it does.
 
 ### Fixed
 
+- **Binding `0.0.0.0` no longer waits for DNS before the mock finishes
+  starting.** `http.server` sets its `server_name` from a reverse lookup on the
+  bind address; on a host with no reverse record for what it is binding - a CI
+  runner, or a container on a network with no resolver for `0.0.0.0`, which is
+  what the image binds - that lookup waited for DNS to time out first. It cost a
+  minute on a macOS runner. Nothing in the mock needs the name, so the address
+  as given is used instead.
+
 - **A field sent as the wrong JSON type is a `400` naming that field**, not a
   `500` with a traceback. `POST /_mock/accounts` with `{"id": 5}`, or a `name`
   sent as an object or an `iban` as a list, used to reach SQLite and fail
@@ -21,6 +29,23 @@ says so where it does.
 
 ### Added
 
+- **`--auth USER:PASSWORD`, and a warning when the control plane is open**
+  (#12). HTTP basic credentials on every request, including `/_mock/health` and
+  the index, compared with `hmac.compare_digest`; without them, `401` and
+  `WWW-Authenticate: Basic realm="mock-bank"`. The check runs before the body
+  is read, so an unauthenticated `POST /payments` never has its file parsed,
+  and the refused request is still recorded in the request log. Binding an
+  address other machines can reach with no `--auth` prints a warning to stderr
+  naming the flag and what is at stake, and `-q` does not silence it: `-q` is
+  about the access log, not about whether the bank is open to the network. The
+  README's `docker run` example passes `--auth`, since the image binds
+  `0.0.0.0`. A value with no colon, or with an empty user or password, is
+  refused at startup rather than accepted as a credential nothing could ever
+  match. The warning and the startup banner are flushed: before Python 3.9 a
+  piped stderr is block-buffered, so in a container - where the output is
+  collected rather than shown on a terminal - the warning sat in a buffer until
+  something else filled it, and a warning that reaches `docker logs` minutes
+  after the port opened is not a warning.
 - **The mock checks its own output against the standard** (#10).
   `GeneratedMessagesAreValid` sends the sample under every account behaviour
   and walks every message the mock writes against its dictionary, counting
