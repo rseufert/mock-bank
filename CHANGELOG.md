@@ -21,6 +21,20 @@ says so where it does.
 
 ### Added
 
+- **The bank clock** (#4). `mockbank/clock.py` keeps bank time, and nothing in
+  the mock waits for it: `POST /_mock/advance?days=N` moves it by calendar days
+  and `?to=YYYY-MM-DD` to midnight on a date, and either way the answer lists
+  the business days the move passed through, because three days from a Thursday
+  is Sunday to a calendar and Tuesday to a bank. `settlement_date()` is the
+  later of the requested execution date and the day the bank can start on - the
+  day of receipt before the cutoff, the next business day at or after it -
+  rolled forward past weekends and holidays. `GET/PUT /_mock/holidays` is the
+  holiday calendar, `GET /_mock/state` reports the clock, and the clock never
+  goes backwards. New flags: `--timezone` (IANA name, `UTC` by default, and on
+  Python 3.8 a named zone is refused rather than quietly treated as `UTC`),
+  `--cutoff HH:MM` and `--clock YYYY-MM-DDTHH:MM`; `POST /_mock/reset` returns
+  bank time to where `--clock` put it rather than to real time.
+
 - **SQLite state and the accounts endpoints** (#3). The mock now keeps what it
   knows: `mockbank/db.py` declares the schema and the indexes, records the
   schema version in the file, upgrades a `--db` file written by an older

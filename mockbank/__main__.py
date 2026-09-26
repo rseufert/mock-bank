@@ -6,6 +6,7 @@ import sys
 
 from . import __version__
 from .accounts import BEHAVIOURS
+from .clock import DEFAULT_CUTOFF, Invalid
 from .server import Config, make_server
 
 
@@ -21,6 +22,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8080, help="port (default: 8080)")
     p.add_argument("--db", dest="db_path", default=":memory:",
                    help="SQLite file, or :memory: (default) for a throwaway bank")
+    p.add_argument("--timezone", default="UTC",
+                   help="bank time's zone, an IANA name such as "
+                        "Europe/Amsterdam (default: UTC). Needs zoneinfo, so "
+                        "on Python 3.8 only UTC is available and anything else "
+                        "is refused rather than silently treated as UTC")
+    p.add_argument("--cutoff", default=DEFAULT_CUTOFF, metavar="HH:MM",
+                   help="the hour the bank stops taking today's payments for "
+                        "today; one received at or after it settles on the "
+                        "next business day (default: %s)" % DEFAULT_CUTOFF)
+    p.add_argument("--clock", default="", metavar="YYYY-MM-DDTHH:MM",
+                   help="start bank time at this moment instead of now, for a "
+                        "run whose settlement dates are reproducible")
     p.add_argument("-q", "--quiet", action="store_true", help="log nothing per request")
     p.add_argument("--version", action="version", version="mock-bank " + __version__)
     return p
@@ -29,11 +42,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = Config(host=args.host, port=args.port, db_path=args.db_path,
-                    quiet=args.quiet)
-    httpd = make_server(config)
+                    quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
+                    clock=args.clock)
+    try:
+        httpd = make_server(config)
+    except Invalid as error:
+        # A clock the mock cannot keep is refused at startup rather than at the
+        # first payment: every settlement date in the run depends on it.
+        print("mock-bank: %s" % error, file=sys.stderr)
+        return 2
     if not args.quiet:
-        print("mock-bank %s listening on http://%s:%d/  (db: %s)"
-              % (__version__, config.host, httpd.server_address[1], config.db_path),
+        print("mock-bank %s listening on http://%s:%d/  (db: %s, bank time: "
+              "%s, cutoff %s)"
+              % (__version__, config.host, httpd.server_address[1],
+                 config.db_path, config.timezone, config.cutoff),
               file=sys.stderr)
     try:
         httpd.serve_forever()

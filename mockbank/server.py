@@ -30,7 +30,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Tuple
 
-from . import __version__, accounts, db, schema, validate
+from . import (__version__, accounts, clock as clock_module, db, schema,
+               validate)
 from .accounts import BEHAVIOURS
 
 # What this release answers, so a 404 can say so and the index can list it.
@@ -43,6 +44,8 @@ SUPPORTED = [
     "GET /_mock/behaviours",
     "GET /_mock/accounts", "POST /_mock/accounts",
     "GET /_mock/accounts/<id>", "PATCH /_mock/accounts/<id>",
+    "POST /_mock/advance",
+    "GET /_mock/holidays", "PUT /_mock/holidays",
     "POST /_mock/validate",
 ]
 
@@ -50,8 +53,6 @@ SUPPORTED = [
 PLANNED = [
     "POST /payments",
     "GET /_mock/mailbox",
-    "POST /_mock/advance",
-    "GET /_mock/holidays", "PUT /_mock/holidays",
     "GET /_mock/requests",
 ]
 
@@ -64,6 +65,10 @@ NOTES = {
                            "and their behaviours",
     "PATCH /_mock/accounts/<id>": "change a behaviour, a balance or the "
                                   "closed flag while it runs",
+    "POST /_mock/advance": "move bank time: ?days=N (calendar days) or "
+                           "?to=YYYY-MM-DD",
+    "PUT /_mock/holidays": "a JSON list of YYYY-MM-DD dates the bank does "
+                           "not settle on",
     "POST /_mock/reset": "back to the four seeded accounts",
     "POST /_mock/validate": "send a pain.001, get its findings as prose, one "
                             "line each; nothing is stored",
@@ -77,11 +82,15 @@ MAX_BODY = 32 * 1024 * 1024
 class Config:
     """Everything the server can be told, with the defaults it runs with."""
 
-    def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False):
+    def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
+                 timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock=""):
         self.host = host
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
+        self.timezone = timezone
+        self.cutoff = cutoff
+        self.clock = clock
 
 
 class State:
@@ -94,8 +103,17 @@ class State:
         self.lock = threading.RLock()
         self.conn = db.connect(config.db_path)
         db.seed(self.conn)
+        # The clock reads its holidays from the table rather than holding them,
+        # so that PUT /_mock/holidays and a restart on --db agree about them.
+        self.clock = clock_module.Clock(
+            zone=config.timezone, cutoff=config.cutoff, start=config.clock,
+            holidays=self._holidays)
         self.started = db.utcnow()
         self.resets = 0
+
+    def _holidays(self):
+        return [row["day"] for row in db.rows(
+            self.conn, "SELECT day FROM holiday ORDER BY day")]
 
     def reset(self) -> None:
         """Back to the seeded bank, without restarting the process.
@@ -108,6 +126,7 @@ class State:
                 self.conn.execute("DELETE FROM %s" % table)
             self.conn.commit()
             db.seed(self.conn)
+            self.clock.reset()
             self.resets += 1
 
     def close(self) -> None:
@@ -132,6 +151,7 @@ class State:
                 # Per currency, in minor units. See accounts.totals.
                 "balances": accounts.totals(self.conn),
                 "holidays": db.count(self.conn, "holiday"),
+                "clock": self.clock.snapshot(),
                 "behaviours": sorted(BEHAVIOURS),
                 "supported": SUPPORTED,
                 "planned": PLANNED,
@@ -254,6 +274,14 @@ class Handler(BaseHTTPRequestHandler):
         if head == "accounts":
             return self._accounts(method, rest, body)
 
+        if head == "advance" and not rest:
+            if method != "POST":
+                return self._method_not_allowed(method, ["POST"])
+            return self._advance(query)
+
+        if head == "holidays" and not rest:
+            return self._holidays(method, body)
+
         if head == "validate" and not rest:
             if method != "POST":
                 return self._method_not_allowed(method, ["POST"])
@@ -305,6 +333,65 @@ class Handler(BaseHTTPRequestHandler):
                                         "behaviours": sorted(BEHAVIOURS)})
             return self._json(200, row)
         return self._method_not_allowed(method, ["GET", "PATCH"])
+
+    def _advance(self, query: Dict[str, List[str]]) -> None:
+        """Move bank time, then let whatever came due happen.
+
+        `?days=N` counts calendar days and `?to=YYYY-MM-DD` moves to midnight on
+        that date; the answer says which it did and lists the business days the
+        move passed through, because the two readings differ and a caller should
+        not have to guess which one it got.
+        """
+        raw_days, raw_to = _first(query, "days"), _first(query, "to")
+        if bool(raw_days) == bool(raw_to):
+            return self._json(400, {
+                "error": "advance takes ?days=N or ?to=YYYY-MM-DD, and one of "
+                         "them", "given": self.path})
+        try:
+            if raw_days:
+                try:
+                    days = float(raw_days)
+                except ValueError:
+                    raise clock_module.Invalid(
+                        "days %r is not a number of days" % raw_days) from None
+                outcome = self.state.clock.advance(days=days)
+            else:
+                outcome = self.state.clock.advance(
+                    to=clock_module.parse_date(raw_to, "to"))
+        except clock_module.Invalid as error:
+            return self._json(400, {"error": str(error)})
+        return self._json(200, outcome)
+
+    def _holidays(self, method: str, body: bytes) -> None:
+        """The days the bank does not settle on, as a JSON list of dates.
+
+        A whole list, replaced whole: a holiday calendar is one thing a tester
+        sets, not a collection they add to one date at a time, and PUT is the
+        method that says so.
+        """
+        conn = self.state.conn
+        if method == "GET":
+            return self._json(200, self.state.clock.snapshot()["holidays"])
+        if method != "PUT":
+            return self._method_not_allowed(method, ["GET", "PUT"])
+        try:
+            given = json.loads(body.decode("utf-8")) if body.strip() else []
+        except (ValueError, UnicodeDecodeError):
+            given = None
+        if not isinstance(given, list):
+            return self._json(400, {
+                "error": "the body has to be a JSON list of dates, as in "
+                         '["2026-12-25", "2026-12-26"]'})
+        try:
+            days = sorted({clock_module.parse_date(value, "holiday").isoformat()
+                           for value in given})
+        except clock_module.Invalid as error:
+            return self._json(400, {"error": str(error)})
+        conn.execute("DELETE FROM holiday")
+        conn.executemany("INSERT INTO holiday (day) VALUES (?)",
+                         [(day,) for day in days])
+        conn.commit()
+        return self._json(200, days)
 
     def _validate(self, body: bytes) -> None:
         """POST /_mock/validate: the findings as prose, nothing stored."""
@@ -453,6 +540,11 @@ def _split(target: str) -> Tuple[str, Dict[str, List[str]]]:
 def _segments(path: str) -> List[str]:
     """The segments of a still-encoded path, each percent-decoded once."""
     return [urllib.parse.unquote(part) for part in path.split("/") if part]
+
+
+def _first(query: Dict[str, List[str]], name: str, default: str = "") -> str:
+    values = query.get(name) or []
+    return values[0] if values else default
 
 
 def _json_body(body: bytes):
