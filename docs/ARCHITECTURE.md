@@ -9,7 +9,7 @@ builds each one is the place to argue with it.
 
 Everything is derived from a dictionary.
 
-`schema.py` (issue: message model) describes ISO 20022 the way the standard
+`schema.py` describes ISO 20022 the way the standard
 does: a message is a namespaced tree of elements, an element is typed,
 bounded and may carry a code list from the external code sets. Nothing else in
 the package hard-codes an element path. The reader names elements from it, the

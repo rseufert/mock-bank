@@ -97,8 +97,28 @@ sends them.
 | `pacs.004` | Out | Days later, on a return behaviour | A payment that had settled, coming back with a return reason | 0.2 |
 | NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH | 0.3 |
 
-Versions: `pain.001.001.09` and `camt.053.001.08` are written, the versions
-most banks accept today; older ones (`.001.03`) are accepted on input.
+Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
+accepted as well and read into the same model. The mock writes
+`pain.002.001.10`, `camt.054.001.08` and `camt.053.001.08`, the versions that go
+with `pain.001.001.09` and that most banks accept today. That is a choice, not
+the only right answer; so are the others the standard leaves open, and the
+mock says which it made:
+
+- **Bank transaction code.** Every debit the mock books carries
+  `PMNT`/`ICDT`/`ESCT` (payments, issued credit transfer, SEPA credit
+  transfer); 0.1 speaks euro credit transfers.
+- **Coverage.** The dictionary declares the elements the mock reads and
+  writes and those a real bank's file commonly carries, not every optional
+  element of the XSD. An element the standard allows but the dictionary does
+  not declare is reported as a warning naming its path, never silently
+  dropped.
+- **Minor units.** Amounts are integers in the currency's ISO 4217 minor units
+  everywhere but the wire; a currency the mock has no exponent for is taken to
+  have two.
+
+Every element of every message is declared once in `mockbank/schema.py`, and
+`GET /_mock/dictionary` serves those declarations, with the code sets and the
+choices above, as JSON.
 
 Each payment keeps its `EndToEndId` through every message, so a client can
 match a status, a statement line and a return to the invoice it paid.
@@ -135,6 +155,7 @@ like mock-edi's so the two feel the same.
 | Surface | Endpoint | Notes | Release |
 | --- | --- | --- | --- |
 | Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks | now |
+| Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets | now |
 | Payment file in | `POST /payments` | Answers with a JSON summary: accepted, rejected, what is queued | 0.1 |
 | Collect answers | `GET /_mock/mailbox` | `?leave` to peek, `?raw` for the XML | 0.1 |
 | Accounts | `GET/POST /_mock/accounts`, `PATCH /_mock/accounts/<id>` | Balances, behaviour, holiday list | 0.1 |
@@ -168,6 +189,7 @@ docker run -p 8080:8080 mock-bank
 
 ```
 mockbank/accounts.py   the account behaviours, declared once
+mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
 mockbank/server.py     the HTTP surface: control plane today, the pipeline as 0.1 lands
 ```
 
