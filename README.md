@@ -75,9 +75,15 @@ mock-bank --port 8080
 
 ```bash
 curl http://127.0.0.1:8080/_mock/health
-curl http://127.0.0.1:8080/_mock/state
-bash examples/demo.sh
+bash examples/demo.sh          # the whole choreography, in curl
+python3 examples/client.py     # the same thing as a client you would copy
 ```
+
+`demo.sh` sends one file and shows you every message the bank sends back, then
+breaks it on purpose. `client.py` does the same in Python and matches each
+answer to the payment it is about by `EndToEndId`, which is what your own
+integration has to do. Both take `BANK_AUTH=user:password` for a mock started
+with `--auth`, and both ask the mock what it supports rather than assuming.
 
 Or from a checkout, with nothing to install:
 

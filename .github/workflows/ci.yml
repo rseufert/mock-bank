@@ -92,8 +92,35 @@ jobs:
             curl -sf http://127.0.0.1:8080/_mock/health >/dev/null && break
             sleep 0.25
           done
-          curl -sf http://127.0.0.1:8080/_mock/health
           bash examples/demo.sh
+      - name: Run the example client against a fresh mock
+        run: |
+          set -eu
+          python -m mockbank --port 8082 -q &
+          MOCK_PID=$!
+          trap 'kill $MOCK_PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8082/_mock/health >/dev/null && break
+            sleep 0.25
+          done
+          python examples/client.py --base http://127.0.0.1:8082
+      - name: Both again, against a mock that wants credentials
+        run: |
+          set -eu
+          python -m mockbank --port 8083 -q --auth tester:s3cret &
+          MOCK_PID=$!
+          trap 'kill $MOCK_PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -sf -u tester:s3cret http://127.0.0.1:8083/_mock/health >/dev/null \
+              && break
+            sleep 0.25
+          done
+          # The tour and the client each take credentials through one variable
+          # rather than having a second version of themselves. If that ever
+          # stops being true, it stops here rather than in someone's terminal.
+          BASE=http://127.0.0.1:8083 BANK_AUTH=tester:s3cret bash examples/demo.sh
+          BANK_AUTH=tester:s3cret python examples/client.py \
+            --base http://127.0.0.1:8083
 
   package:
     name: package builds and installs
@@ -116,9 +143,18 @@ jobs:
           test "$(cd /tmp && python -c 'import mockbank; print(mockbank.__version__)')" = "$VERSION"
           mock-bank --port 8081 -q &
           for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:8081/_mock/health && break
+            curl -sf http://127.0.0.1:8081/_mock/health >/dev/null && break
             sleep 0.25
           done
+          # Not a health check: the installed console script has to take a real
+          # payment file and answer for it. A wheel that starts and cannot do
+          # the one thing the package is for has still shipped broken.
+          curl -sS -X POST --data-binary @tests/samples/pain001_four_payments.xml \
+            http://127.0.0.1:8081/payments \
+            | python -c "import json,sys; a=json.load(sys.stdin); \
+                         assert a['status']=='PART', a; \
+                         assert a['accepted']==2 and a['rejected']==2, a; \
+                         print('the wheel took a file:', a['status'])"
           curl -sf http://127.0.0.1:8081/_mock/state | head -c 400
       - uses: actions/upload-artifact@v4
         with:
