@@ -13,7 +13,7 @@ keywords = ["bank", "iso20022", "pain.001", "pain.002", "camt.053", "camt.054",
             "pacs.004", "nacha", "bai2", "payments", "mock", "testing",
             "procure-to-pay", "reconciliation"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",

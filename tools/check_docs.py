@@ -6,13 +6,20 @@ still true, only whether a file exists that nobody documented, or a file is
 documented that no longer exists.  That catches the common failure - a module
 added without a line in the index - and leaves the judgement calls to review.
 
-Five checks:
+Six checks:
 
 1. every tracked file is named in docs/FILES.md
 2. every file named in docs/FILES.md exists
 3. every module of the package appears in the README's layout block
 4. every command-line flag is mentioned in the README
 5. every partner behaviour has a row in the README's behaviour table
+6. every file docs/ARCHITECTURE.md names exists
+
+The sixth is the same check as the second, one document over: ARCHITECTURE.md
+explains the design by naming the modules that implement it, and it had been
+pointing at `tests/test_generated.py` for a while - a file that has never
+existed, for a test that lives in `tests/test_dictionary.py`. A reader who went
+looking would have concluded the document was describing a different project.
 
 The fourth asks the real argument parser for its flags, so a flag added to
 `mockbank/__main__.py` without a word in the README fails the build - fourteen
@@ -37,6 +44,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX = os.path.join("docs", "FILES.md")
+ARCHITECTURE = os.path.join("docs", "ARCHITECTURE.md")
 README = "README.md"
 
 # Files that are their own documentation, or carry nothing worth describing.
@@ -126,6 +134,17 @@ def main():
                 "the behaviour %r has no row in the README's behaviour table"
                 % name)
 
+    # 6. every file ARCHITECTURE.md names exists, the way check 2 does for the
+    #    index. A design document that names a module is only useful while the
+    #    module is there to read.
+    architecture = read(ARCHITECTURE)
+    for token in sorted(set(PATH_RE.findall(architecture))):
+        if token in existing or token in basenames:
+            continue
+        problems.append(
+            "%s mentions `%s`, which does not exist - name the file that does"
+            % (ARCHITECTURE, token))
+
     if problems:
         print("documentation is out of date:\n")
         for problem in problems:
@@ -135,7 +154,8 @@ def main():
 
     print("docs/FILES.md covers every tracked file, names nothing that is gone, "
           "the README layout block lists every module, it mentions every "
-          "command-line flag, and it has a row for every behaviour.")
+          "command-line flag, it has a row for every behaviour, and "
+          "docs/ARCHITECTURE.md names nothing that is not there.")
     return 0
 
 
