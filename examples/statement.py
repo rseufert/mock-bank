@@ -43,10 +43,16 @@ def text_of(parent, name, default=""):
     return found.text if found is not None and found.text else default
 
 
-def signed(entry):
-    """An entry's amount, negative when the statement says it is a debit."""
-    amount = Decimal(text_of(entry, "Amt", "0"))
-    return -amount if text_of(entry, "CdtDbtInd") == "DBIT" else amount
+def signed(element):
+    """An amount, negative when the element beside it says DBIT.
+
+    Used for entries *and* for balances. ISO 20022 carries every amount as a
+    positive number with a `CdtDbtInd` next to it, so an overdrawn account's
+    closing balance is `16150.00` with `DBIT` rather than `-16150.00` - and
+    reading the amount alone makes it a credit of sixteen thousand.
+    """
+    amount = Decimal(text_of(element, "Amt", "0"))
+    return -amount if text_of(element, "CdtDbtInd") == "DBIT" else amount
 
 
 def balances(statement):
@@ -57,10 +63,14 @@ def balances(statement):
             continue
         code = text_of(balance, "Cd")
         if code in ("OPBD", "CLBD"):
-            # The balance amount as stated. A credit balance and a debit entry
-            # both carry a positive Amt with a CdtDbtInd beside it; `signed`
-            # applies that to the entries, which is where the sign matters.
-            found[code] = Decimal(text_of(balance, "Amt", "0"))
+            # Signed, like the entries. This read the amount alone at first, on
+            # the reasoning that the sign only mattered for entries - which is
+            # true right up to the first overdrawn account, where a closing
+            # balance of `16150.00 DBIT` was read as a credit and a statement
+            # that reconciled to the cent was reported as broken. An account
+            # going below zero is not an edge case here: it is what `accept` on
+            # a small balance does, by design.
+            found[code] = signed(balance)
     return found.get("OPBD"), found.get("CLBD")
 
 

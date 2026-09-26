@@ -13,6 +13,8 @@ import subprocess
 import sys
 import unittest
 
+from test_payments import sample
+
 from support import MockServerCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -111,6 +113,76 @@ class WhenTheMockWantsCredentials(MockServerCase):
         result = self.run_client("--auth", "tester:s3cret")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("INV-2026-0101", result.stdout)
+
+
+class TheStatementArithmetic(MockServerCase):
+    """`examples/statement.py`, over statements the mock really wrote.
+
+    The case that matters is an account that went below zero. ISO 20022 carries
+    every amount as a positive number with a `CdtDbtInd` beside it, so an
+    overdrawn closing balance is `16150.00` with `DBIT` - and reading the amount
+    without the indicator turns it into a credit of sixteen thousand, which made
+    a statement that reconciled to the cent print DOES NOT RECONCILE. Going
+    below zero is not an edge case here: it is what `accept` on a small balance
+    does, by design.
+    """
+
+    def setUp(self):
+        self.addCleanup(self.post, "/_mock/reset")
+
+    def overdraw(self):
+        """Leave ACME below zero, and return the statements the bank wrote."""
+        # accept, not insufficient-funds: the point is a booking that goes
+        # through and takes the balance negative, not one that is refused.
+        self.patch("/_mock/accounts/ACME", {"behaviour": "accept",
+                                            "balance": 10000})
+        answer = self.post("/payments", body=sample("pain001_four_payments.xml")).json()
+        settles = sorted(p["settlement_date"] for p in answer["payments"]
+                         if p["settlement_date"])
+        self.post("/_mock/advance?to=%s" % settles[0])
+        self.post("/_mock/advance?days=1")       # so that day's statement closes
+        self.assertLess(self.get("/_mock/accounts/ACME").json()["balance"], 0)
+        return self.get("/_mock/mailbox?type=camt.053&raw&leave").body
+
+    def run_statement(self, xml):
+        return subprocess.run(
+            [sys.executable, os.path.join(EXAMPLES, "statement.py")],
+            input=xml, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=120)
+
+    def test_an_overdrawn_statement_reconciles(self):
+        statements = self.overdraw()
+        # The case is only being tested if a DBIT balance is actually in there.
+        self.assertIn(b"DBIT", statements)
+        result = self.run_statement(statements)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = result.stdout.decode("utf-8")
+        self.assertNotIn("DOES NOT RECONCILE", output, output)
+        # And it reports the closing balance as the negative number it is,
+        # rather than as a large credit.
+        self.assertRegex(output, r"CLBD\s+-\d")
+
+    def test_every_statement_it_reads_reconciles(self):
+        statements = self.overdraw()
+        output = self.run_statement(statements).stdout.decode("utf-8")
+        shown = [line for line in output.splitlines() if "CLBD" in line]
+        self.assertTrue(shown, output)
+        for line in shown:
+            self.assertIn("reconciles", line)
+
+    def test_it_says_so_when_they_do_not_add_up(self):
+        # The check has to be able to fail, or it is decoration. statement-gap
+        # is the behaviour that produces a real one; this is the same shape,
+        # built by hand so the test does not depend on that behaviour's details.
+        broken = self.overdraw().replace(b"<Amt Ccy=\"EUR\">100.00</Amt>",
+                                         b"<Amt Ccy=\"EUR\">999.00</Amt>", 1)
+        output = self.run_statement(broken).stdout.decode("utf-8")
+        self.assertIn("DOES NOT RECONCILE", output, output)
+
+    def test_nothing_in_is_not_a_crash(self):
+        result = self.run_statement(b"")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no statements", result.stdout.decode("utf-8"))
 
 
 class TheTourOnlyUsesEndpointsThisMockHas(unittest.TestCase):
