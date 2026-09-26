@@ -8,6 +8,17 @@ says so where it does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A field sent as the wrong JSON type is a `400` naming that field**, not a
+  `500` with a traceback. `POST /_mock/accounts` with `{"id": 5}`, or a `name`
+  sent as an object or an `iban` as a list, used to reach SQLite and fail
+  there; a `500` from a mock is indistinguishable from the mock being broken.
+- **`PUT /_mock/accounts/<id>` is refused rather than treated as a partial
+  `PATCH`.** It used to do a partial update while the `405` other methods got
+  advertised only `GET` and `PATCH`, so a client doing a full replace got a
+  partial one and no word about it.
+
 ### Added
 
 - **SQLite state and the accounts endpoints** (#3). The mock now keeps what it

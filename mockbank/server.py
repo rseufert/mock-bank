@@ -289,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
             if row is None:
                 return self._unknown_account(identifier)
             return self._json(200, row)
-        if method in ("PATCH", "PUT"):
+        if method == "PATCH":
             payload = _json_body(body)
             if payload is None:
                 return self._json(400, {
