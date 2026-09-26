@@ -50,13 +50,19 @@ SUPPORTED = [
     "POST /_mock/validate",
     "POST /payments",
     "GET /_mock/payments", "GET /_mock/payments/<EndToEndId>",
-    "GET /_mock/mailbox",
+    "GET /_mock/mailbox", "GET /_mock/mailbox/<id>",
+    "POST /_mock/mailbox/<id>/unread",
+    "GET /_mock/requests",
 ]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
-PLANNED = [
-    "GET /_mock/requests",
-]
+# Empty, and that is the news: with the mailbox and the request log, every
+# endpoint the 0.1 plan committed to now answers. What 0.2 adds - returns, and
+# the drop and pickup directories - arrives as messages in the mailbox and as
+# command-line flags, not as new endpoints, so there is nothing here to promise.
+# Kept rather than deleted because the shape of the 404 body is something a
+# client may read, and because 0.3's NACHA and BAI2 will fill it again.
+PLANNED: List[str] = []
 
 # A line of explanation for the endpoints that are not self-evident from their
 # path; the rest of the index just lists them.
@@ -79,9 +85,15 @@ NOTES = {
     "GET /_mock/payments": "every payment the bank decided on, newest first",
     "GET /_mock/accounts/<id>/statements": "the camt.053 statements issued "
                                            "for an account, oldest first",
-    "GET /_mock/mailbox": "the messages the bank has sent and you have not "
+    "GET /_mock/mailbox": "?leave to peek, ?raw for the XML, ?type=pain.002 to "
+                          "filter: the messages the bank has sent and you have not "
                           "collected, oldest first; collecting takes them",
 }
+
+# How many request-log rows `GET /_mock/requests` hands back. The issue asks
+# for a hundred; a tester reading what their client just sent wants the last
+# few, and a mock left running for a day has thousands.
+REQUEST_LOG_PAGE = 100
 
 # A request body larger than this is refused rather than read into memory. A
 # pain.001 with a thousand payments is a few megabytes; this is generous.
@@ -348,13 +360,13 @@ class Handler(BaseHTTPRequestHandler):
             # ?all every one, newest first.
             return self._json(200, found if "all" in query else found[0])
 
-        if head == "mailbox" and not rest:
+        if head == "mailbox":
+            return self._mailbox(method, rest, query)
+
+        if head == "requests" and not rest:
             if method != "GET":
                 return self._method_not_allowed(method, ["GET"])
-            # Release first, so a pain.002 held back by --status-delay-ms
-            # appears once its time has come without anything else happening.
-            self.state.release()
-            return self._json(200, outbox.collect(conn, self.state.now()))
+            return self._json(200, self._requests(query))
 
         if head == "validate" and not rest:
             if method != "POST":
@@ -513,6 +525,75 @@ class Handler(BaseHTTPRequestHandler):
         }
         return self._json(422 if decision.rejected_outright else 202, answer)
 
+    def _mailbox(self, method: str, rest: List[str],
+                 query: Dict[str, List[str]]) -> None:
+        """What the bank has sent and the client has not taken.
+
+        Every path here releases first, `?leave` included: whether a caller is
+        collecting or peeking, the question they are asking is "what is waiting
+        for me", and a `pain.002` held back by `--status-delay-ms` is waiting
+        once its time has come. Peeking should not show a different bank from
+        collecting.
+        """
+        conn = self.state.conn
+        if not rest:
+            if method != "GET":
+                return self._method_not_allowed(method, ["GET"])
+            self.state.release()
+            rows = outbox.collect(conn, self.state.now(),
+                                  leave=_flag(query, "leave"),
+                                  kind=_first(query, "type"))
+            if _flag(query, "raw"):
+                # The bodies and nothing else. See outbox.RAW_SEPARATOR on why
+                # this is a sequence of documents rather than one document.
+                return self._text(200, outbox.raw(rows),
+                                  "application/xml; charset=utf-8")
+            return self._json(200, outbox.as_json(rows))
+
+        if len(rest) == 1:
+            if method != "GET":
+                return self._method_not_allowed(method, ["GET"])
+            self.state.release()
+            row = outbox.message(conn, rest[0])
+            if row is None:
+                return self._unknown_message(rest[0])
+            return self._text(200, row["body"].strip() + "\n",
+                              "application/xml; charset=utf-8")
+
+        if len(rest) == 2 and rest[1] == "unread":
+            if method != "POST":
+                return self._method_not_allowed(method, ["POST"])
+            outcome = outbox.unread(conn, rest[0])
+            if not outcome:
+                return self._unknown_message(rest[0])
+            return self._json(200, outcome)
+
+        return self._not_found()
+
+    def _unknown_message(self, given: str) -> None:
+        self._json(404, {
+            "error": "no message %r" % given,
+            "waiting": outbox.waiting_ids(self.state.conn),
+        })
+
+    def _requests(self, query: Dict[str, List[str]]) -> List[Dict[str, Any]]:
+        """The newest rows of the request log, so a tester can see what they sent.
+
+        Newest first and bounded, because the point is the last few things that
+        happened and a mock left running has thousands. `?path=` matches on a
+        prefix, so `?path=/payments` finds the file posts without the caller
+        writing out a query string they did not keep.
+        """
+        sql = "SELECT id, method, path, status, at FROM request_log"
+        params: List[Any] = []
+        wanted = _first(query, "path")
+        if wanted:
+            sql += " WHERE path LIKE ?"
+            params.append(wanted + "%")
+        params.append(REQUEST_LOG_PAGE)
+        return db.rows(conn=self.state.conn,
+                       sql=sql + " ORDER BY id DESC LIMIT ?", params=params)
+
     def _validate(self, body: bytes) -> None:
         """POST /_mock/validate: the findings as prose, nothing stored."""
         payment_file, findings = validate.inspect(
@@ -668,6 +749,18 @@ def _first(query: Dict[str, List[str]], name: str, default: str = "") -> str:
     return values[0] if values else default
 
 
+def _flag(query: Dict[str, List[str]], name: str) -> bool:
+    """A flag written `?leave` or `?raw`, with or without a value.
+
+    `keep_blank_values` in `_split` is what makes the valueless form visible at
+    all; this is what makes `?leave=0` mean what it says rather than being true
+    because the parameter was present.
+    """
+    if name not in query:
+        return False
+    return _first(query, name, "").lower() in ("", "1", "true", "yes", "on")
+
+
 def _json_body(body: bytes):
     """The body as a JSON object, `{}` when there is none, `None` when it is not one."""
     if not body.strip():
@@ -689,10 +782,16 @@ def _item(endpoint: str) -> str:
 
 def index_page() -> str:
     """The front page: everything this build answers, and everything it will."""
+    planned = ""
+    if PLANNED:
+        planned = ("<h2>Planned, and answering 404 until it lands</h2>\n<ul>\n%s\n</ul>"
+                   % "\n".join(_item(line) for line in PLANNED))
     return INDEX_TEMPLATE % {
         "version": __version__,
         "supported": "\n".join(_item(line) for line in SUPPORTED),
-        "planned": "\n".join(_item(line) for line in PLANNED),
+        # Not an empty list under a heading, which reads as a page that failed
+        # to load rather than as a mock with nothing left to promise.
+        "planned": planned,
     }
 
 
@@ -707,10 +806,7 @@ when asked, a <code>pacs.004</code>.</p>
 <ul>
 %(supported)s
 </ul>
-<h2>Planned, and answering 404 until it lands</h2>
-<ul>
 %(planned)s
-</ul>
 <p>Version %(version)s. <a href="https://github.com/rseufert/mock-bank">Source and issues</a>.</p>
 """
 

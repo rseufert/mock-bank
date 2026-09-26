@@ -21,6 +21,21 @@ says so where it does.
 
 ### Added
 
+- **The rest of the mailbox, and the request log** (#8). `GET /_mock/mailbox`
+  takes `?leave` to peek without taking, `?raw` for the XML bodies alone with
+  `Content-Type: application/xml`, and `?type=pain.002` to filter on a type
+  prefix so a caller need not know the version; they combine.
+  `GET /_mock/mailbox/<id>` returns one message's XML whether or not it has
+  been collected, and `POST /_mock/mailbox/<id>/unread` puts one back for a
+  test that wants to collect twice. `GET /_mock/requests` serves the newest
+  hundred rows of the request log with a `?path=` prefix filter, so a tester
+  can see what their client actually sent. `?raw` returns a *sequence* of
+  documents rather than one: wrapping several messages in an invented root
+  element would put an element on the wire that no ISO 20022 schema has, and
+  the README says so rather than leaving it to be discovered. With these, every
+  endpoint the 0.1 plan promised answers, so the `planned` list in a `404` is
+  now empty and the index page stops showing the heading.
+
 - **The end-of-day statement** (#9). As the clock passes the end of a
   business day, every open account gets a `camt.053.001.08` for it, in
   order, empty days included: `OPBD` and `CLBD`, an entry per booked debit

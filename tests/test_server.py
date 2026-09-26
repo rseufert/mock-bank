@@ -38,12 +38,23 @@ class ControlPlane(MockServerCase):
         self.assertIn("text/html", resp.headers["Content-Type"])
         self.assertIn(b"mock-bank", resp.body)
 
-    def test_unbuilt_surfaces_refuse_by_name(self):
-        resp = self.get("/_mock/requests")
+    def test_a_path_it_does_not_have_refuses_by_naming_what_it_does(self):
+        # This used to reach for /_mock/requests as the example of something
+        # not built yet. With the mailbox and the request log in, every
+        # endpoint the 0.1 plan promised answers, so `planned` is empty and
+        # the thing worth testing is the refusal naming what is there.
+        resp = self.get("/_mock/nonesuch")
         self.assertEqual(resp.status, 404)
         body = resp.json()
-        self.assertIn("GET /_mock/requests", body["planned"])
+        self.assertEqual(body["planned"], [])
         self.assertIn("GET /_mock/health", body["supported"])
+        self.assertIn("GET /_mock/mailbox", body["supported"])
+        self.assertIn("/_mock/nonesuch", body["path"])
+
+    def test_the_index_does_not_show_an_empty_list_of_promises(self):
+        page = self.get("/").body.decode("utf-8")
+        self.assertIn("What this build answers", page)
+        self.assertNotIn("answering 404 until it lands", page)
 
     def test_the_state_it_reports_is_the_state_it_has(self):
         state = self.get("/_mock/state").json()

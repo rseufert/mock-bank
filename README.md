@@ -272,7 +272,10 @@ like mock-edi's so the two feel the same.
 | Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets | now |
 | Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright | now |
 | Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) | now |
-| Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek, `?raw` for the XML alone, `?type=` and one by id follow in 0.1 | now |
+| Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine | now |
+| One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected | now |
+| Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice | now |
+| What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent | now |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown | now |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
@@ -281,8 +284,17 @@ like mock-edi's so the two feel the same.
 | Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file | now |
 | Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders | 0.2 |
 
+`GET /_mock/mailbox?raw` returns the message bodies one after another, each
+with its own XML declaration — what a bank's drop directory looks like to a
+client that cats the files. It is deliberately *not* one document: wrapping
+several ISO 20022 messages in an invented root element would put an element on
+the wire that no schema has, and a client that learnt to expect it would have
+learnt something no real bank sends. Parse one message at a time, or use
+`GET /_mock/mailbox/<id>`.
+
 Anything not built yet answers `404` with a body that names what is supported
-and what is planned, rather than pretending.
+and what is planned, rather than pretending. With the mailbox and the request
+log, every endpoint 0.1 promised answers, so that list is now empty.
 
 ## Configuration
 
