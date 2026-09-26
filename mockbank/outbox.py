@@ -96,20 +96,116 @@ def release_due(conn, now, today) -> List[Dict[str, Any]]:
     return released
 
 
-def collect(conn, now) -> List[Dict[str, Any]]:
-    """Every released message not yet taken, oldest first, marked taken.
+def collect(conn, now, leave=False, kind="") -> List[Dict[str, Any]]:
+    """Every released message not yet taken, oldest first.
 
-    The minimal mailbox: ``GET /_mock/mailbox``. Peeking, the raw XML
-    sequence, filtering by type, one message by id and putting one back are
-    #8's, on top of this.
+    Taken as they are handed over, which is what makes a second call return
+    what arrived since rather than everything again. ``leave`` peeks instead,
+    for a test that wants to look without consuming - and peeking is the
+    exception, because a mailbox that never empties cannot tell a client
+    "nothing new has happened".
+
+    ``kind`` filters on the message type by prefix, so ``pain.002`` finds
+    ``pain.002.001.10``: a caller matching on the version would have to change
+    when the mock starts writing a newer one, and the version is not what they
+    mean.
     """
-    rows = db.rows(conn, "SELECT id, type, account, released_at, body FROM message"
-                         " WHERE released_at IS NOT NULL AND taken_at IS NULL ORDER BY id")
-    if rows:
+    sql = ("SELECT id, type, account, file_id, due_at, released_at, body"
+           " FROM message WHERE released_at IS NOT NULL AND taken_at IS NULL")
+    params: List[Any] = []
+    if kind:
+        # A literal prefix, not a LIKE pattern. LIKE would make `_` and `%` in
+        # the caller's own input into wildcards - and every message type is full
+        # of dots and would soon have had an `_` in it - and LIKE is
+        # case-insensitive for ASCII, so `PAIN.002` would match too. A filter
+        # that quietly matches more than it was given is worse than no filter.
+        sql += " AND substr(type, 1, length(?)) = ?"
+        params.extend([kind, kind])
+    rows = db.rows(conn, sql + " ORDER BY id", params)
+    if rows and not leave:
         conn.execute("UPDATE message SET taken_at = ? WHERE id IN (%s)"
                      % ",".join("?" * len(rows)), [db.stamp(now)] + [r["id"] for r in rows])
         conn.commit()
     return rows
+
+
+def message(conn, message_id) -> Dict[str, Any]:
+    """One message by id, taken or not, or None.
+
+    Not restricted to what is waiting: a test that has collected a message and
+    wants to look at it again is the ordinary case, and a 404 for something the
+    mock is still holding would be a lie.
+    """
+    return db.one(conn, "SELECT * FROM message WHERE id = ?", (message_id,))
+
+
+def waiting_ids(conn) -> List[int]:
+    """The ids a caller could ask for now, to name in a 404."""
+    return [row["id"] for row in db.rows(
+        conn, "SELECT id FROM message WHERE released_at IS NOT NULL"
+              " AND taken_at IS NULL ORDER BY id")]
+
+
+def unread(conn, message_id) -> Dict[str, Any]:
+    """Put a taken message back in the mailbox, for a test that collects twice.
+
+    A message that was never taken is left alone and said to be untaken rather
+    than refused: the caller asked for it to be collectable and it is.
+    Releasing it is a different question - an unreleased message is not in the
+    mailbox to begin with, and this does not pretend otherwise.
+    """
+    row = message(conn, message_id)
+    if row is None:
+        return {}
+    was_taken = row["taken_at"] is not None
+    if was_taken:
+        conn.execute("UPDATE message SET taken_at = NULL WHERE id = ?", (message_id,))
+        conn.commit()
+    return {
+        "id": row["id"], "type": row["type"], "unread": True,
+        "wasTaken": was_taken,
+        "released": row["released_at"] is not None,
+    }
+
+
+# One `<?xml?>` declaration per message, concatenated - which is what a bank's
+# drop directory looks like to a client that cats the files, and what `?raw`
+# hands back. It is deliberately *not* a single document: wrapping several
+# messages in an invented root element would put an element on the wire that no
+# ISO 20022 schema has, and a client that learnt to expect it would be learning
+# something no real bank sends. So the concatenation is documented instead of
+# disguised, and a client that wants one message parses one message.
+RAW_SEPARATOR = "\n"
+
+
+def raw(rows) -> str:
+    """The bodies of `rows` as an XML sequence, and nothing else."""
+    return RAW_SEPARATOR.join(row["body"].strip() for row in rows) + "\n"
+
+
+def summary(row) -> str:
+    """One line a reader can scan: what it is and who it is about."""
+    account = row.get("account") or "-"
+    return "%s for %s" % (row["type"], account)
+
+
+def as_json(rows) -> List[Dict[str, Any]]:
+    """The mailbox listing: what each message is, and the message.
+
+    The body is included, which was not my first instinct - a listing of four
+    `camt.053` s is most of a screenful of XML. But mock-edi's mailbox returns
+    the document with the row and #8 says to match it, and a tester who knows
+    one mock is meant to know the other. It also means one request gets both
+    what arrived and what it says, which is what a client written against this
+    actually wants; `?raw` exists for the case where the XML is all you want,
+    not to make the JSON form incomplete.
+    """
+    return [{"id": row["id"], "type": row["type"], "account": row["account"],
+             "releasedAt": row["released_at"], "dueAt": row["due_at"],
+             "fileId": row["file_id"], "summary": summary(row),
+             "bytes": len(row["body"].encode("utf-8")),
+             "body": row["body"]}
+            for row in rows]
 
 
 def ended_business_days(clock, before, after) -> List[datetime.date]:
