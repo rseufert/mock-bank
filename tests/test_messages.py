@@ -210,7 +210,8 @@ class OnTheClock(MessageCase):
         self.mailbox()
         self.advance(to=self.MONDAY.isoformat())
         self.assertEqual(before - self.balance("ACME"), 300)
-        self.assertEqual(self.get("/_mock/state").json()["messages"]["waiting"], 1)
+        # the camt.054, and a statement per open account for Thursday and Friday
+        self.assertEqual(self.get("/_mock/state").json()["messages"]["waiting"], 1 + 3 * 2)
 
     def test_advancing_again_releases_nothing_twice(self):
         self.send(pain001("IDEM-1", ACME, [("I1", 100, UMBRELLA)], when=self.MONDAY))
@@ -218,7 +219,7 @@ class OnTheClock(MessageCase):
         self.advance(to=self.MONDAY.isoformat())
         self.assertEqual(len(self.of_type(self.mailbox(), CAMT054)), 1)
         self.advance(days=1)
-        self.assertEqual(self.mailbox(), [])
+        self.assertEqual(self.of_type(self.mailbox(), CAMT054), [])
         self.assertEqual(self.get("/_mock/state").json()["payments"]["booked"], 1)
 
     def test_a_holiday_moves_the_settlement_date(self):
