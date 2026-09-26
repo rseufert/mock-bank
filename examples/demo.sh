@@ -21,6 +21,9 @@ curl -sf "$BASE/_mock/health"
 say "What does it know?"
 curl -sf "$BASE/_mock/state"
 
+say "Which messages does it speak? The dictionary it reads and writes by"
+curl -sf "$BASE/_mock/dictionary" | head -c 600; echo
+
 say "Ask for something it does not do yet: it says what it does"
 curl -s -X POST --data-binary '<Document/>' "$BASE/payments"
 

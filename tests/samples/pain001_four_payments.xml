@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A clean pain.001.001.09: one batch of four euro payments from ACME.
+     Every IBAN and BIC is syntactically valid and belongs to no real bank. -->
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">
+  <CstmrCdtTrfInitn>
+    <GrpHdr>
+      <MsgId>ACME-20261001-0001</MsgId>
+      <CreDtTm>2026-09-30T09:30:00+02:00</CreDtTm>
+      <NbOfTxs>4</NbOfTxs>
+      <CtrlSum>20630.75</CtrlSum>
+      <InitgPty>
+        <Nm>ACME Corporation</Nm>
+      </InitgPty>
+    </GrpHdr>
+    <PmtInf>
+      <PmtInfId>ACME-20261001-0001-B1</PmtInfId>
+      <PmtMtd>TRF</PmtMtd>
+      <NbOfTxs>4</NbOfTxs>
+      <CtrlSum>20630.75</CtrlSum>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>SEPA</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <ReqdExctnDt>
+        <Dt>2026-10-01</Dt>
+      </ReqdExctnDt>
+      <Dbtr>
+        <Nm>ACME Corporation</Nm>
+        <PstlAdr>
+          <StrtNm>Keizersgracht</StrtNm>
+          <BldgNb>1</BldgNb>
+          <PstCd>1015 AA</PstCd>
+          <TwnNm>Amsterdam</TwnNm>
+          <Ctry>NL</Ctry>
+        </PstlAdr>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <IBAN>NL41MOCK0000000001</IBAN>
+        </Id>
+        <Ccy>EUR</Ccy>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <BICFI>MOCKNL2A</BICFI>
+        </FinInstnId>
+      </DbtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>ACME-0001-1</InstrId>
+          <EndToEndId>INV-2026-0101</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">1250.00</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Globex Supplies B.V.</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>NL14MOCK0000000002</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>Invoice INV-2026-0101</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>ACME-0001-2</InstrId>
+          <EndToEndId>INV-2026-0102</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">3400.50</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Initech Services N.V.</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>NL84MOCK0000000003</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Strd>
+            <RfrdDocInf>
+              <Tp>
+                <CdOrPrtry>
+                  <Cd>CINV</Cd>
+                </CdOrPrtry>
+              </Tp>
+              <Nb>INV-2026-0102</Nb>
+              <RltdDt>2026-09-15</RltdDt>
+            </RfrdDocInf>
+            <RfrdDocAmt>
+              <DuePyblAmt Ccy="EUR">3400.50</DuePyblAmt>
+            </RfrdDocAmt>
+          </Strd>
+        </RmtInf>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>ACME-0001-3</InstrId>
+          <EndToEndId>INV-2026-0103</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">980.25</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Eurodis Handels GmbH Düsseldorf</Nm>
+          <PstlAdr>
+            <TwnNm>Düsseldorf</TwnNm>
+            <Ctry>DE</Ctry>
+          </PstlAdr>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>NL57MOCK0000000004</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>Rechnung INV-2026-0103, Lieferung Straße 5</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>ACME-0001-4</InstrId>
+          <EndToEndId>INV-2026-0104</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">15000.00</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Umbrella Logistics S.A.</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>NL30MOCK0000000005</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>Invoice INV-2026-0104</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+    </PmtInf>
+  </CstmrCdtTrfInitn>
+</Document>

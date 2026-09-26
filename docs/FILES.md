@@ -26,13 +26,16 @@ first.
 | `mockbank/__init__.py` | The package docstring, `__version__` read from `pyproject.toml` in a checkout or from the installed metadata otherwise, and the public names `Config` and `make_server`. |
 | `mockbank/__main__.py` | The command line: `build_parser()` (which `tools/check_docs.py` reads to find every flag) and `main()`. |
 | `mockbank/accounts.py` | `BEHAVIOURS`: every account behaviour with what the bank does, declared once. The command line's epilog, the README's behaviour table check and, later, `decide()` all read it. |
-| `mockbank/server.py` | The HTTP surface: `Config`, the in-process `State`, the request handler with the control plane, the index page, and `make_server()`. Unbuilt surfaces answer 404 naming what is supported and what is planned. |
+| `mockbank/schema.py` | The ISO 20022 dictionary: `pain.001.001.09` and `.001.03`, `pain.002.001.10`, `camt.054.001.08` and `camt.053.001.08` declared as element trees, with the shared shapes (address, account, agent, party) declared once; the code sets; `walk`/`check` (structural findings), `read` (tree to mapping) and `build`/`serialize` (mapping to tree in declared order); the choices the standard leaves open, in `CHOICES`. |
+| `mockbank/server.py` | The HTTP surface: `Config`, the in-process `State`, the request handler with the control plane and `/_mock/dictionary`, the index page, and `make_server()`. Unbuilt surfaces answer 404 naming what is supported and what is planned. |
 
 ## `tests/` - end-to-end, over HTTP
 
 | File | What it is |
 | --- | --- |
 | `tests/support.py` | `MockServerCase`: starts a real server on an ephemeral port per test class and offers `get`/`post`/`request` helpers returning a `Response` with `.json()`. Arms a faulthandler watchdog when `MOCKBANK_TEST_WATCHDOG` is set. |
+| `tests/test_dictionary.py` | The dictionary: `/_mock/dictionary` serves every declaration, the sample walks clean in either namespace style, an element out of order, in the wrong namespace or missing is a finding naming its path, `.001.03` reads into the same mapping, and the builder writes in declared order and round-trips. |
+| `tests/samples/pain001_four_payments.xml` | A clean `pain.001.001.09`: one batch of four euro payments from ACME, with structured and unstructured remittance and non-ASCII names. Fake but check-digit-valid IBANs. |
 | `tests/test_server.py` | The control plane: health names the version, state counts requests and lists behaviours, reset starts again, the index is HTML, and an unbuilt surface refuses by name. |
 
 ## `examples/`

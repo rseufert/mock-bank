@@ -1,8 +1,8 @@
 """The HTTP surface.
 
 This is the skeleton the 0.1 issues build on: the control plane a tester
-reaches first (``/_mock/health``, ``/_mock/state``, ``POST /_mock/reset``)
-and an index page.  Everything the plan promises and this release has not
+reaches first (``/_mock/health``, ``/_mock/state``, ``POST /_mock/reset``),
+the ISO 20022 dictionary (``/_mock/dictionary``) and an index page.  Everything the plan promises and this release has not
 built yet answers 404 with a body naming what *is* supported, which is the
 rule the sibling mocks follow: refuse by name rather than half-implement.
 """
@@ -14,7 +14,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
+from . import schema
 from .accounts import BEHAVIOURS
+
+# The endpoints that answer today.
+SUPPORTED = [
+    "GET /", "GET /_mock/health", "GET /_mock/state", "POST /_mock/reset",
+    "GET /_mock/dictionary", "GET /_mock/dictionary/<message>",
+]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
 PLANNED = [
@@ -93,10 +100,18 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {
             "error": "not found",
             "path": self.path,
-            "supported": ["GET /", "GET /_mock/health", "GET /_mock/state",
-                          "POST /_mock/reset"],
+            "supported": SUPPORTED,
             "planned": PLANNED,
         })
+
+    def _dictionary(self, name):
+        message = schema.MESSAGES.get(name)
+        if message is None:
+            return self._json(404, {
+                "error": "the mock does not speak %s" % name,
+                "messages": sorted(schema.MESSAGES),
+            })
+        return self._json(200, message.to_json())
 
     # -- routes -----------------------------------------------------------
 
@@ -110,6 +125,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"status": "ok", "version": __version__})
         if path == "/_mock/state":
             return self._json(200, self.state.snapshot())
+        if path == "/_mock/dictionary":
+            return self._json(200, schema.dictionary_index())
+        if path.startswith("/_mock/dictionary/"):
+            return self._dictionary(path[len("/_mock/dictionary/"):])
         return self._not_found()
 
     do_HEAD = do_GET
@@ -140,6 +159,8 @@ when asked, a <code>pacs.004</code>.</p>
   <li><code>GET /_mock/health</code></li>
   <li><code>GET /_mock/state</code></li>
   <li><code>POST /_mock/reset</code></li>
+  <li><code>GET /_mock/dictionary</code>, <code>GET /_mock/dictionary/&lt;message&gt;</code>:
+    the ISO 20022 declarations the mock reads and writes by</li>
 </ul>
 <p>Version %s. <a href="https://github.com/rseufert/mock-bank">Source and issues</a>.</p>
 """ % __version__
