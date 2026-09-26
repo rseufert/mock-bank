@@ -35,7 +35,7 @@ Three layers, each only reached when the one before lets the file through:
 A past execution date is a warning, not a rejection. Banks differ here; the
 profile the mock follows is the common SEPA one, where a past date is
 executed on the next execution date, and the warning says so. "Today" is the
-bank's today, passed in; until the clock exists it is the host's date.
+bank's today, passed in by the server from the clock; alone, it is the host's date.
 
 ``validate`` never raises: whatever the body, the answer is a list of
 findings.

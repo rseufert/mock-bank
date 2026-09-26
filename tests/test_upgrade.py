@@ -22,6 +22,7 @@ from support import FileDatabaseCase                        # noqa: E402
 
 OLD_SCHEMA = os.path.join(HERE, "fixtures", "schema-v0.sql")
 SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
+SCHEMA_V2 = os.path.join(HERE, "fixtures", "schema-v2.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -105,6 +106,38 @@ class FromVersionOne(FileDatabaseCase):
         self.assertEqual(self.get("/_mock/payments").json(), [])
 
 
+class FromVersionTwo(FileDatabaseCase):
+    """A file written before the bank queued messages: it gains the message
+    table, and a payment it held is still there."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V2, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME Corporation', 'NL41MOCK0000000001', 'MOCKNL2A',"
+            " 'EUR', 1000, 'accept')")
+        conn.execute("INSERT INTO file (msg_id, message, received_at, status)"
+                     " VALUES ('OLD-1', 'pain.001.001.09', '2026-09-01T09:00:00Z', 'ACCP')")
+        conn.execute("INSERT INTO payment (file_id, end_to_end_id, account_id, amount,"
+                     " currency, status, settlement_date, booked_at) VALUES (1, 'E2E-OLD',"
+                     " 'ACME', 500, 'EUR', 'accepted', '2026-09-01', '2026-09-01T09:00:00Z')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_message_table_and_keeps_its_payments(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        self.assertEqual(self.get("/_mock/payments/E2E-OLD").json()["amount"], 500)
+        self.assertEqual(self.get("/_mock/state").json()["messages"],
+                         {"queued": 0, "waiting": 0, "taken": 0})
+        self.assertEqual(self.get("/_mock/mailbox").json(), [])
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -139,7 +172,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (2, "8cdecd4e3f697b87")
+    FINGERPRINT = (3, "e363507d335ba6e5")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

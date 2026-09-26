@@ -2,8 +2,8 @@
 
 The mock is a *bank*, so its state is the state a bank keeps: the accounts it
 holds, the days it does not settle on, a log of what was asked of it, and the
-payment files it received with the payments it decided on. The messages it
-wrote and the mailbox they wait in arrive with the issues that need them.
+payment files it received with the payments it decided on, and the messages
+it sends back, queued until they are due.
 
 Three things here are worth knowing:
 
@@ -36,9 +36,7 @@ from . import schema
 # Every table, one CREATE per entry. The tables not here yet are named so that
 # a reader does not go looking for them:
 #
-#   message   the writers (#7); the mailbox reads it and is built on it
-#             (#8). Whoever lands first owns the statement; the other adds
-#             to it.
+#   (none)    every table the 0.1 plan names is here
 SCHEMA = [
     # An account the mock knows about: an IBAN, a balance and a behaviour.
     # There is deliberately no debtor/creditor column. Which side an account
@@ -125,6 +123,25 @@ SCHEMA = [
         booked_at        TEXT
     )
     """,
+    # What the bank sends back, queued for when it is due. The writers (#7)
+    # put rows here; the mailbox (#8) reads the released ones and marks them
+    # taken. Timestamps are `stamp()`s, UTC with a trailing Z, so they compare
+    # as strings; `due_at` is a moment in bank time written the same way.
+    """
+    CREATE TABLE IF NOT EXISTS message (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- the message identifier, as in pain.002.001.10 or camt.054.001.08
+        type         TEXT NOT NULL,
+        -- the account it concerns; NULL for a pain.002 with no held debtor
+        account      TEXT,
+        file_id      INTEGER REFERENCES file (id),
+        due_at       TEXT NOT NULL,
+        released_at  TEXT,
+        taken_at     TEXT,
+        -- the XML, UTF-8
+        body         TEXT NOT NULL
+    )
+    """,
 ]
 
 # Created after the tables have been brought up to date: an index on a column
@@ -143,13 +160,17 @@ INDEXES = [
     # What is waiting to book, per account: the insufficient-funds check and
     # the clock both ask it.
     "CREATE INDEX IF NOT EXISTS ix_payment_due ON payment (account_id, booked_at)",
+    # The queue releases by due time; the mailbox reads what is released and
+    # not yet taken.
+    "CREATE INDEX IF NOT EXISTS ix_message_due ON message (released_at, due_at)",
+    "CREATE INDEX IF NOT EXISTS ix_message_mailbox ON message (released_at, taken_at)",
 ]
 
 # The schema's version, kept in the file as `PRAGMA user_version`. Bump it
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class DatabaseError(Exception):
