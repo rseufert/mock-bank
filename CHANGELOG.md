@@ -29,6 +29,23 @@ says so where it does.
 
 ### Added
 
+- **The curl tour and the example client for 0.1** (#11). `examples/demo.sh`
+  now tells the whole story: send `tests/samples/pain001_four_payments.xml`,
+  read the `pain.002` and its reason codes, move bank time to the settlement
+  date and one day past it, watch the `camt.054` and then a `camt.053` whose
+  balances reconcile, and break it on purpose to see `DUPL` and `AM04`. It asks
+  `/_mock/state` what the mock supports and skips what is missing, naming the
+  endpoint, so it runs against a mock started any way; `BANK_AUTH` covers one
+  started with `--auth`. `examples/client.py` is the same choreography as a
+  client an integrator would copy - standard library only - and it matches every
+  answer back to its payment by `EndToEndId` rather than by position, which is
+  the part a curl tour cannot demonstrate and the part integrations get wrong.
+  `examples/statement.py` does the arithmetic the statement step is about. CI's
+  smoke job runs the tour and the client, each against a plain mock and again
+  against one wanting credentials, and the package job now sends a real payment
+  file through the installed console script instead of only asking for its
+  health.
+
 - **The rest of the mailbox, and the request log** (#8). `GET /_mock/mailbox`
   takes `?leave` to peek without taking, `?raw` for the XML bodies alone with
   `Content-Type: application/xml`, and `?type=pain.002` to filter on a type
