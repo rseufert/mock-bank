@@ -27,6 +27,19 @@ says so where it does.
   numbers of minor units everywhere: `12.50` is refused rather than rounded,
   because a statement that is a cent out is the failure this project exists
   to rehearse.
+- **Reading and validating a payment file** (#5). `POST /_mock/validate`
+  reads a `pain.001` (`.001.09` or `.001.03`, into the same model) and
+  answers with its findings as prose, one line each, `200` when clean and
+  `422` when not, storing nothing. Each finding names the element path and
+  the reason code it will be reported with: structural problems and
+  unreadable files are `FF01`, and the mock checks `NbOfTxs` (`AM18`),
+  `CtrlSum` (`AM10`), IBAN check digits (`AC01`), currency against the debtor
+  account (`AM03`) and repeated `EndToEndId`s (`AM05`). A past execution date
+  is a `DT01` warning, since the bank executes on the next business day.
+  Signed or encrypted files and DTDs are refused by name. Validation never
+  raises, whatever the body. The dictionary's `pain.002` `OrgnlMsgNmId` now
+  takes any identifier, as the standard allows, not only a versioned name.
+
 - **The ISO 20022 dictionary** (#2). `mockbank/schema.py` declares
   `pain.001.001.09` (and `.001.03`, read into the same model),
   `pain.002.001.10`, `camt.054.001.08` and `camt.053.001.08` as element trees

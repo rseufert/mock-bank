@@ -19,7 +19,7 @@ def mod97(text):
     """`text` read as one enormous integer, modulo 97.
 
     The naive reading of ISO 13616, written out the long way on purpose:
-    `db._mod97` reduces as it goes, and a test that reused it could only prove
+    `schema.mod97` reduces as it goes, and a test that reused it could only prove
     that function agrees with itself.
     """
     return int("".join(str(int(char, 36)) for char in text)) % 97

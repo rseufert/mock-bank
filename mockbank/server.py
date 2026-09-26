@@ -30,7 +30,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Tuple
 
-from . import __version__, accounts, db, schema
+from . import __version__, accounts, db, schema, validate
 from .accounts import BEHAVIOURS
 
 # What this release answers, so a 404 can say so and the index can list it.
@@ -43,6 +43,7 @@ SUPPORTED = [
     "GET /_mock/behaviours",
     "GET /_mock/accounts", "POST /_mock/accounts",
     "GET /_mock/accounts/<id>", "PATCH /_mock/accounts/<id>",
+    "POST /_mock/validate",
 ]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
@@ -52,7 +53,6 @@ PLANNED = [
     "POST /_mock/advance",
     "GET /_mock/holidays", "PUT /_mock/holidays",
     "GET /_mock/requests",
-    "POST /_mock/validate",
 ]
 
 # A line of explanation for the endpoints that are not self-evident from their
@@ -65,6 +65,8 @@ NOTES = {
     "PATCH /_mock/accounts/<id>": "change a behaviour, a balance or the "
                                   "closed flag while it runs",
     "POST /_mock/reset": "back to the four seeded accounts",
+    "POST /_mock/validate": "send a pain.001, get its findings as prose, one "
+                            "line each; nothing is stored",
 }
 
 # A request body larger than this is refused rather than read into memory. A
@@ -194,15 +196,6 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             self._json(500, {"error": str(error), "type": type(error).__name__})
 
-    def _dictionary(self, name):
-        message = schema.MESSAGES.get(name)
-        if message is None:
-            return self._json(404, {
-                "error": "the mock does not speak %s" % name,
-                "messages": sorted(schema.MESSAGES),
-            })
-        return self._json(200, message.to_json())
-
     # -- routes -----------------------------------------------------------
 
     def _route(self, method: str, path: str, query: Dict[str, List[str]],
@@ -261,6 +254,11 @@ class Handler(BaseHTTPRequestHandler):
         if head == "accounts":
             return self._accounts(method, rest, body)
 
+        if head == "validate" and not rest:
+            if method != "POST":
+                return self._method_not_allowed(method, ["POST"])
+            return self._validate(body)
+
         return self._not_found()
 
     def _accounts(self, method: str, rest: List[str], body: bytes) -> None:
@@ -307,6 +305,25 @@ class Handler(BaseHTTPRequestHandler):
                                         "behaviours": sorted(BEHAVIOURS)})
             return self._json(200, row)
         return self._method_not_allowed(method, ["GET", "PATCH"])
+
+    def _validate(self, body: bytes) -> None:
+        """POST /_mock/validate: the findings as prose, nothing stored."""
+        payment_file, findings = validate.inspect(body, self.headers.get("Content-Type"))
+        status = 422 if validate.errors(findings) else 200
+        if "application/json" in (self.headers.get("Accept") or ""):
+            return self._json(status, {
+                "file": payment_file.to_json() if payment_file else None,
+                "findings": [f._asdict() for f in findings],
+            })
+        lines = [validate.render(f) for f in findings]
+        if payment_file is not None:
+            batches, payments = len(payment_file.batches), len(payment_file.payments)
+            lines.insert(0, "%s %s: %d batch%s, %d payment%s, %d finding%s" % (
+                payment_file.message, payment_file.msg_id or "(no MsgId)",
+                batches, "" if batches == 1 else "es",
+                payments, "" if payments == 1 else "s",
+                len(findings), "" if len(findings) == 1 else "s"))
+        return self._text(status, "\n".join(lines) + "\n")
 
     def _dictionary(self, name: str) -> None:
         message = schema.MESSAGES.get(name)
