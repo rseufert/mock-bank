@@ -1,16 +1,21 @@
 """The control plane every other test relies on: health, state, reset."""
 from support import MockServerCase
 
-from mockbank import __version__
+from mockbank import __version__, db
 from mockbank.accounts import BEHAVIOURS
 
 
 class ControlPlane(MockServerCase):
 
-    def test_health_names_the_version(self):
+    def test_health_names_the_version_and_the_accounts_it_holds(self):
         resp = self.get("/_mock/health")
         self.assertEqual(resp.status, 200)
-        self.assertEqual(resp.json(), {"status": "ok", "version": __version__})
+        body = resp.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["version"], __version__)
+        # A liveness probe that says "ok" for a bank holding no accounts has
+        # answered the wrong question.
+        self.assertEqual(body["accounts"], len(db.SEED))
 
     def test_state_counts_requests_and_lists_behaviours(self):
         before = self.get("/_mock/state").json()["requests"]
@@ -39,3 +44,11 @@ class ControlPlane(MockServerCase):
         body = resp.json()
         self.assertIn("POST /payments", body["planned"])
         self.assertIn("GET /_mock/health", body["supported"])
+
+    def test_the_state_it_reports_is_the_state_it_has(self):
+        state = self.get("/_mock/state").json()
+        listed = self.get("/_mock/accounts").json()
+        self.assertEqual(state["accounts"], len(listed))
+        self.assertEqual(state["balances"],
+                         {"EUR": sum(row["balance"] for row in listed)})
+        self.assertEqual(state["schemaVersion"], db.SCHEMA_VERSION)
