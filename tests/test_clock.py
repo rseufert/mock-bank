@@ -186,8 +186,13 @@ class TheZone(unittest.TestCase):
             clock(zone="Europe/Amsterdam")
         self.assertIn("3.9", str(caught.exception))
 
-    @unittest.skipIf(clock_module._has_zone_database(),
-                     "this system has a time zone database")
+    # Two different things can be missing and they get different messages, so
+    # this one runs only where zoneinfo imports and finds no database - the
+    # Windows runner. On 3.8 there is no zoneinfo at all, which the test above
+    # covers.
+    @unittest.skipUnless(sys.version_info >= (3, 9)
+                         and not clock_module._has_zone_database(),
+                         "needs a host that has zoneinfo and no tz database")
     def test_without_a_database_the_refusal_says_that_is_what_is_missing(self):
         # Windows ships no IANA database, so zoneinfo imports and finds nothing
         # to read. The first version of this told the caller to "use an IANA
