@@ -131,10 +131,30 @@ jobs:
       - name: Run it and ask for its health
         run: |
           set -eu
-          docker run -d --name mock-bank -p 8080:8080 mock-bank:ci
+          docker run -d --name mock-bank -p 8080:8080 mock-bank:ci \
+            --auth tester:s3cret
           for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:8080/_mock/health >/dev/null && break
+            curl -sf -u tester:s3cret http://127.0.0.1:8080/_mock/health >/dev/null && break
             sleep 0.5
           done
-          curl -sf http://127.0.0.1:8080/_mock/state
+          curl -sf -u tester:s3cret http://127.0.0.1:8080/_mock/state
+          # The image binds 0.0.0.0, which is what --auth is for: an
+          # unauthenticated request to the running container has to be refused,
+          # and the credentials have to work through the published port. This is
+          # the one place that pair is checked where it actually matters.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/_mock/reset -X POST)
+          test "$code" = "401" || { echo "expected 401 without credentials, got $code"; exit 1; }
+          docker logs mock-bank 2>&1 | grep -q "WARNING" \
+            && { echo "warned about exposure despite --auth"; exit 1; } || true
           docker rm -f mock-bank
+      - name: Without --auth it says so, because the image binds 0.0.0.0
+        run: |
+          set -eu
+          docker run -d --name mock-bank-open -p 8081:8080 mock-bank:ci
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8081/_mock/health >/dev/null && break
+            sleep 0.5
+          done
+          docker logs mock-bank-open 2>&1 | grep -q "WARNING - listening on 0.0.0.0 with no --auth" \
+            || { echo "no exposure warning from a container with no --auth"; docker logs mock-bank-open; exit 1; }
+          docker rm -f mock-bank-open

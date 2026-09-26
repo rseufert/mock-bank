@@ -20,6 +20,9 @@ written after the response is a row that test can lose on a slow runner.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 import html
 import json
 import sqlite3
@@ -88,10 +91,13 @@ class Config:
 
     def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
                  timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock="",
-                 allow_duplicates=False):
+                 allow_duplicates=False, auth=""):
         self.host = host
         # A MsgId seen before is DUPL unless this is set, as at a real bank.
         self.allow_duplicates = allow_duplicates
+        # "user:password", or empty for a mock anyone who can reach the port
+        # may reset. Checked by Handler._authorised.
+        self.auth = auth
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
@@ -204,6 +210,11 @@ class Handler(BaseHTTPRequestHandler):
         path, query = _split(self.path)
         self._head = method == "HEAD"
         self._begin_log(method, path)
+        if not self._authorised():
+            # Before the body is read, so an unauthenticated POST /payments
+            # does not get its file parsed, and before routing, so there is no
+            # endpoint whose existence an unauthenticated caller can confirm.
+            return self._challenge()
         try:
             body = self._read_body()
         except _BodyError as error:
@@ -554,6 +565,46 @@ class Handler(BaseHTTPRequestHandler):
             raise _BodyError(400, "the body stopped after %d of %d bytes"
                                   % (len(body), length))
         return body
+
+    # -- who is asking ----------------------------------------------------
+
+    def _authorised(self) -> bool:
+        """Whether the request carries the credentials `--auth` asked for.
+
+        Every endpoint, including `/_mock/health` and the index: a mock that
+        answers an unauthenticated probe has told whoever is probing that it is
+        there and which version it is, and the whole point of the flag is that
+        the port is reachable by people who should not be reaching it.
+        """
+        expected = self.state.config.auth
+        if not expected:
+            return True
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            given = base64.b64decode(header[6:], validate=True).decode("utf-8")
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            return False
+        # Constant time over the whole `user:password`, so the comparison does
+        # not leak how much of the credential was right. The stakes here are
+        # low; the one-line version of the right answer costs nothing.
+        return hmac.compare_digest(given, expected)
+
+    def _challenge(self) -> None:
+        """A 401 that says how to authenticate, and nothing about the endpoint."""
+        self._log_before_answering(401)
+        payload = json.dumps({
+            "error": "this mock-bank was started with --auth, so every request "
+                     "needs HTTP basic credentials",
+        }, indent=2).encode("utf-8") + b"\n"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="mock-bank"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if not self._head:
+            self.wfile.write(payload)
 
     # -- the request log --------------------------------------------------
 

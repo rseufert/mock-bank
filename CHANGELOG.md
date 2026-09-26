@@ -21,6 +21,20 @@ says so where it does.
 
 ### Added
 
+- **`--auth USER:PASSWORD`, and a warning when the control plane is open**
+  (#12). HTTP basic credentials on every request, including `/_mock/health` and
+  the index, compared with `hmac.compare_digest`; without them, `401` and
+  `WWW-Authenticate: Basic realm="mock-bank"`. The check runs before the body
+  is read, so an unauthenticated `POST /payments` never has its file parsed,
+  and the refused request is still recorded in the request log. Binding an
+  address other machines can reach with no `--auth` prints a warning to stderr
+  naming the flag and what is at stake, and `-q` does not silence it: `-q` is
+  about the access log, not about whether the bank is open to the network. The
+  README's `docker run` example passes `--auth`, since the image binds
+  `0.0.0.0`. A value with no colon, or with an empty user or password, is
+  refused at startup rather than accepted as a credential nothing could ever
+  match.
+
 - **The bank clock** (#4). `mockbank/clock.py` keeps bank time, and nothing in
   the mock waits for it: `POST /_mock/advance?days=N` moves it by calendar days
   and `?to=YYYY-MM-DD` to midnight on a date, and either way the answer lists
