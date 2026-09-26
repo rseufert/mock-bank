@@ -117,25 +117,31 @@ def main(argv=None) -> int:
                     status_delay_ms=args.status_delay_ms, auth=args.auth)
     refused = check_auth(config.auth)
     if refused:
-        print("mock-bank: %s" % refused, file=sys.stderr)
+        print("mock-bank: %s" % refused, file=sys.stderr, flush=True)
         return 2
     warning = exposure_warning(config)
     if warning:
         # Not behind `not args.quiet`: -q is about the access log.
-        print(warning, file=sys.stderr)
+        #
+        # Flushed, and that is not decoration. Before Python 3.9 a piped stderr
+        # is block-buffered, so in a container - or anywhere the output is
+        # collected rather than shown on a terminal - this sat in a buffer
+        # until something else filled it. A warning that reaches `docker logs`
+        # some minutes after the port opened is not a warning.
+        print(warning, file=sys.stderr, flush=True)
     try:
         httpd = make_server(config)
     except Invalid as error:
         # A clock the mock cannot keep is refused at startup rather than at the
         # first payment: every settlement date in the run depends on it.
-        print("mock-bank: %s" % error, file=sys.stderr)
+        print("mock-bank: %s" % error, file=sys.stderr, flush=True)
         return 2
     if not args.quiet:
         print("mock-bank %s listening on http://%s:%d/  (db: %s, bank time: "
               "%s, cutoff %s)"
               % (__version__, config.host, httpd.server_address[1],
                  config.db_path, config.timezone, config.cutoff),
-              file=sys.stderr)
+              file=sys.stderr, flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

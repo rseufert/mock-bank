@@ -33,7 +33,11 @@ says so where it does.
   README's `docker run` example passes `--auth`, since the image binds
   `0.0.0.0`. A value with no colon, or with an empty user or password, is
   refused at startup rather than accepted as a credential nothing could ever
-  match.
+  match. The warning and the startup banner are flushed: before Python 3.9 a
+  piped stderr is block-buffered, so in a container - where the output is
+  collected rather than shown on a terminal - the warning sat in a buffer until
+  something else filled it, and a warning that reaches `docker logs` minutes
+  after the port opened is not a warning.
 
 - **The bank clock** (#4). `mockbank/clock.py` keeps bank time, and nothing in
   the mock waits for it: `POST /_mock/advance?days=N` moves it by calendar days

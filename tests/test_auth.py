@@ -15,6 +15,7 @@ part of what matters.
 import base64
 import io
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -223,73 +224,88 @@ class TheExposureWarning(unittest.TestCase):
 
 
 class TheWarningAtStartup(unittest.TestCase):
-    """It has to reach stderr of a real process, and -q must not silence it.
+    """It has to reach the stderr of a real process, and -q must not silence it.
 
     Driven as a subprocess rather than by calling `main()` with something that
-    makes it return early: where the warning sits relative to the rest of
-    startup is part of what matters, and a lever that exits before the warning
-    would test nothing while looking like it tested something.
+    makes it return early: where the warning sits in startup is part of what
+    matters, and a lever that exits before the warning would test nothing while
+    looking like it tested something.
+
+    Nothing here reads from the pipe while the child is alive. The first
+    version did, line by line with a deadline checked between reads, and on
+    Python 3.8 - where a piped stderr is block-buffered - the read simply never
+    returned and the deadline never came up for inspection. The job hung for
+    ten minutes and the watchdog killed it. So: wait for the port to answer,
+    which is proof that startup finished, then stop the process and read
+    everything at once, where EOF is guaranteed.
     """
 
     ROOT = os.path.dirname(HERE)
 
-    def start(self, *extra):
+    def free_port(self):
+        """A port nothing is listening on, so the poll below has an address.
+
+        `--port 0` would be tidier, but the port it chose could then only be
+        learnt by reading the banner, which is the thing that must not be read
+        while the process is running.
+        """
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    def startup_stderr(self, *extra):
+        """Everything the mock wrote to stderr up to the moment it was serving."""
+        port = self.free_port()
         process = subprocess.Popen(
-            [sys.executable, "-m", "mockbank", "--port", "0"] + list(extra),
+            [sys.executable, "-m", "mockbank", "--port", str(port)] + list(extra),
             cwd=self.ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True)
-        self.addCleanup(self.finish, process)
-        return process
-
-    def finish(self, process):
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:       # pragma: no cover
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if process.poll() is not None:
+                    break                       # it exited; read what it said
+                try:
+                    with socket.create_connection(("127.0.0.1", port), 0.25):
+                        break                   # listening, so startup is done
+                except OSError:
+                    time.sleep(0.1)
+            if process.poll() is None:
+                process.terminate()
+            return process.communicate(timeout=30)[1]
+        finally:
+            if process.poll() is None:          # pragma: no cover - stubborn child
                 process.kill()
-
-    def stderr_until_listening(self, process):
-        """Everything on stderr up to and including the banner.
-
-        The banner is the last thing printed before `serve_forever`, so reading
-        to it is reading all of startup without waiting on a timeout.
-        """
-        lines = []
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            line = process.stderr.readline()
-            if not line:
-                break
-            lines.append(line)
-            if "listening on" in line:
-                break
-        return "".join(lines)
+                process.communicate(timeout=30)
 
     def test_binding_every_interface_without_auth_prints_the_warning(self):
-        process = self.start("--host", "0.0.0.0")
-        err = self.stderr_until_listening(process)
+        err = self.startup_stderr("--host", "0.0.0.0")
         self.assertIn("WARNING", err)
         self.assertIn("--auth", err)
         self.assertIn("/_mock/reset", err)
         # And it really did start: the warning is a warning, not a refusal.
         self.assertIn("listening on", err)
 
+    def test_it_is_flushed_rather_than_left_in_a_buffer(self):
+        # Before 3.9 a piped stderr is block-buffered, so an unflushed warning
+        # reaches `docker logs` some minutes after the port opens, if at all.
+        # This is the same assertion as above; what makes it a separate test is
+        # that the stderr here was collected through a pipe, which is how a
+        # container reads it, and while the process was still running.
+        self.assertIn("WARNING", self.startup_stderr("--host", "0.0.0.0"))
+
     def test_quiet_does_not_silence_it(self):
         # -q means "no line per request", not "do not mention that the bank is
         # open to the network".
-        process = self.start("--host", "0.0.0.0", "-q")
-        self.assertIn("WARNING", self.stderr_until_listening(process))
+        self.assertIn("WARNING", self.startup_stderr("--host", "0.0.0.0", "-q"))
 
     def test_loopback_prints_no_warning(self):
-        process = self.start("--host", "127.0.0.1")
-        err = self.stderr_until_listening(process)
+        err = self.startup_stderr("--host", "127.0.0.1")
         self.assertIn("listening on", err)
         self.assertNotIn("WARNING", err)
 
     def test_auth_silences_it_on_every_interface(self):
-        process = self.start("--host", "0.0.0.0", "--auth", CREDENTIAL)
-        err = self.stderr_until_listening(process)
+        err = self.startup_stderr("--host", "0.0.0.0", "--auth", CREDENTIAL)
         self.assertIn("listening on", err)
         self.assertNotIn("WARNING", err)
 
