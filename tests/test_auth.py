@@ -15,9 +15,10 @@ part of what matters.
 import base64
 import io
 import os
-import socket
+import queue
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr
@@ -232,82 +233,116 @@ class TheWarningAtStartup(unittest.TestCase):
     matters, and a lever that exits before the warning would test nothing while
     looking like it tested something.
 
-    Nothing here reads from the pipe while the child is alive. The first
-    version did, line by line with a deadline checked between reads, and on
-    Python 3.8 - where a piped stderr is block-buffered - the read simply never
-    returned and the deadline never came up for inspection. The job hung for
-    ten minutes and the watchdog killed it. So: wait for the port to answer,
-    which is proof that startup finished, then stop the process and read
-    everything at once, where EOF is guaranteed.
+    Getting the *waiting* right took three attempts, and the two failures are
+    worth recording because both looked fine locally:
+
+    1. Reading the pipe line by line on this thread, with a deadline checked
+       between reads. On Python 3.8 a piped stderr is block-buffered, so the
+       read never returned and the deadline never came up for inspection: the
+       job hung for ten minutes until the watchdog killed it. That one was
+       hiding a real product bug - an unflushed warning never reaches
+       `docker logs` - which `main()` now fixes with `flush=True`.
+    2. Waiting for the port to answer, then terminating and reading. The socket
+       is bound inside `make_server`, which returns *before* `main` prints the
+       banner, so a successful connect proved only that the socket existed - and
+       on the slow macOS runner the terminate beat the print and stderr came
+       back empty. The shape was wrong: it inferred "startup finished" from a
+       different channel to the one the assertions are about.
+
+    So: a thread reads stderr into a queue and this thread waits on the queue,
+    with a real timeout, for the line that means startup is over. Nothing
+    blocks without a deadline, and the evidence comes from the stream being
+    asserted on. See `BANNER` for the third mistake, which this shape made
+    easy to make and easy to find.
     """
 
     ROOT = os.path.dirname(HERE)
 
-    def free_port(self):
-        """A port nothing is listening on, so the poll below has an address.
+    # The banner, and nothing else. "listening on" alone will not do: the
+    # warning says "listening on 0.0.0.0 with no --auth", so it matched the
+    # warning, the wait ended at the first line, and the assertions that need
+    # the banner passed on the warning instead. Only the banner has the URL.
+    BANNER = "listening on http://"
+    WARNING = "WARNING"
 
-        `--port 0` would be tidier, but the port it chose could then only be
-        learnt by reading the banner, which is the thing that must not be read
-        while the process is running.
+    def startup_stderr(self, *extra, until=BANNER):
+        """The mock's stderr up to and including the first line containing `until`.
+
+        `until` is the line that means "there is no more startup output coming":
+        the banner normally, since it is the last thing printed before
+        `serve_forever`, and the warning under `-q`, which suppresses the
+        banner and so leaves nothing later to wait for.
         """
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            return probe.getsockname()[1]
-
-    def startup_stderr(self, *extra):
-        """Everything the mock wrote to stderr up to the moment it was serving."""
-        port = self.free_port()
         process = subprocess.Popen(
-            [sys.executable, "-m", "mockbank", "--port", str(port)] + list(extra),
+            [sys.executable, "-m", "mockbank", "--port", "0"] + list(extra),
             cwd=self.ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True)
-        try:
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                if process.poll() is not None:
-                    break                       # it exited; read what it said
-                try:
-                    with socket.create_connection(("127.0.0.1", port), 0.25):
-                        break                   # listening, so startup is done
-                except OSError:
-                    time.sleep(0.1)
-            if process.poll() is None:
-                process.terminate()
-            return process.communicate(timeout=30)[1]
-        finally:
-            if process.poll() is None:          # pragma: no cover - stubborn child
+        self.addCleanup(self.stop, process)
+        lines = queue.Queue()
+
+        def drain():
+            for line in process.stderr:
+                lines.put(line)
+            lines.put(None)                     # end of stream
+
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+
+        collected, deadline = [], time.time() + 60
+        while time.time() < deadline:
+            try:
+                line = lines.get(timeout=1)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            collected.append(line)
+            if until in line:
+                break
+        err = "".join(collected)
+        self.assertIn(until, err,
+                      "waited for %r and never saw it; stderr was %r" % (until, err))
+        return err
+
+    def stop(self, process):
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:    # pragma: no cover
                 process.kill()
-                process.communicate(timeout=30)
+                process.wait(timeout=30)
+        process.stdout.close()
+        process.stderr.close()
 
     def test_binding_every_interface_without_auth_prints_the_warning(self):
         err = self.startup_stderr("--host", "0.0.0.0")
         self.assertIn("WARNING", err)
         self.assertIn("--auth", err)
         self.assertIn("/_mock/reset", err)
-        # And it really did start: the warning is a warning, not a refusal.
-        self.assertIn("listening on", err)
 
     def test_it_is_flushed_rather_than_left_in_a_buffer(self):
         # Before 3.9 a piped stderr is block-buffered, so an unflushed warning
         # reaches `docker logs` some minutes after the port opens, if at all.
-        # This is the same assertion as above; what makes it a separate test is
-        # that the stderr here was collected through a pipe, which is how a
-        # container reads it, and while the process was still running.
+        # What makes this a test rather than a repeat of the one above is that
+        # it reads the pipe while the process is still running: an unflushed
+        # warning would not be there yet.
         self.assertIn("WARNING", self.startup_stderr("--host", "0.0.0.0"))
 
     def test_quiet_does_not_silence_it(self):
         # -q means "no line per request", not "do not mention that the bank is
-        # open to the network".
-        self.assertIn("WARNING", self.startup_stderr("--host", "0.0.0.0", "-q"))
+        # open to the network". -q does suppress the banner, so there is none
+        # to wait for here.
+        # -q suppresses the banner, so the warning is the last line of startup
+        # and the thing to wait for.
+        err = self.startup_stderr("--host", "0.0.0.0", "-q", until=self.WARNING)
+        self.assertIn("WARNING", err)
 
     def test_loopback_prints_no_warning(self):
-        err = self.startup_stderr("--host", "127.0.0.1")
-        self.assertIn("listening on", err)
-        self.assertNotIn("WARNING", err)
+        self.assertNotIn("WARNING", self.startup_stderr("--host", "127.0.0.1"))
 
     def test_auth_silences_it_on_every_interface(self):
         err = self.startup_stderr("--host", "0.0.0.0", "--auth", CREDENTIAL)
-        self.assertIn("listening on", err)
         self.assertNotIn("WARNING", err)
 
 
