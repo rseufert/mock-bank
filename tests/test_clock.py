@@ -171,7 +171,8 @@ class TheZone(unittest.TestCase):
             clock(zone="Not/AZone")
         self.assertIn("Not/AZone", str(caught.exception))
 
-    @unittest.skipIf(sys.version_info < (3, 9), "zoneinfo arrived in 3.9")
+    @unittest.skipUnless(clock_module._has_zone_database(),
+                         "this system has no IANA time zone database")
     def test_a_named_zone_moves_the_clock_off_utc(self):
         amsterdam = clock(zone="Europe/Amsterdam")
         self.assertNotEqual(amsterdam.now().utcoffset(), datetime.timedelta(0))
@@ -184,6 +185,24 @@ class TheZone(unittest.TestCase):
         with self.assertRaises(Invalid) as caught:
             clock(zone="Europe/Amsterdam")
         self.assertIn("3.9", str(caught.exception))
+
+    @unittest.skipIf(clock_module._has_zone_database(),
+                     "this system has a time zone database")
+    def test_without_a_database_the_refusal_says_that_is_what_is_missing(self):
+        # Windows ships no IANA database, so zoneinfo imports and finds nothing
+        # to read. The first version of this told the caller to "use an IANA
+        # name such as Europe/Amsterdam" when Europe/Amsterdam was exactly what
+        # they had passed, which sends them looking in the wrong place.
+        with self.assertRaises(Invalid) as caught:
+            clock(zone="Europe/Amsterdam")
+        message = str(caught.exception)
+        self.assertIn("database", message)
+        self.assertIn("tzdata", message)
+
+    def test_utc_works_whatever_the_system_has(self):
+        # The default has to hold on a runner with no tz database at all.
+        self.assertEqual(clock(zone="UTC").now().utcoffset(),
+                         datetime.timedelta(0))
 
     def test_a_cutoff_that_is_not_a_time_is_refused_by_name(self):
         for bad in ("3pm", "25:00", "", None, "15"):

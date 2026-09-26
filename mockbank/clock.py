@@ -64,10 +64,44 @@ def timezone(name: str) -> datetime.tzinfo:
             % (name, sys.version_info[0], sys.version_info[1])) from None
     try:
         return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
+    except ZoneInfoNotFoundError:
+        if not _has_zone_database():
+            # Windows ships no IANA database, so `zoneinfo` imports and then
+            # finds nothing to read. The fix is the `tzdata` package, which
+            # this mock will not require of anyone: a mock you cannot install
+            # in a locked-down image is a mock nobody runs. So it says what is
+            # missing and who can supply it, and keeps bank time in UTC.
+            raise Invalid(
+                "--timezone %s needs an IANA time zone database, and this "
+                "system has none - which is normal on Windows. `pip install "
+                "tzdata` provides one; mock-bank will not depend on it, "
+                "because it takes no dependencies. Until then bank time can "
+                "only be UTC." % name) from None
         raise Invalid(
             "--timezone %s is not a zone this system knows; use an IANA name "
             "such as Europe/Amsterdam, or UTC." % name) from None
+    except ValueError:
+        raise Invalid(
+            "--timezone %r is not the shape of an IANA zone name; use one like "
+            "Europe/Amsterdam, or UTC." % name) from None
+
+
+def _has_zone_database() -> bool:
+    """Whether `zoneinfo` has an IANA database to read, as opposed to just importing.
+
+    Kept apart from `timezone()` so that a refusal can say which of the two
+    things is missing. A test skips on a system without one rather than
+    asserting that every runner has a tz database, which Windows does not.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        return False
+    try:
+        ZoneInfo("Etc/UTC")
+    except Exception:
+        return False
+    return True
 
 
 def cutoff_time(text: str) -> datetime.time:
