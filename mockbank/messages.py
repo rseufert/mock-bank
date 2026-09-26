@@ -267,6 +267,36 @@ def write_pain002(decision, msg_id, created_at) -> bytes:
         "OrgnlPmtInfAndSts": batches}})
 
 
+def _entry(p, day):
+    """One booked debit as an ``Ntry``: what a ``camt.054`` and a ``camt.053``
+    both carry for a payment row (with its original ``msg_id`` joined in)."""
+    domain, family, sub = schema.BOOKED_DEBIT
+    amount = schema.Amount(p["amount"], p["currency"])
+    refs = {"MsgId": p["msg_id"], "EndToEndId": p["end_to_end_id"]}
+    if p["pmt_inf_id"]:
+        refs["PmtInfId"] = p["pmt_inf_id"]
+    if p["instruction_id"]:
+        refs["InstrId"] = p["instruction_id"]
+    tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": "DBIT"}
+    parties = {}
+    if p["creditor_name"]:
+        parties["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
+    if p["creditor_iban"]:
+        parties["CdtrAcct"] = {"Id": (
+            {"IBAN": p["creditor_iban"]} if schema.iban_is_valid(p["creditor_iban"])
+            else {"Othr": {"Id": p["creditor_iban"]}})}
+    if parties:
+        tx["RltdPties"] = parties
+    if p["creditor_bic"]:
+        tx["RltdAgts"] = {"CdtrAgt": {"FinInstnId": {"BICFI": p["creditor_bic"]}}}
+    return {
+        "Amt": amount, "CdtDbtInd": "DBIT", "Sts": {"Cd": "BOOK"},
+        "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
+        "AcctSvcrRef": "MB-PMT-%d" % p["id"],
+        "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
+        "NtryDtls": [{"TxDtls": [tx]}]}
+
+
 def write_camt054(account, payments, day, msg_id, created_at) -> bytes:
     """The debit notification for one account and one booking:
     ``camt.054.001.08``.
@@ -283,33 +313,7 @@ def write_camt054(account, payments, day, msg_id, created_at) -> bytes:
     ``account`` is the account row; ``payments`` are its booked payment rows
     for ``day``, with the original ``msg_id`` joined in.
     """
-    domain, family, sub = schema.BOOKED_DEBIT
-    entries = []
-    for p in payments:
-        amount = schema.Amount(p["amount"], p["currency"])
-        refs = {"MsgId": p["msg_id"], "EndToEndId": p["end_to_end_id"]}
-        if p["pmt_inf_id"]:
-            refs["PmtInfId"] = p["pmt_inf_id"]
-        if p["instruction_id"]:
-            refs["InstrId"] = p["instruction_id"]
-        tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": "DBIT"}
-        parties = {}
-        if p["creditor_name"]:
-            parties["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
-        if p["creditor_iban"]:
-            parties["CdtrAcct"] = {"Id": (
-                {"IBAN": p["creditor_iban"]} if schema.iban_is_valid(p["creditor_iban"])
-                else {"Othr": {"Id": p["creditor_iban"]}})}
-        if parties:
-            tx["RltdPties"] = parties
-        if p["creditor_bic"]:
-            tx["RltdAgts"] = {"CdtrAgt": {"FinInstnId": {"BICFI": p["creditor_bic"]}}}
-        entries.append({
-            "Amt": amount, "CdtDbtInd": "DBIT", "Sts": {"Cd": "BOOK"},
-            "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
-            "AcctSvcrRef": "MB-PMT-%d" % p["id"],
-            "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
-            "NtryDtls": [{"TxDtls": [tx]}]})
+    entries = [_entry(p, day) for p in payments]
     return schema.serialize(CAMT054, {"BkToCstmrDbtCdtNtfctn": {
         "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at},
         "Ntfctn": [{"Id": msg_id, "CreDtTm": created_at,
@@ -317,3 +321,56 @@ def write_camt054(account, payments, day, msg_id, created_at) -> bytes:
                              "Ownr": {"Nm": account["name"][:140]},
                              "Svcr": {"FinInstnId": {"BICFI": BANK_BIC}}},
                     "Ntry": entries}]}})
+
+
+CAMT053 = schema.MESSAGES["camt.053.001.08"]
+
+
+def _balance(code, minor, ccy, day):
+    """A ``Bal``: the amount is unsigned on the wire, the sign is CdtDbtInd."""
+    return {"Tp": {"CdOrPrtry": {"Cd": code}},
+            "Amt": schema.Amount(abs(minor), ccy),
+            "CdtDbtInd": "CRDT" if minor >= 0 else "DBIT",
+            "Dt": {"Dt": day}}
+
+
+def write_camt053(account, day, number, opening, closing, payments, msg_id,
+                  created_at, zone) -> bytes:
+    """The end-of-day statement for one account and one business day:
+    ``camt.053.001.08``.
+
+    ``opening`` and ``closing`` are the booked balances (``OPBD``, ``CLBD``)
+    in minor units, signed; ``payments`` are the payment rows whose entries
+    the statement shows; ``number`` is the account's statement number, used
+    for both ``ElctrncSeqNb`` and ``LglSeqNb``. ``TxsSummry`` totals the
+    entries shown. The writer does not check that the balances reconcile:
+    under ``statement-gap`` they are meant not to.
+    """
+    ccy = account["currency"]
+    entries = [_entry(p, day) for p in payments]
+    total = sum(p["amount"] for p in payments)
+    summary = {"TtlNtries": {"NbOfNtries": len(entries)}}
+    if entries:
+        spent = format_decimal(total, ccy)
+        summary = {"TtlNtries": {"NbOfNtries": len(entries), "Sum": spent,
+                                 "TtlNetNtry": {"Amt": spent, "CdtDbtInd": "DBIT"}},
+                   "TtlDbtNtries": {"NbOfNtries": len(entries), "Sum": spent}}
+    start = datetime.datetime.combine(day, datetime.time(0, 0), tzinfo=zone)
+    end = datetime.datetime.combine(day, datetime.time(23, 59, 59), tzinfo=zone)
+    statement = {
+        "Id": msg_id, "ElctrncSeqNb": number, "LglSeqNb": number,
+        "CreDtTm": created_at, "FrToDt": {"FrDtTm": start, "ToDtTm": end},
+        "Acct": {"Id": {"IBAN": account["iban"]}, "Ccy": ccy,
+                 "Ownr": {"Nm": account["name"][:140]},
+                 "Svcr": {"FinInstnId": {"BICFI": BANK_BIC}}},
+        "Bal": [_balance("OPBD", opening, ccy, day), _balance("CLBD", closing, ccy, day)],
+        "TxsSummry": summary,
+        "Ntry": entries}
+    return schema.serialize(CAMT053, {"BkToCstmrStmt": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at},
+        "Stmt": [statement]}})
+
+
+def format_decimal(minor, ccy) -> str:
+    """Minor units as a DecimalNumber string, for sums that carry no Ccy."""
+    return schema.format_amount(minor, ccy)

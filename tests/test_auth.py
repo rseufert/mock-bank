@@ -92,6 +92,7 @@ class WithAuth(MockServerCase):
                              ("GET", "/_mock/holidays"),
                              ("GET", "/_mock/mailbox"),
                              ("GET", "/_mock/payments"),
+                             ("GET", "/_mock/statements"),
                              ("POST", "/_mock/reset"),
                              ("POST", "/_mock/advance?days=1"),
                              ("POST", "/payments"),

@@ -93,7 +93,7 @@ sends them.
 | `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors | 0.1 |
 | `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only | now |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` | now |
-| `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile | 0.1 |
+| `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included | now |
 | `pacs.004` | Out | Days later, on a return behaviour | A payment that had settled, coming back with a return reason | 0.2 |
 | NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH | 0.3 |
 
@@ -141,6 +141,18 @@ and DTDs are refused by name. A requested execution date in the past is a
 `DT01` *warning*, not a rejection: banks differ, and the mock follows the
 common SEPA profile of executing on the next business day.
 
+A `camt.053` closes each business day for every open account the bank holds,
+in order, as the clock passes the day's end - a day with no entries still gets
+one, because a real bank sends it and a client that only handles days with
+activity has a bug. The closing balance (`CLBD`) is the opening (`OPBD`) less
+the day's entries, to the cent, and the next statement opens where this one
+closed. Statement numbers never repeat, across restarts too. Under
+`statement-gap` the last entry of a statement is left off and the balances stay
+true, so the difference is exactly the missing payment - which is what a
+reconciliation has to notice. A balance changed by `PATCH` is a change no entry
+explains, and the next statement's opening shows the jump. A closed account
+gets no statements.
+
 The `camt.054` profile is a choice too: the mock sends one debit notification
 per account each time payments book - on receipt when the settlement date is
 today, or when the clock crosses it - with an entry per payment, rather than one
@@ -167,7 +179,7 @@ reason codes are the ISO 20022 external codes a real bank uses.
 | `reject-file` | Rejects the whole file at group level | `RJCT`, `FF01` | 0.1 |
 | `duplicate-file` | Rejects a file whose `MsgId` it has already seen | `DUPL` | 0.1 |
 | `silent` | Sends no `pain.002` at all | none | 0.1 |
-| `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point | 0.1 |
+| `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point | now |
 
 ### The accounts it starts with
 
@@ -262,6 +274,7 @@ like mock-edi's so the two feel the same.
 | Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) | now |
 | Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek, `?raw` for the XML alone, `?type=` and one by id follow in 0.1 | now |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
+| Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown | now |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole | now |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due | now |
