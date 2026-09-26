@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--clock", default="", metavar="YYYY-MM-DDTHH:MM",
                    help="start bank time at this moment instead of now, for a "
                         "run whose settlement dates are reproducible")
+    p.add_argument("--allow-duplicates", action="store_true",
+                   help="accept a file whose MsgId the bank has seen before "
+                        "(by default it is rejected with DUPL, as a real bank does)")
     p.add_argument("-q", "--quiet", action="store_true", help="log nothing per request")
     p.add_argument("--version", action="version", version="mock-bank " + __version__)
     return p
@@ -43,7 +46,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = Config(host=args.host, port=args.port, db_path=args.db_path,
                     quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
-                    clock=args.clock)
+                    clock=args.clock, allow_duplicates=args.allow_duplicates)
     try:
         httpd = make_server(config)
     except Invalid as error:

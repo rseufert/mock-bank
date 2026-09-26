@@ -187,6 +187,38 @@ insufficient funds sends *from* `GLOBEX`. The sample's fifth party,
 `NL30MOCK0000000005`, is deliberately not seeded - a creditor at another bank
 is not an account this bank holds, and a payment to one simply settles.
 
+A behaviour describes the account it is set on. `closed-account` and
+`bad-bank-id` describe a *creditor*: they are read from the account a payment
+pays into, when the bank holds it. The other seven describe a *debtor* and are
+read from the account a batch pays from. When a file arrives, the first rule
+that applies wins:
+
+1. A finding about the file as a whole - it cannot be read, it breaks the
+   structure (`FF01`), or a header total is wrong (`AM10`, `AM18`) - rejects it
+   outright (`422`), whatever the behaviour.
+2. A `MsgId` the bank has received before is `DUPL`, as at a real bank;
+   `--allow-duplicates` turns that off. (So `duplicate-file` is the default
+   already.)
+3. A debtor account with `reject-file` rejects the file: `RJCT`, `FF01`.
+4. Then each payment, in file order: a debtor account the bank does not hold is
+   `AC02` and a closed one `AC04`; a finding about the payment rejects it with
+   its code; a currency other than the debtor account's is `AM03`; a held
+   creditor account that is closed or `closed-account` is `AC04`, and one that
+   is `bad-bank-id` is `RC01`; under `insufficient-funds`, a payment that would
+   take the available balance below zero is `AM04`, and later smaller ones that
+   fit are still accepted.
+5. `silent` decides and books, and reports nothing.
+
+Only `insufficient-funds` looks at the balance: under every other behaviour a
+payment books even below zero, as on an account with an overdraft. A creditor
+at another bank - a well-formed IBAN the mock does not hold - is not something
+a bank can check at acceptance, so a payment to it settles.
+
+An accepted payment debits its account on its settlement date, not on
+receipt. In 0.1 the mock books the **debit side only**: a payment into an
+account it holds does not credit that account, so every balance change has a
+statement entry to explain it. That is a choice, and it is stated here.
+
 Two rules hold whatever the behaviour, because real banks apply them:
 
 - A payment's settlement date is **the later of the requested execution date
@@ -199,11 +231,15 @@ Two rules hold whatever the behaviour, because real banks apply them:
   days. Bank time is one zone, `--timezone`, UTC by default.
 
 Nothing waits for any of this. `POST /_mock/advance?days=N` moves bank time by
-**calendar** days and `?to=YYYY-MM-DD` moves it to midnight on that date; either
+N whole **calendar** days (0 to 3650; a fraction is refused rather than
+rounded, because `?to=` says what you mean about the cutoff) and
+`?to=YYYY-MM-DD` moves it to midnight on that date; either
 way the answer lists the business days the move passed through, because three
 days from a Thursday is Sunday to a calendar and Tuesday to a bank and you
 should not have to find out which one you got by experiment. The clock never
-goes backwards. `--clock YYYY-MM-DDTHH:MM` pins where it starts, and
+goes backwards — though `?to=` a date it has already reached today is a no-op
+rather than an error, so "advance to the settlement date" means what a test
+thinks it means when that date is today. `--clock YYYY-MM-DDTHH:MM` pins where it starts, and
 `POST /_mock/reset` puts it back there.
 
 ## Endpoints
@@ -215,7 +251,8 @@ like mock-edi's so the two feel the same.
 | --- | --- | --- | --- |
 | Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks | now |
 | Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets | now |
-| Payment file in | `POST /payments` | Answers with a JSON summary: accepted, rejected, what is queued | 0.1 |
+| Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright | now |
+| Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; one by the id a client matches on | now |
 | Collect answers | `GET /_mock/mailbox` | `?leave` to peek, `?raw` for the XML | 0.1 |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
@@ -236,9 +273,10 @@ Every flag `mock-bank --help` lists:
 | `--host` | `127.0.0.1` | Bind address. The Dockerfile binds `0.0.0.0`. |
 | `--port` | `8080` | Port. |
 | `--db` | `:memory:` | SQLite file, or `:memory:` for a throwaway bank that forgets everything on exit. |
-| `--timezone` | `UTC` | Bank time's zone, an IANA name such as `Europe/Amsterdam`. Needs `zoneinfo`, so on Python 3.8 only `UTC` is available and anything else is refused at startup rather than silently treated as `UTC`. |
+| `--timezone` | `UTC` | Bank time's zone, an IANA name such as `Europe/Amsterdam`. It needs `zoneinfo` (Python 3.9+) *and* an IANA database, which Windows does not ship — `pip install tzdata` provides one, and mock-bank will not depend on it because it takes no dependencies. Without both, a named zone is refused at startup rather than silently treated as `UTC`: a settlement date an hour out is the kind of lie this mock exists not to tell. |
 | `--cutoff` | `15:00` | The hour the bank stops taking today's payments for today. At the cutoff exactly it is already too late. |
 | `--clock` | now | Start bank time at `YYYY-MM-DDTHH:MM` instead of now, for a run whose settlement dates are reproducible. `POST /_mock/reset` returns here. |
+| `--allow-duplicates` | off | Accept a file whose `MsgId` the bank has already received. Off, it is rejected with `DUPL`, as a real bank does. |
 | `--quiet`, `-q` | off | Log nothing per request. |
 | `--version` | | Print the version and exit. |
 

@@ -30,10 +30,25 @@ says so where it does.
   day of receipt before the cutoff, the next business day at or after it -
   rolled forward past weekends and holidays. `GET/PUT /_mock/holidays` is the
   holiday calendar, `GET /_mock/state` reports the clock, and the clock never
-  goes backwards. New flags: `--timezone` (IANA name, `UTC` by default, and on
+  goes backwards, though advancing to a date it has already reached today does
+  nothing rather than failing. New flags: `--timezone` (IANA name, `UTC` by default, and on
   Python 3.8 a named zone is refused rather than quietly treated as `UTC`),
   `--cutoff HH:MM` and `--clock YYYY-MM-DDTHH:MM`; `POST /_mock/reset` returns
   bank time to where `--clock` put it rather than to real time.
+- **Deciding and booking payments** (#6). `POST /payments` reads, validates
+  and decides a `pain.001`, books what is due, and answers `202` with each
+  payment's outcome, reason code and settlement date (`422` when the file is
+  rejected outright). A behaviour describes the account it is set on:
+  `closed-account` (`AC04`) and `bad-bank-id` (`RC01`) are read from a held
+  creditor account, the rest from the debtor account. A `MsgId` seen before is
+  `DUPL` unless `--allow-duplicates`; a debtor account the bank does not hold
+  is `AC02`; a payment in another currency than its account is `AM03`; only
+  `insufficient-funds` (`AM04`) looks at the balance. Accepted payments debit
+  their account on the settlement date, debit side only.
+  `GET /_mock/payments` and `/_mock/payments/<EndToEndId>` show what was
+  decided, and `/_mock/state` counts it. The database gains `file` and
+  `payment` tables (schema version 2); an older `--db` file is upgraded in
+  place.
 
 - **SQLite state and the accounts endpoints** (#3). The mock now keeps what it
   knows: `mockbank/db.py` declares the schema and the indexes, records the

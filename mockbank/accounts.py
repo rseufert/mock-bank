@@ -3,7 +3,7 @@
 ``BEHAVIOURS`` comes first because it is the single place the behaviour names
 and their meaning are declared: the command line prints it, the README's
 behaviour table is checked against it, ``check()`` refuses anything not in it,
-and ``decide()`` (once it exists) dispatches on it.  The codes named are the
+and ``decide()`` dispatches on it.  The codes named are the
 ISO 20022 external reason codes a real bank uses, not inventions of the mock.
 
 Below it is the account itself - the row, what may be set on it, and what the
@@ -308,3 +308,282 @@ def totals(conn) -> Dict[str, int]:
     return {r["currency"]: int(r["total"]) for r in db.rows(
         conn, "SELECT currency, SUM(balance) AS total FROM account"
               " GROUP BY currency ORDER BY currency")}
+
+
+# ---------------------------------------------------------------------------
+# Deciding and booking
+# ---------------------------------------------------------------------------
+
+# A behaviour describes the account it is set on. These describe an account
+# as a debtor, and are read from the debtor account of the batch...
+DEBTOR_SIDE = ("accept", "insufficient-funds", "reject-file", "duplicate-file",
+               "silent", "statement-gap", "return-later")
+# ...and these as a creditor, read from the creditor account when the bank
+# holds it. A creditor it does not hold is another bank's customer, and
+# nothing about it can be known at acceptance: its payment settles.
+CREDITOR_SIDE = ("closed-account", "bad-bank-id")
+
+ACCEPTED, REJECTED = "accepted", "rejected"
+
+
+class PaymentDecision:
+    """What the bank decided about one payment."""
+
+    def __init__(self, payment, batch, account, outcome, reason=None, reason_text=None,
+                 settlement_date=None):
+        self.payment = payment
+        self.batch = batch
+        self.account = account          # the held debtor account, or None
+        self.outcome = outcome
+        self.reason = reason
+        self.reason_text = reason_text
+        self.settlement_date = settlement_date
+
+    def to_json(self):
+        return {"end_to_end_id": self.payment.end_to_end_id,
+                "pmt_inf_id": self.batch.pmt_inf_id,
+                "outcome": self.outcome, "reason": self.reason,
+                "reason_text": self.reason_text,
+                "amount": self.payment.amount, "currency": self.payment.currency,
+                "settlement_date": (self.settlement_date.isoformat()
+                                    if self.settlement_date else None)}
+
+
+class Decision:
+    """What the bank decided about a file: a group status and, unless the
+    file was rejected outright, one PaymentDecision per payment."""
+
+    def __init__(self, payment_file, status, reason=None, reason_text=None,
+                 payments=(), reported=True):
+        self.payment_file = payment_file
+        self.msg_id = payment_file.msg_id if payment_file else None
+        self.status = status            # ACCP, PART or RJCT
+        self.reason = reason            # set only when rejected outright
+        self.reason_text = reason_text
+        self.payments = list(payments)
+        self.reported = reported
+
+    @property
+    def rejected_outright(self):
+        return self.status == "RJCT" and self.reason is not None
+
+    @property
+    def accepted(self):
+        return [d for d in self.payments if d.outcome == ACCEPTED]
+
+    @property
+    def rejected(self):
+        return [d for d in self.payments if d.outcome == REJECTED]
+
+
+def settlement_date(requested, today):
+    """The day an accepted payment debits its account.
+
+    Until the clock owns it this is the later of the requested execution
+    date and today, in UTC: a past date executes today, as the validator's
+    DT01 warning says. The cutoff, weekends and holidays are in
+    `clock.settlement_date`, which #7 switches this over to.
+    """
+    if requested is None or requested < today:
+        return today
+    return requested
+
+
+def decide(payment_file, findings, conn, today, allow_duplicates=False):
+    """Decide a payment file. Reads the accounts; changes nothing.
+
+    A behaviour describes the account it is set on: ``DEBTOR_SIDE`` ones are
+    read from the batch's debtor account, ``CREDITOR_SIDE`` ones from the
+    creditor account when the bank holds it. The first rule that applies
+    wins, in this order:
+
+    1. A file-level finding rejects the whole file, whatever the behaviour:
+       a file the mock could not read, any structural (``FF01``) finding, and
+       any error outside a payment (a header's ``AM10``/``AM18``, a debtor
+       IBAN's ``AC01``), with that finding's code.
+    2. A ``MsgId`` the bank has received before rejects the file with
+       ``DUPL``, as real banks do whatever you ask; ``--allow-duplicates``
+       turns this off. The ``duplicate-file`` behaviour is therefore the
+       default already and does nothing more.
+    3. A debtor account with ``reject-file`` rejects the file: ``RJCT``,
+       ``FF01``.
+    4. Per payment, in file order:
+
+       a. a debtor account the bank does not hold: ``AC02``; one it holds
+          that is closed: ``AC04``;
+       b. a payment-level finding: its code (``AC01``, ``AM03``, ``AM05``);
+       c. a payment in another currency than the held debtor account: ``AM03``;
+       d. a held creditor account that is closed or ``closed-account``: ``AC04``;
+       e. a held creditor account that is ``bad-bank-id``: ``RC01``;
+       f. a debtor account with ``insufficient-funds``: ``AM04`` for each
+          payment that would take the available balance (the balance less
+          what is accepted and not yet booked) below zero, accepting later
+          smaller ones that fit. It is the only behaviour that looks at the
+          balance; under every other one a payment books even below zero, as
+          on an account with an overdraft.
+
+    5. A debtor account with ``silent``: decided and booked like any other,
+       but marked unreported, so no ``pain.002`` is sent (#7).
+    6. ``accept``, ``statement-gap`` and ``return-later`` accept here; their
+       effect is on the statement (#9) and the returns (#14).
+
+    Rules 3 and 5 are about the file, so they apply when any debtor account
+    in the file carries the behaviour.
+    """
+    errors = [f for f in findings if f.level == "error"]
+    if payment_file is None:
+        first = errors[0] if errors else None
+        return Decision(None, "RJCT", first.code if first else schema.STRUCTURAL,
+                        first.text if first else "the file could not be read")
+
+    payments = payment_file.payments
+    outside = [f for f in errors
+               if f.code == schema.STRUCTURAL or not any(_under(f.path, p.path) for p in payments)]
+    if outside:
+        return Decision(payment_file, "RJCT", outside[0].code,
+                        "%s: %s" % (outside[0].path, outside[0].text))
+
+    if not allow_duplicates and payment_file.msg_id and db.one(
+            conn, "SELECT id FROM file WHERE msg_id = ?", (payment_file.msg_id,)):
+        return Decision(payment_file, "RJCT", "DUPL",
+                        "MsgId %s has been received before" % payment_file.msg_id)
+
+    debtors = {id(batch): by_iban(conn, batch.debtor_account or "")
+               for batch in payment_file.batches}
+    behaviours = {a["behaviour"] for a in debtors.values() if a}
+    if "reject-file" in behaviours:
+        return Decision(payment_file, "RJCT", "FF01",
+                        "the debtor account's behaviour is reject-file")
+
+    available = {}
+    decided = []
+    for batch in payment_file.batches:
+        debtor = debtors[id(batch)]
+        when = settlement_date(batch.requested_execution_date, today)
+        for payment in batch.payments:
+            reason, text = _payment_reason(conn, debtor, batch, payment, errors, available)
+            if reason:
+                decided.append(PaymentDecision(payment, batch, debtor, REJECTED, reason, text))
+            else:
+                decided.append(PaymentDecision(payment, batch, debtor, ACCEPTED,
+                                               settlement_date=when))
+    accepted = sum(1 for d in decided if d.outcome == ACCEPTED)
+    status = "ACCP" if accepted == len(decided) else ("RJCT" if not accepted else "PART")
+    return Decision(payment_file, status, payments=decided,
+                    reported="silent" not in behaviours)
+
+
+def _under(path, ancestor):
+    return path == ancestor or path.startswith(ancestor + "/")
+
+
+def _payment_reason(conn, debtor, batch, payment, errors, available):
+    """The code and prose a payment is rejected with, or (None, None)."""
+    if debtor is None:
+        held = ", ".join(a["iban"] for a in listing(conn))
+        return "AC02", ("the debtor account %s is not one this bank holds; it holds %s"
+                        % (batch.debtor_account or "(none)", held))
+    if debtor["closed"]:
+        return "AC04", "the debtor account %s is closed" % debtor["iban"]
+    for finding in errors:
+        if _under(finding.path, payment.path):
+            return finding.code, finding.text
+    if payment.currency != debtor["currency"]:
+        return "AM03", ("the amount is in %s but the debtor account %s is held in %s"
+                        % (payment.currency, debtor["iban"], debtor["currency"]))
+    creditor = by_iban(conn, payment.creditor_account or "")
+    if creditor and (creditor["closed"] or creditor["behaviour"] == "closed-account"):
+        return "AC04", "the creditor account %s is closed" % creditor["iban"]
+    if creditor and creditor["behaviour"] == "bad-bank-id":
+        return "RC01", ("the creditor account %s's bank identifier does not resolve"
+                        % creditor["iban"])
+    if debtor["behaviour"] == "insufficient-funds":
+        if debtor["id"] not in available:
+            available[debtor["id"]] = debtor["balance"] - _pending(conn, debtor["id"])
+        if payment.amount > available[debtor["id"]]:
+            return "AM04", ("%s would take the debtor account below zero; %s is available"
+                            % (schema.format_amount(payment.amount, payment.currency),
+                               schema.format_amount(max(available[debtor["id"]], 0),
+                                                    debtor["currency"])))
+        available[debtor["id"]] -= payment.amount
+    return None, None
+
+
+def _pending(conn, account_id):
+    """What is accepted on an account and not yet booked, in minor units."""
+    found = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                         " WHERE account_id = ? AND status = ? AND booked_at IS NULL",
+                   (account_id, ACCEPTED))
+    return int(found["total"])
+
+
+def book(conn, decision, today):
+    """Record a decided file and its payments, then book what is due.
+
+    A file the mock could not read far enough to have a MsgId is not
+    recorded: there is nothing a duplicate check could match it on. Returns
+    the file's row id, or None.
+    """
+    if decision.msg_id is None:
+        return None
+    received = db.now()
+    cursor = conn.execute(
+        "INSERT INTO file (msg_id, message, received_at, status, reason, reported)"
+        " VALUES (?,?,?,?,?,?)",
+        (decision.msg_id, decision.payment_file.message, received, decision.status,
+         decision.reason, int(decision.reported)))
+    file_id = cursor.lastrowid
+    for d in decision.payments:
+        p = d.payment
+        conn.execute(
+            "INSERT INTO payment (file_id, pmt_inf_id, end_to_end_id, instruction_id,"
+            " account_id, debtor_iban, amount, currency, creditor_name, creditor_iban,"
+            " creditor_bic, status, reason, reason_text, settlement_date)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (file_id, d.batch.pmt_inf_id, p.end_to_end_id, p.instruction_id,
+             d.account["id"] if d.account else None, d.batch.debtor_account,
+             p.amount, p.currency, p.creditor_name, p.creditor_account, p.creditor_bic,
+             d.outcome, d.reason, d.reason_text,
+             d.settlement_date.isoformat() if d.settlement_date else None))
+    book_due(conn, today, commit=False)
+    conn.commit()
+    return file_id
+
+
+def book_due(conn, today, commit=True):
+    """Debit every accepted payment whose settlement date has come.
+
+    Called when a file is booked, and the hook the clock (#4, #7) calls as
+    it moves. Returns the payments booked, oldest first.
+    """
+    due = db.rows(conn, "SELECT * FROM payment WHERE status = ? AND booked_at IS NULL"
+                        " AND settlement_date <= ? AND account_id IS NOT NULL ORDER BY id",
+                  (ACCEPTED, today.isoformat()))
+    now = db.now()
+    for row_ in due:
+        conn.execute("UPDATE account SET balance = balance - ? WHERE id = ?",
+                     (row_["amount"], row_["account_id"]))
+        conn.execute("UPDATE payment SET booked_at = ? WHERE id = ?", (now, row_["id"]))
+        row_["booked_at"] = now
+    if commit:
+        conn.commit()
+    return due
+
+
+def payments(conn, end_to_end_id=None):
+    """Every payment the bank decided on, newest first, or those with one
+    EndToEndId (which is unique within a file, not across files)."""
+    sql = ("SELECT payment.*, file.msg_id FROM payment JOIN file ON file.id = payment.file_id")
+    if end_to_end_id is None:
+        return db.rows(conn, sql + " ORDER BY payment.id DESC")
+    return db.rows(conn, sql + " WHERE end_to_end_id = ? ORDER BY payment.id DESC",
+                   (end_to_end_id,))
+
+
+def payment_counts(conn):
+    """What /_mock/state reports about payments."""
+    out = {"files": db.count(conn, "file")}
+    for status in (ACCEPTED, REJECTED):
+        out[status] = db.count(conn, "payment", "status = '%s'" % status)
+    out["booked"] = db.count(conn, "payment", "booked_at IS NOT NULL")
+    return out

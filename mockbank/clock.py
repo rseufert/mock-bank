@@ -38,6 +38,11 @@ DEFAULT_CUTOFF = "15:00"
 # and when somebody needs that, this is the one place it changes.
 WEEKEND = (5, 6)
 
+# The furthest one advance may move, about ten years. `timedelta` refuses more
+# than ~2.7 million days with an OverflowError rather than an answer, and a
+# mock asked to skip a million days has been asked by mistake.
+MAX_ADVANCE_DAYS = 3650
+
 
 class Invalid(ValueError):
     """A clock the mock could not keep, and why. Answered 400, or refused at startup."""
@@ -114,6 +119,36 @@ def cutoff_time(text: str) -> datetime.time:
                       % text) from None
 
 
+def whole_days(value) -> int:
+    """`days` for an advance: a whole number from 0 to `MAX_ADVANCE_DAYS`.
+
+    Everything else is refused by name. `nan`, `inf` and `1e9` each used to
+    reach `timedelta` and come back as a 500 with a traceback, which tells a
+    caller nothing; so does a silently rounded `0.5`.
+    """
+    if isinstance(value, bool):
+        raise Invalid("days is a whole number of days, not %r" % value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise Invalid("days is a whole number of days, and %s is not a "
+                          "number at all" % value)
+        if value != int(value):
+            raise Invalid(
+                "days is a whole number of days, so %s is refused rather than "
+                "rounded; use to=YYYY-MM-DD to land on a particular date, "
+                "which says what you mean about the cutoff" % value)
+        value = int(value)
+    if not isinstance(value, int):
+        raise Invalid("days is a whole number of days, not %r" % (value,))
+    if not 0 <= value <= MAX_ADVANCE_DAYS:
+        raise Invalid(
+            "days is a whole number from 0 to %d; %d is outside that. The "
+            "clock does not go backwards, and %d days is further than a mock "
+            "is ever asked to skip on purpose."
+            % (MAX_ADVANCE_DAYS, value, MAX_ADVANCE_DAYS))
+    return value
+
+
 def parse_start(text: str) -> datetime.datetime:
     """``YYYY-MM-DDTHH:MM`` (or with seconds) as a naive bank-time moment."""
     for shape in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
@@ -158,6 +193,13 @@ class Clock:
             self.offset = parse_start(start).replace(tzinfo=self.zone) - self.started
         # Callbacks the pipeline issues register into: each is called with the
         # moment before and the moment after an advance, and does its own work.
+        #
+        # They run after the offset has moved and inside the server's lock. A
+        # hook that raises therefore leaves the clock advanced while its own
+        # work is unfinished - the 500 path rolls the database back, but time
+        # does not roll back with it. So a hook has to be idempotent over "due
+        # and not yet done", and then the next advance picks up whatever the
+        # last one dropped.
         self.on_advance: List[Callable[[datetime.datetime, datetime.datetime], None]] = []
 
     # -- reading it -------------------------------------------------------
@@ -259,41 +301,46 @@ class Clock:
 
     # -- moving it --------------------------------------------------------
 
-    def advance(self, days: Optional[float] = None,
+    def advance(self, days=None,
                 to: Optional[datetime.date] = None) -> Dict[str, object]:
         """Move bank time forward, and say what was crossed.
 
-        `days` is **calendar** days: three days from a Thursday is Sunday. That
-        is what "advance the clock three days" means, and the answer also
-        carries the business days crossed for a caller who wanted those - see
-        `businessDaysCrossed`.
+        `days` is a whole number of **calendar** days, 0 to `MAX_ADVANCE_DAYS`:
+        three days from a Thursday is Sunday. That is what "advance the clock
+        three days" means, and the answer also carries the business days
+        crossed for a caller who wanted those - see `businessDaysCrossed`.
 
-        `to` moves to 00:00 on that date. Backwards is refused: messages
-        already queued for a date the clock had passed would come due a second
-        time, and every timestamp written since would be in the future.
+        Fractions are refused rather than accepted: half a day invites
+        reasoning about which side of the cutoff it lands on, and `to` with a
+        date answers that question better. The bound is there because
+        `timedelta` cannot hold a year of more than about 2.7 million days and
+        the failure is an `OverflowError` rather than an answer.
+
+        `to` moves to 00:00 on that date. A date the clock has already reached
+        but not passed does nothing and says so; a date strictly before today
+        is refused, because whatever was queued for a date the clock had passed
+        would come due a second time and every timestamp written since would be
+        in the future.
         """
         if (days is None) == (to is None):
             raise Invalid("advance takes either days=N or to=YYYY-MM-DD, "
                           "and needs one of them")
         before = self.now()
         if days is not None:
-            if days < 0:
-                raise Invalid(
-                    "the clock does not go backwards: advancing %s days would "
-                    "put it before %s, and whatever is queued for a date it had "
-                    "already passed would come due a second time"
-                    % (days, before.date().isoformat()))
-            shift = datetime.timedelta(days=days)
+            shift = datetime.timedelta(days=whole_days(days))
         else:
             target = datetime.datetime.combine(to, datetime.time(0, 0),
                                                tzinfo=self.zone)
-            if target < before:
+            if to < before.date():
                 raise Invalid(
                     "the clock does not go backwards: it is %s and %s is behind "
                     "that, and whatever is queued for a date it had already "
                     "passed would come due a second time"
                     % (before.isoformat(timespec="minutes"), to.isoformat()))
-            shift = target - before
+            # `to` today, past midnight, is a move of no distance rather than a
+            # move backwards: a test that advances to the settlement date should
+            # not be refused because the settlement date is today.
+            shift = max(target - before, datetime.timedelta(0))
         self.offset += shift
         after = self.now()
 

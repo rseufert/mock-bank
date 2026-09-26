@@ -264,6 +264,51 @@ class Advancing(unittest.TestCase):
         bank = clock(start="2026-09-24T09:00", holidays=[FRIDAY.isoformat()])
         self.assertEqual(bank.advance(days=3)["businessDaysCrossed"], [])
 
+    def test_days_is_a_whole_number_and_each_refusal_says_what_is_wrong(self):
+        # Every one of these used to reach timedelta and come back as a 500:
+        # nan and inf as ValueError/OverflowError from int(), 1e9 as a
+        # timedelta that cannot hold it. 0.5 was accepted silently.
+        for value, expected in ((float("nan"), "not a number at all"),
+                                (float("inf"), "not a number at all"),
+                                (float("-inf"), "not a number at all"),
+                                (1e9, "0 to 3650"),
+                                (10 ** 9, "0 to 3650"),
+                                (0.5, "refused rather than rounded"),
+                                (-1, "0 to 3650")):
+            with self.subTest(days=value):
+                bank = clock(start="2026-09-24T09:00")
+                with self.assertRaises(Invalid) as caught:
+                    bank.advance(days=value)
+                self.assertIn(expected, str(caught.exception))
+                self.assertEqual(bank.today(), THURSDAY)
+
+    def test_zero_days_is_allowed_and_moves_nothing(self):
+        bank = clock(start="2026-09-24T09:00")
+        outcome = bank.advance(days=0)
+        self.assertEqual(outcome["calendarDays"], 0)
+        self.assertEqual(outcome["businessDaysCrossed"], [])
+        self.assertEqual(bank.today(), THURSDAY)
+
+    def test_the_upper_bound_itself_is_allowed(self):
+        bank = clock(start="2026-09-24T09:00")
+        bank.advance(days=clock_module.MAX_ADVANCE_DAYS)
+        self.assertGreater(bank.today().year, 2035)
+
+    def test_to_a_date_the_clock_has_already_reached_does_nothing(self):
+        # Not backwards: a test that advances to the settlement date should not
+        # be refused because the settlement date is today.
+        bank = clock(start="2026-09-24T09:00")
+        outcome = bank.advance(to=THURSDAY)
+        self.assertEqual(outcome["calendarDays"], 0)
+        self.assertEqual(outcome["businessDaysCrossed"], [])
+        # And it did not jump back to midnight either.
+        self.assertEqual(bank.now().strftime("%H:%M"), "09:00")
+
+    def test_to_a_date_strictly_before_today_is_still_refused(self):
+        bank = clock(start="2026-09-24T09:00")
+        with self.assertRaises(Invalid):
+            bank.advance(to=datetime.date(2026, 9, 23))
+
     def test_backwards_is_refused(self):
         bank = clock(start="2026-09-24T09:00")
         with self.assertRaises(Invalid):
@@ -356,6 +401,28 @@ class OverHttp(MockServerCase):
         self.assertEqual(resp.status, 400)
         self.assertIn("soon", resp.json()["error"])
 
+    def test_every_value_timedelta_cannot_hold_is_a_400_over_http(self):
+        # The three the senior reproduced as 500s with a traceback, plus the
+        # fraction that was accepted silently and the negative.
+        for raw in ("nan", "inf", "-inf", "1e9", "1000000000", "0.5", "-1"):
+            with self.subTest(days=raw):
+                resp = self.post("/_mock/advance?days=" + raw)
+                self.assertEqual(resp.status, 400, resp.body)
+                self.assertIn("days", resp.json()["error"])
+        self.assertEqual(self.get("/_mock/state").json()["clock"]["date"],
+                         THURSDAY.isoformat())
+
+    def test_advancing_to_today_is_a_200_that_moved_nothing(self):
+        resp = self.post("/_mock/advance?to=%s" % THURSDAY.isoformat())
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.json()["calendarDays"], 0)
+        self.assertEqual(resp.json()["businessDaysCrossed"], [])
+
+    def test_yesterday_is_still_a_400(self):
+        resp = self.post("/_mock/advance?to=2026-09-23")
+        self.assertEqual(resp.status, 400)
+        self.assertIn("backwards", resp.json()["error"])
+
     def test_holidays_go_in_as_a_list_and_come_back_sorted(self):
         resp = self.put("/_mock/holidays", ["2026-12-26", "2026-12-25"])
         self.assertEqual(resp.status, 200)
@@ -413,7 +480,11 @@ class OverHttp(MockServerCase):
         bank = clock()
         bank.advance(days=5)
         bank.reset()
-        self.assertEqual(bank.today(), datetime.date.today())
+        # The UTC date, not the host's local one: this clock is in UTC, and on a
+        # host that is not, near midnight, the two are different days and the
+        # test would fail for no reason of the code's.
+        self.assertEqual(bank.today(),
+                         datetime.datetime.now(datetime.timezone.utc).date())
 
     def test_getting_advance_says_what_is_allowed(self):
         resp = self.get("/_mock/advance")
