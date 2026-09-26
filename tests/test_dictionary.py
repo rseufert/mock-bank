@@ -157,8 +157,6 @@ def _replace(mapping, header, **changes):
     return {"CstmrCdtTrfInitn": body}
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # -- the mock's own output, and samples from outside the project -----------------
@@ -311,9 +309,29 @@ class ExternalSamples(unittest.TestCase):
                 _, findings = self.walk(path)
                 self.assertTrue([f for f in findings if f.level == "error"])
 
+    def test_the_xsd_sources_agree_with_the_tool_that_fetches_them(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "check_xsd.py")
+        spec = importlib.util.spec_from_file_location("check_xsd", path)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        with open(os.path.join(EXTERNAL, "SOURCES.md"), encoding="utf-8") as handle:
+            sources = handle.read()
+        for name, (url, digest) in tool.XSDS.items():
+            with self.subTest(name):
+                commit = url.split("/")[5]
+                self.assertIn("`%s.xsd`" % name, sources)
+                self.assertIn(commit, sources)
+                self.assertIn(digest, sources)
+
     def test_every_sample_is_accounted_for(self):
         with open(os.path.join(EXTERNAL, "SOURCES.md"), encoding="utf-8") as handle:
             sources = handle.read()
         for path in glob.glob(os.path.join(EXTERNAL, "**", "*.xml"), recursive=True):
             relative = os.path.relpath(path, EXTERNAL).replace(os.sep, "/")
             self.assertIn("`%s`" % relative, sources, "no source recorded for " + relative)
+
+
+if __name__ == "__main__":
+    unittest.main()
