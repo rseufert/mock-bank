@@ -97,8 +97,28 @@ sends them.
 | `pacs.004` | Out | Days later, on a return behaviour | A payment that had settled, coming back with a return reason | 0.2 |
 | NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH | 0.3 |
 
-Versions: `pain.001.001.09` and `camt.053.001.08` are written, the versions
-most banks accept today; older ones (`.001.03`) are accepted on input.
+Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
+accepted as well and read into the same model. The mock writes
+`pain.002.001.10`, `camt.054.001.08` and `camt.053.001.08`, the versions that go
+with `pain.001.001.09` and that most banks accept today. That is a choice, not
+the only right answer; so are the others the standard leaves open, and the
+mock says which it made:
+
+- **Bank transaction code.** Every debit the mock books carries
+  `PMNT`/`ICDT`/`ESCT` (payments, issued credit transfer, SEPA credit
+  transfer); 0.1 speaks euro credit transfers.
+- **Coverage.** The dictionary declares the elements the mock reads and
+  writes and those a real bank's file commonly carries, not every optional
+  element of the XSD. An element the standard allows but the dictionary does
+  not declare is reported as a warning naming its path, never silently
+  dropped.
+- **Minor units.** Amounts are integers in the currency's ISO 4217 minor units
+  everywhere but the wire; a currency the mock has no exponent for is taken to
+  have two.
+
+Every element of every message is declared once in `mockbank/schema.py`, and
+`GET /_mock/dictionary` serves those declarations, with the code sets and the
+choices above, as JSON.
 
 Each payment keeps its `EndToEndId` through every message, so a client can
 match a status, a statement line and a return to the invoice it paid.
@@ -124,19 +144,27 @@ reason codes are the ISO 20022 external codes a real bank uses.
 ### The accounts it starts with
 
 Four, the same four every time, one per failure you are likely to want. The
-IBANs carry real mod-97 check digits and the bank codes are invented, so they
-are valid to parse and belong to nobody.
+IBANs carry real mod-97 check digits and `MOCK` is not an assigned bank code,
+so they are valid to parse and belong to nobody. They are the same accounts
+`tests/samples/pain001_four_payments.xml` names, so the sample file works
+against the mock out of the box.
 
 | Id | IBAN | Balance | Behaviour | Why it is there |
 | --- | --- | --- | --- | --- |
-| `ACME` | `DE28999000000000000100` | 125,000.00 EUR | `accept` | The debtor everything works from |
-| `GLOBEX` | `DE44999000000000000200` | 12.50 EUR | `insufficient-funds` | One ordinary payment breaches it |
-| `INITECH` | `DE33777000000000000300` | 0.00 EUR | `closed-account` | Closed; the creditor a payment is rejected for with `AC04` |
-| `EURODIS` | `DE14888000000000000400` | 0.00 EUR | `bad-bank-id` | A `BIC` of the right shape (`ZZZZDE99XXX`) that resolves to nothing |
+| `ACME` | `NL41MOCK0000000001` | 125,000.00 EUR | `accept` | The debtor everything works from |
+| `GLOBEX` | `NL14MOCK0000000002` | 12.50 EUR | `insufficient-funds` | One ordinary payment breaches it |
+| `INITECH` | `NL84MOCK0000000003` | 0.00 EUR | `closed-account` | Closed; the creditor a payment is rejected for with `AC04` |
+| `EURODIS` | `NL57MOCK0000000004` | 0.00 EUR | `bad-bank-id` | A `BIC` of the right shape (`ZZZZNL2AXXX`) that resolves to nothing |
 
 Balances are whole numbers of minor units everywhere the mock talks about
 money: 12.50 EUR is `1250`, and `PATCH`ing `12.50` is a `400` rather than a
 rounding. `POST /_mock/reset` brings these four back exactly as they are here.
+
+There is no debtor/creditor field: which side an account stands on belongs to a
+payment, not to the account. The sample pays `GLOBEX`, and a test that wants
+insufficient funds sends *from* `GLOBEX`. The sample's fifth party,
+`NL30MOCK0000000005`, is deliberately not seeded - a creditor at another bank
+is not an account this bank holds, and a payment to one simply settles.
 
 Two rules hold whatever the behaviour, because real banks apply them:
 
@@ -152,6 +180,7 @@ like mock-edi's so the two feel the same.
 | Surface | Endpoint | Notes | Release |
 | --- | --- | --- | --- |
 | Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks | now |
+| Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets | now |
 | Payment file in | `POST /payments` | Answers with a JSON summary: accepted, rejected, what is queued | 0.1 |
 | Collect answers | `GET /_mock/mailbox` | `?leave` to peek, `?raw` for the XML | 0.1 |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
@@ -188,7 +217,8 @@ docker run -p 8080:8080 mock-bank
 ```
 mockbank/accounts.py   the account behaviours, and what a valid account is
 mockbank/db.py         the schema, the upgrade, and the seeded accounts
-mockbank/server.py     the HTTP surface: control plane and accounts today, the pipeline as 0.1 lands
+mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
+mockbank/server.py     the HTTP surface: control plane, dictionary and accounts today, the pipeline as 0.1 lands
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over

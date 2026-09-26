@@ -40,11 +40,11 @@ from typing import Any, Dict, List, Optional, Sequence
 #
 # Whoever lands first owns the statement; the other adds to it.
 SCHEMA = [
-    # An account the mock knows about. Two kinds live in one table because a
-    # bank's own view is the same either way - a row with an IBAN, a balance
-    # and a behaviour - and `role` says which side of a payment it can stand
-    # on: `debtor` accounts are held here and can be debited, `creditor`
-    # accounts are the ones payments are sent to.
+    # An account the mock knows about: an IBAN, a balance and a behaviour.
+    # There is deliberately no debtor/creditor column. Which side an account
+    # stands on is a property of a payment, not of the account - the sample
+    # file pays GLOBEX, and a test that wants insufficient funds sends *from*
+    # GLOBEX - so a column naming one of the two would be wrong half the time.
     """
     CREATE TABLE IF NOT EXISTS account (
         id          TEXT PRIMARY KEY,
@@ -59,8 +59,7 @@ SCHEMA = [
         -- {"days": 3} from it. An object rather than columns, because each
         -- behaviour wants different parameters and most want none.
         parameters  TEXT NOT NULL DEFAULT '{}',
-        closed      INTEGER NOT NULL DEFAULT 0,
-        role        TEXT NOT NULL DEFAULT 'debtor'
+        closed      INTEGER NOT NULL DEFAULT 0
     )
     """,
     # A day the bank does not settle on, `YYYY-MM-DD` in bank time. The clock
@@ -299,26 +298,35 @@ def _mod97(text: str) -> int:
 #   INITECH   the creditor whose account is closed
 #   EURODIS   the creditor at a bank that does not exist
 #
-# IBANs are built, not typed: `iban()` puts the check digits on. The BBANs are
-# German-shaped - an eight-digit bank code and a ten-digit account number - and
-# every bank code is invented rather than borrowed from a real institution or
-# from a standards document's example, so that nothing here can be mistaken for
-# somebody's actual account.
+# These are the accounts `tests/samples/pain001_four_payments.xml` names, and
+# they are the same accounts on purpose: the sample is the file the demo tour
+# sends and the pipeline is tested on, so a seed that used different IBANs would
+# make the project's own sample bounce off its own bank for an unregistered
+# debtor. The sample is the wire, so the wire wins.
+#
+# IBANs are built, not typed: `iban()` puts the check digits on. `MOCK` where a
+# Dutch BBAN carries a bank code is not an assigned one, so these belong to
+# nobody, and `MOCKNL2A` is the mock's own BIC as the sample writes it.
+#
+# `NL30MOCK0000000005` - the sample's fifth party, Umbrella Logistics - is left
+# out deliberately. A creditor at another bank is not an account this bank
+# holds, and a payment to one is ordinary: it settles. Seeding every party the
+# sample names would hide that case.
 SEED = [
-    # id, name, country, bban, bic, currency, balance (minor), behaviour, closed, role
-    ("ACME", "Acme Distribution GmbH", "DE", "999000000000000100",
-     "MOCKDEFFXXX", "EUR", 12500000, "accept", 0, "debtor"),
-    ("GLOBEX", "Globex Retail Group", "DE", "999000000000000200",
-     "MOCKDEFFXXX", "EUR", 1250, "insufficient-funds", 0, "debtor"),
+    # id, name, country, bban, bic, currency, balance (minor), behaviour, closed
+    ("ACME", "ACME Corporation", "NL", "MOCK0000000001",
+     "MOCKNL2A", "EUR", 12500000, "accept", 0),
+    ("GLOBEX", "Globex Supplies B.V.", "NL", "MOCK0000000002",
+     "MOCKNL2A", "EUR", 1250, "insufficient-funds", 0),
     # Held at the mock itself, which is the only way a bank can reject a
     # payment for AC04 when it arrives: an account at somebody else's bank is
     # not known to be closed until the payment comes back as a return.
-    ("INITECH", "Initech Supply Co", "DE", "777000000000000300",
-     "MOCKDEFFXXX", "EUR", 0, "closed-account", 1, "creditor"),
-    # A BIC that is the right shape and resolves to nothing, which is what
+    ("INITECH", "Initech Services N.V.", "NL", "MOCK0000000003",
+     "MOCKNL2A", "EUR", 0, "closed-account", 1),
+    # A BIC of the right shape that resolves to nothing, which is what
     # `bad-bank-id` is about: the file is well formed and the bank is not there.
-    ("EURODIS", "Eurodis Handels GmbH", "DE", "888000000000000400",
-     "ZZZZDE99XXX", "EUR", 0, "bad-bank-id", 0, "creditor"),
+    ("EURODIS", "Eurodis Handels GmbH", "NL", "MOCK0000000004",
+     "ZZZZNL2AXXX", "EUR", 0, "bad-bank-id", 0),
 ]
 
 
@@ -332,11 +340,10 @@ def seed(conn: sqlite3.Connection) -> None:
     if conn.execute("SELECT 1 FROM account LIMIT 1").fetchone():
         return
     for (identifier, name, country, bban, bic, currency, balance,
-         behaviour, closed, role) in SEED:
+         behaviour, closed) in SEED:
         conn.execute(
             "INSERT INTO account (id, name, iban, bic, currency, balance,"
-            " behaviour, parameters, closed, role)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " behaviour, parameters, closed) VALUES (?,?,?,?,?,?,?,?,?)",
             (identifier, name, iban(country, bban), bic, currency, balance,
-             behaviour, json.dumps({}), closed, role))
+             behaviour, json.dumps({}), closed))
     conn.commit()

@@ -60,10 +60,7 @@ FIELDS = {
     "behaviour": DEFAULT_BEHAVIOUR,
     "parameters": {},
     "closed": 0,
-    "role": "debtor",
 }
-
-ROLES = ("debtor", "creditor")
 
 # 4 letters of institution, 2 of country, 2 of location, and an optional
 # 3-character branch: ISO 9362. The mock checks the shape, not whether the
@@ -107,10 +104,6 @@ def check(fields: Dict[str, Any]) -> Dict[str, Any]:
         raise Invalid("unknown behaviour %r; the %d this mock has are: %s"
                       % (out["behaviour"], len(BEHAVIOURS),
                          ", ".join(sorted(BEHAVIOURS))))
-
-    if "role" in out and out["role"] not in ROLES:
-        raise Invalid("role must be one of %s, not %r"
-                      % (" or ".join(ROLES), out["role"]))
 
     if "iban" in out:
         value = str(out["iban"]).replace(" ", "").upper()

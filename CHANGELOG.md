@@ -27,6 +27,16 @@ says so where it does.
   numbers of minor units everywhere: `12.50` is refused rather than rounded,
   because a statement that is a cent out is the failure this project exists
   to rehearse.
+- **The ISO 20022 dictionary** (#2). `mockbank/schema.py` declares
+  `pain.001.001.09` (and `.001.03`, read into the same model),
+  `pain.002.001.10`, `camt.054.001.08` and `camt.053.001.08` as element trees
+  with their types, occurrences and code sets, the recurring shapes declared
+  once. One walker reports an element out of order, in the wrong namespace,
+  missing, repeated or with a bad value as a finding naming its path; one
+  builder writes any of them in declared order. `GET /_mock/dictionary` and
+  `GET /_mock/dictionary/<message>` serve it all as JSON, with the choices the
+  standard leaves open - the versions written, `PMNT`/`ICDT`/`ESCT` as the bank
+  transaction code - stated.
 - **The repository, and a mock that answers.** `python -m mockbank` starts
   a server with `/_mock/health`, `/_mock/state` and `POST /_mock/reset`; every
   surface the plan promises and this skeleton lacks answers `404` with a body

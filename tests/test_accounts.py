@@ -66,6 +66,8 @@ class TheSeed(MockServerCase):
         self.assertEqual(account["currency"], "EUR")
         self.assertEqual(account["balance"], 12500000)
         self.assertEqual(account["parameters"], {})
+        # The sample file's debtor, so that the sample works out of the box.
+        self.assertEqual(account["iban"], "NL41MOCK0000000001")
 
     def test_an_id_no_account_has_is_a_404_naming_the_ones_there_are(self):
         resp = self.get("/_mock/accounts/NOPE")
@@ -128,7 +130,7 @@ class ChangingAnAccount(MockServerCase):
     def test_an_iban_whose_check_digits_do_not_agree_is_refused(self):
         # One digit of the real check pair moved: the right shape, wrong number.
         resp = self.patch("/_mock/accounts/ACME",
-                          {"iban": "DE78999000000000000100"})
+                          {"iban": "NL42MOCK0000000001"})
         self.assertEqual(resp.status, 400)
         self.assertIn("check digits", resp.json()["error"])
 
@@ -149,8 +151,8 @@ class CreatingAnAccount(MockServerCase):
 
     def body(self, **over):
         payload = {"id": "OTHER", "name": "Other Trading Ltd",
-                   "iban": db.iban("DE", "999000000000000900"),
-                   "bic": "MOCKDEFFXXX", "role": "creditor"}
+                   "iban": db.iban("NL", "MOCK0000000009"),
+                   "bic": "MOCKNL2A"}
         payload.update(over)
         return payload
 
@@ -193,7 +195,7 @@ class Reset(MockServerCase):
         self.patch("/_mock/accounts/ACME", {"behaviour": "silent",
                                             "balance": 1})
         self.post("/_mock/accounts", {"id": "GONE",
-                                      "iban": db.iban("DE", "999000000000000800")})
+                                      "iban": db.iban("NL", "MOCK0000000008")})
         self.assertEqual(self.post("/_mock/reset").status, 200)
         self.assertEqual(self.get("/_mock/accounts").json(), before)
 

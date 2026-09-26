@@ -37,7 +37,7 @@ class FromAnOlderFile(FileDatabaseCase):
         conn.execute(
             "INSERT INTO account (id, name, iban, bic, currency, balance,"
             " behaviour) VALUES ('ACME', 'Acme Distribution GmbH',"
-            " 'DE28999000000000000100', 'MOCKDEFFXXX', 'EUR', 9999, 'accept')")
+            " 'NL41MOCK0000000001', 'MOCKDEFFXXX', 'EUR', 9999, 'accept')")
         conn.commit()
         conn.close()
 
@@ -51,7 +51,6 @@ class FromAnOlderFile(FileDatabaseCase):
         account = self.get("/_mock/accounts/ACME").json()
         self.assertEqual(account["parameters"], {})
         self.assertIs(account["closed"], False)
-        self.assertEqual(account["role"], "debtor")
 
     def test_the_seed_does_not_overwrite_a_file_that_has_been_used(self):
         self.start()
@@ -68,7 +67,6 @@ class FromAnOlderFile(FileDatabaseCase):
             added = db.upgrade(conn, self.db_path)
             self.assertIn("account.parameters", added)
             self.assertIn("account.closed", added)
-            self.assertIn("account.role", added)
             self.assertEqual(db.upgrade(conn, self.db_path), [])
         finally:
             conn.close()
@@ -112,7 +110,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (1, "6bc327ec18e14652")
+    FINGERPRINT = (1, "55cf699e1e1a63c1")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

@@ -1,7 +1,8 @@
 """The HTTP surface.
 
 The control plane a tester reaches first (``/_mock/health``, ``/_mock/state``,
-``POST /_mock/reset``), the accounts the bank holds, and an index page.
+``POST /_mock/reset``), the ISO 20022 dictionary (``/_mock/dictionary``), the
+accounts the bank holds, and an index page.
 Everything the plan promises and this release has not built yet answers 404
 with a body naming what *is* supported, which is the rule the sibling mocks
 follow: refuse by name rather than half-implement.
@@ -19,6 +20,7 @@ written after the response is a row that test can lose on a slow runner.
 """
 from __future__ import annotations
 
+import html
 import json
 import sqlite3
 import sys
@@ -28,7 +30,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Tuple
 
-from . import __version__, accounts, db
+from . import __version__, accounts, db, schema
 from .accounts import BEHAVIOURS
 
 # What this release answers, so a 404 can say so and the index can list it.
@@ -37,6 +39,7 @@ SUPPORTED = [
     "GET /_mock/health",
     "GET /_mock/state",
     "POST /_mock/reset",
+    "GET /_mock/dictionary", "GET /_mock/dictionary/<message>",
     "GET /_mock/behaviours",
     "GET /_mock/accounts", "POST /_mock/accounts",
     "GET /_mock/accounts/<id>", "PATCH /_mock/accounts/<id>",
@@ -51,6 +54,18 @@ PLANNED = [
     "GET /_mock/requests",
     "POST /_mock/validate",
 ]
+
+# A line of explanation for the endpoints that are not self-evident from their
+# path; the rest of the index just lists them.
+NOTES = {
+    "GET /_mock/dictionary": "the ISO 20022 declarations the mock reads and "
+                             "writes by",
+    "GET /_mock/accounts": "the accounts the bank holds, with their balances "
+                           "and their behaviours",
+    "PATCH /_mock/accounts/<id>": "change a behaviour, a balance or the "
+                                  "closed flag while it runs",
+    "POST /_mock/reset": "back to the four seeded accounts",
+}
 
 # A request body larger than this is refused rather than read into memory. A
 # pain.001 with a thousand payments is a few megabytes; this is generous.
@@ -179,6 +194,15 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             self._json(500, {"error": str(error), "type": type(error).__name__})
 
+    def _dictionary(self, name):
+        message = schema.MESSAGES.get(name)
+        if message is None:
+            return self._json(404, {
+                "error": "the mock does not speak %s" % name,
+                "messages": sorted(schema.MESSAGES),
+            })
+        return self._json(200, message.to_json())
+
     # -- routes -----------------------------------------------------------
 
     def _route(self, method: str, path: str, query: Dict[str, List[str]],
@@ -212,6 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._method_not_allowed(method, ["GET"])
             return self._json(200, self.state.snapshot())
 
+
         if head == "reset" and not rest:
             if method != "POST":
                 return self._method_not_allowed(method, ["POST"])
@@ -223,6 +248,15 @@ class Handler(BaseHTTPRequestHandler):
             if method != "GET":
                 return self._method_not_allowed(method, ["GET"])
             return self._json(200, BEHAVIOURS)
+
+        if head == "dictionary":
+            if method != "GET":
+                return self._method_not_allowed(method, ["GET"])
+            if not rest:
+                return self._json(200, schema.dictionary_index())
+            if len(rest) > 1:
+                return self._not_found()
+            return self._dictionary(rest[0])
 
         if head == "accounts":
             return self._accounts(method, rest, body)
@@ -273,6 +307,15 @@ class Handler(BaseHTTPRequestHandler):
                                         "behaviours": sorted(BEHAVIOURS)})
             return self._json(200, row)
         return self._method_not_allowed(method, ["GET", "PATCH"])
+
+    def _dictionary(self, name: str) -> None:
+        message = schema.MESSAGES.get(name)
+        if message is None:
+            return self._json(404, {
+                "error": "the mock does not speak %s" % name,
+                "messages": sorted(schema.MESSAGES),
+            })
+        return self._json(200, message.to_json())
 
     # -- answers ----------------------------------------------------------
 
@@ -406,14 +449,20 @@ def _json_body(body: bytes):
     return parsed if isinstance(parsed, dict) else None
 
 
+def _item(endpoint: str) -> str:
+    # `<id>` and `<message>` are placeholders, not markup: escaped, or the
+    # browser swallows them and the index lists an endpoint with a hole in it.
+    note = NOTES.get(endpoint)
+    return ("  <li><code>%s</code>%s</li>"
+            % (html.escape(endpoint), ": " + html.escape(note) if note else ""))
+
+
 def index_page() -> str:
     """The front page: everything this build answers, and everything it will."""
     return INDEX_TEMPLATE % {
         "version": __version__,
-        "supported": "\n".join("  <li><code>%s</code></li>" % line
-                               for line in SUPPORTED),
-        "planned": "\n".join("  <li><code>%s</code></li>" % line
-                             for line in PLANNED),
+        "supported": "\n".join(_item(line) for line in SUPPORTED),
+        "planned": "\n".join(_item(line) for line in PLANNED),
     }
 
 
