@@ -359,7 +359,7 @@ stderr at startup if you do not. `-q` does not silence that warning.
 mockbank/accounts.py   the account behaviours, and what a valid account is
 mockbank/clock.py      bank time: the cutoff, business days, holidays, and advancing
 mockbank/db.py         the schema, the upgrade, and the seeded accounts
-mockbank/messages.py   reading a pain.001 into a PaymentFile, and writing the pain.002 and camt.054 the bank sends back
+mockbank/messages.py   reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
 mockbank/outbox.py     what the bank sends and when: the message queue, release as the clock moves, the mailbox
 mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
 mockbank/server.py     the HTTP surface: the control plane, the dictionary, the accounts, the pipeline and the mailbox

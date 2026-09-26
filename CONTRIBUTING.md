@@ -146,7 +146,7 @@ The most useful bug report contains the file a real bank sent or accepted,
 with anything sensitive removed, beside what the mock produced. Element paths,
 namespaces, the message version and the reason code all matter.
 
-`POST /_mock/validate` (0.1) is often the fastest way to show one: it returns
+`POST /_mock/validate` is often the fastest way to show one: it returns
 the mock's reading of a file as prose, without changing anything.
 
 ## Releasing (maintainers)
