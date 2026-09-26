@@ -8,6 +8,8 @@ says so where it does.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
 ### Fixed
 
 - **Binding `0.0.0.0` no longer waits for DNS before the mock finishes
@@ -194,4 +196,5 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/commits/main
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/rseufert/mock-bank/releases/tag/v0.1.0
