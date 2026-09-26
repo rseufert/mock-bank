@@ -253,3 +253,80 @@ class TheReadmeSaysWhatTheSeedIs(MockServerCase):
                 self.assertEqual(int(amount.replace(",", "").replace(".", "")),
                                  served[identifier]["balance"])
                 self.assertEqual(currency, served[identifier]["currency"])
+
+
+class NoBodyProducesA500(MockServerCase):
+    """A wrong JSON type is the caller's mistake, and has to read like one.
+
+    Every one of these used to reach `sqlite3` and come back as a 500 with a
+    traceback, which tells the caller nothing about which field they got
+    wrong - and a 500 from a mock is indistinguishable from the mock being
+    broken, which is the worst thing a test double can do to whoever is
+    debugging with it. `check()` now types the text fields, and this walks the
+    bodies a JSON client plausibly sends by accident.
+    """
+
+    # The field that is wrong, and a body that gets it wrong. Naming the field
+    # in the data rather than deriving it is the point: the assertion is that
+    # the refusal names the field the caller has to go and fix.
+    HOSTILE = [
+        ("id", {"id": 5}),
+        ("id", {"id": ["X"]}),
+        ("id", {"id": None}),
+        ("iban", {"iban": {"value": "NL30MOCK0000000005"}}),
+        ("iban", {"iban": 30000000005}),
+        ("name", {"name": {"a": 1}}),
+        ("name", {"name": [1]}),
+        ("bic", {"bic": 12345678}),
+        ("currency", {"currency": 978}),
+        ("behaviour", {"behaviour": None}),
+        ("balance", {"balance": {"amount": 1}}),
+        ("closed", {"closed": "maybe"}),
+        ("parameters", {"parameters": [1, 2]}),
+    ]
+
+    def setUp(self):
+        self.addCleanup(self.post, "/_mock/reset")
+
+    def body(self, fields):
+        """A body that would be valid but for the one field under test."""
+        payload = {"id": "OTHER", "iban": "NL30MOCK0000000005"}
+        payload.update(fields)
+        return payload
+
+    def test_creating_one_names_the_field_rather_than_failing(self):
+        for field, fields in self.HOSTILE:
+            with self.subTest(field=field, sent=fields):
+                resp = self.post("/_mock/accounts", self.body(fields))
+                self.assertEqual(resp.status, 400, resp.body)
+                self.assertIn(field, resp.json()["error"])
+        self.assertEqual([row["id"] for row in self.get("/_mock/accounts").json()],
+                         ["ACME", "EURODIS", "GLOBEX", "INITECH"])
+
+    def test_patching_one_names_the_field_rather_than_failing(self):
+        for field, fields in self.HOSTILE:
+            if field == "id":
+                continue                # an id is not a field PATCH can change
+            with self.subTest(field=field, sent=fields):
+                resp = self.patch("/_mock/accounts/ACME", fields)
+                self.assertEqual(resp.status, 400, resp.body)
+                self.assertIn(field, resp.json()["error"])
+        # Nothing got through on the way.
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["name"],
+                         "ACME Corporation")
+
+
+class PutIsNotAPartialPatch(MockServerCase):
+    """PUT replaces; PATCH changes some fields. This mock only does the latter.
+
+    It used to accept a PUT and quietly treat it as a PATCH, while the 405 it
+    answered other methods with advertised only GET and PATCH - so a client
+    doing a full replace got a partial update and no word about it.
+    """
+
+    def test_it_is_refused_and_the_refusal_names_what_is_allowed(self):
+        resp = self.put("/_mock/accounts/ACME", {"behaviour": "silent"})
+        self.assertEqual(resp.status, 405)
+        self.assertEqual(resp.json()["allowed"], ["GET", "PATCH"])
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["behaviour"],
+                         "accept")

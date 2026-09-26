@@ -221,9 +221,26 @@ statement entry to explain it. That is a choice, and it is stated here.
 
 Two rules hold whatever the behaviour, because real banks apply them:
 
-- A payment received after the cutoff (default 15:00 bank time) settles on the
-  next business day.
-- Weekends and a configurable holiday list are not business days.
+- A payment's settlement date is **the later of the requested execution date
+  and the day the bank can start on** — which is the day of receipt before the
+  cutoff and the next business day at or after it — **rolled forward past
+  weekends and holidays.** The cutoff is 15:00 bank time by default
+  (`--cutoff`), and at 15:00 exactly it is already too late, because a bank
+  that stops taking today's work at 15:00 has stopped at 15:00:00.
+- Weekends and the holiday list at `GET/PUT /_mock/holidays` are not business
+  days. Bank time is one zone, `--timezone`, UTC by default.
+
+Nothing waits for any of this. `POST /_mock/advance?days=N` moves bank time by
+N whole **calendar** days (0 to 3650; a fraction is refused rather than
+rounded, because `?to=` says what you mean about the cutoff) and
+`?to=YYYY-MM-DD` moves it to midnight on that date; either
+way the answer lists the business days the move passed through, because three
+days from a Thursday is Sunday to a calendar and Tuesday to a bank and you
+should not have to find out which one you got by experiment. The clock never
+goes backwards — though `?to=` a date it has already reached today is a no-op
+rather than an error, so "advance to the settlement date" means what a test
+thinks it means when that date is today. `--clock YYYY-MM-DDTHH:MM` pins where it starts, and
+`POST /_mock/reset` puts it back there.
 
 ## Endpoints
 
@@ -239,8 +256,8 @@ like mock-edi's so the two feel the same.
 | Collect answers | `GET /_mock/mailbox` | `?leave` to peek, `?raw` for the XML | 0.1 |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
-| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on | 0.1 |
-| Clock | `POST /_mock/advance` | `?days=N` or `?to=YYYY-MM-DD`; releases statements and returns that come due | 0.1 |
+| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole | now |
+| Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due | now |
 | Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file | now |
 | Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders | 0.2 |
 
@@ -256,6 +273,9 @@ Every flag `mock-bank --help` lists:
 | `--host` | `127.0.0.1` | Bind address. The Dockerfile binds `0.0.0.0`. |
 | `--port` | `8080` | Port. |
 | `--db` | `:memory:` | SQLite file, or `:memory:` for a throwaway bank that forgets everything on exit. |
+| `--timezone` | `UTC` | Bank time's zone, an IANA name such as `Europe/Amsterdam`. It needs `zoneinfo` (Python 3.9+) *and* an IANA database, which Windows does not ship — `pip install tzdata` provides one, and mock-bank will not depend on it because it takes no dependencies. Without both, a named zone is refused at startup rather than silently treated as `UTC`: a settlement date an hour out is the kind of lie this mock exists not to tell. |
+| `--cutoff` | `15:00` | The hour the bank stops taking today's payments for today. At the cutoff exactly it is already too late. |
+| `--clock` | now | Start bank time at `YYYY-MM-DDTHH:MM` instead of now, for a run whose settlement dates are reproducible. `POST /_mock/reset` returns here. |
 | `--allow-duplicates` | off | Accept a file whose `MsgId` the bank has already received. Off, it is rejected with `DUPL`, as a real bank does. |
 | `--quiet`, `-q` | off | Log nothing per request. |
 | `--version` | | Print the version and exit. |
@@ -271,6 +291,7 @@ docker run -p 8080:8080 mock-bank
 
 ```
 mockbank/accounts.py   the account behaviours, and what a valid account is
+mockbank/clock.py      bank time: the cutoff, business days, holidays, and advancing
 mockbank/db.py         the schema, the upgrade, and the seeded accounts
 mockbank/messages.py   reading a pain.001 into a PaymentFile of batches and payments
 mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it

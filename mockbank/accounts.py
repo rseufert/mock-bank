@@ -62,6 +62,12 @@ FIELDS = {
     "closed": 0,
 }
 
+# The fields that are text. A JSON client can plausibly send a number, an
+# object or a list for any of them, and every one of those used to reach
+# sqlite3 and come back as a 500 with a traceback - which tells the caller
+# nothing about which field they got wrong.
+TEXT_FIELDS = ("name", "iban", "bic", "currency", "behaviour")
+
 # 4 letters of institution, 2 of country, 2 of location, and an optional
 # 3-character branch: ISO 9362. The mock checks the shape, not whether the
 # institution exists - it has no registry and will not pretend to one. That is
@@ -99,6 +105,11 @@ def check(fields: Dict[str, Any]) -> Dict[str, Any]:
                          ", ".join(sorted(FIELDS))))
 
     out = dict(fields)
+
+    for field in TEXT_FIELDS:
+        if field in out and not isinstance(out[field], str):
+            raise Invalid("%s has to be text, not %s (%r)"
+                          % (field, type(out[field]).__name__, out[field]))
 
     if "behaviour" in out and out["behaviour"] not in BEHAVIOURS:
         raise Invalid("unknown behaviour %r; the %d this mock has are: %s"
@@ -224,7 +235,10 @@ def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     if get(conn, identifier) is not None:
         raise Invalid("there is already an account %r; PATCH it instead"
                       % identifier)
-    if not str(fields.get("iban", "")):
+    if "iban" in fields and not isinstance(fields["iban"], str):
+        raise Invalid("iban has to be text, not %s (%r)"
+                      % (type(fields["iban"]).__name__, fields["iban"]))
+    if not fields.get("iban", ""):
         raise Invalid("an account needs an iban: it is what an arriving "
                       "payment names, and one without it can never be matched")
     checked = check(fields)
@@ -273,7 +287,11 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
 
 
 def _check_id(identifier: str) -> None:
-    if not (identifier or "").strip():
+    if not isinstance(identifier, str):
+        raise Invalid("an account's id has to be text, not %s (%r): it becomes "
+                      "a path in the control plane's URLs"
+                      % (type(identifier).__name__, identifier))
+    if not identifier.strip():
         raise Invalid("an account needs an id")
     if not ID_PATTERN.match(identifier):
         raise Invalid("id %r may use only letters, digits, and '.', '-' or '_' "
@@ -361,10 +379,10 @@ class Decision:
 def settlement_date(requested, today):
     """The day an accepted payment debits its account.
 
-    Until the clock (#4) exists this is the later of the requested execution
+    Until the clock owns it this is the later of the requested execution
     date and today, in UTC: a past date executes today, as the validator's
-    DT01 warning says. The cutoff, weekends and holidays arrive with the
-    clock, which will answer this question instead.
+    DT01 warning says. The cutoff, weekends and holidays are in
+    `clock.settlement_date`, which #7 switches this over to.
     """
     if requested is None or requested < today:
         return today

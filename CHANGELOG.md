@@ -8,8 +8,33 @@ says so where it does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A field sent as the wrong JSON type is a `400` naming that field**, not a
+  `500` with a traceback. `POST /_mock/accounts` with `{"id": 5}`, or a `name`
+  sent as an object or an `iban` as a list, used to reach SQLite and fail
+  there; a `500` from a mock is indistinguishable from the mock being broken.
+- **`PUT /_mock/accounts/<id>` is refused rather than treated as a partial
+  `PATCH`.** It used to do a partial update while the `405` other methods got
+  advertised only `GET` and `PATCH`, so a client doing a full replace got a
+  partial one and no word about it.
+
 ### Added
 
+- **The bank clock** (#4). `mockbank/clock.py` keeps bank time, and nothing in
+  the mock waits for it: `POST /_mock/advance?days=N` moves it by calendar days
+  and `?to=YYYY-MM-DD` to midnight on a date, and either way the answer lists
+  the business days the move passed through, because three days from a Thursday
+  is Sunday to a calendar and Tuesday to a bank. `settlement_date()` is the
+  later of the requested execution date and the day the bank can start on - the
+  day of receipt before the cutoff, the next business day at or after it -
+  rolled forward past weekends and holidays. `GET/PUT /_mock/holidays` is the
+  holiday calendar, `GET /_mock/state` reports the clock, and the clock never
+  goes backwards, though advancing to a date it has already reached today does
+  nothing rather than failing. New flags: `--timezone` (IANA name, `UTC` by default, and on
+  Python 3.8 a named zone is refused rather than quietly treated as `UTC`),
+  `--cutoff HH:MM` and `--clock YYYY-MM-DDTHH:MM`; `POST /_mock/reset` returns
+  bank time to where `--clock` put it rather than to real time.
 - **Deciding and booking payments** (#6). `POST /payments` reads, validates
   and decides a `pain.001`, books what is due, and answers `202` with each
   payment's outcome, reason code and settlement date (`422` when the file is
