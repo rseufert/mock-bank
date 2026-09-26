@@ -253,7 +253,10 @@ def main():
     paths = {name: fetch(name) for name in XSDS}
     missing = sorted(name for name, path in paths.items() if path is None)
     if missing:
-        skipped.append("could not fetch the XSD for %s" % ", ".join(missing))
+        # URL and hash both, so a re-pin is copy and paste.
+        skipped.append("could not fetch the XSD for %s:\n%s" % (", ".join(missing), "\n".join(
+            "      %s\n        from %s\n        sha256 %s" % (name, XSDS[name][0], XSDS[name][1])
+            for name in missing)))
 
     for name, message in schema.MESSAGES.items():
         if paths.get(name):
