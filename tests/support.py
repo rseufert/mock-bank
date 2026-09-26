@@ -5,13 +5,20 @@ starts one in a background thread on an ephemeral port, and subclasses point
 `config_kwargs` at whatever configuration the surface under test needs.
 Nothing is stubbed; if the mock cannot be reached the way a client reaches
 it, the test is wrong.
+
+FileDatabaseCase is the same thing on a `--db` file rather than `:memory:`,
+for the questions a throwaway database cannot answer: whether balances survive
+a restart, and whether a file written by an older mock still opens.
 """
 from __future__ import annotations
 
 import faulthandler
 import json
 import os
+import shutil
+import sqlite3
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -84,3 +91,64 @@ class MockServerCase(unittest.TestCase):
 
     def post(self, path, body=None, **kw):
         return self.request("POST", path, body=body, **kw)
+
+    def patch(self, path, body=None, **kw):
+        return self.request("PATCH", path, body=body, **kw)
+
+    def put(self, path, body=None, **kw):
+        return self.request("PUT", path, body=body, **kw)
+
+
+class FileDatabaseCase(MockServerCase):
+    """A mock on a database file of its own, which a test can restart.
+
+    Everything else in the suite runs on `:memory:`, which cannot say whether
+    balances survive a restart - or an upgrade. Each test gets a fresh file
+    and, unless `start_on_setup` is off, a mock already running on it;
+    `restart()` stops that mock and starts another on the same file.
+    """
+
+    start_on_setup = True
+
+    @classmethod
+    def setUpClass(cls):
+        pass
+
+    @classmethod
+    def tearDownClass(cls):
+        pass
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix="mock-bank-db-")
+        self.db_path = os.path.join(self.directory, "bank.db")
+        self.httpd = None
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.addCleanup(self.stop)
+        if self.start_on_setup:
+            self.start()
+
+    def start(self):
+        kwargs = dict(host="127.0.0.1", port=0, db_path=self.db_path, quiet=True)
+        kwargs.update(self.config_kwargs)
+        self.httpd = make_server(Config(**kwargs))
+        self.base = "http://127.0.0.1:%d" % self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        return self.httpd
+
+    def stop(self):
+        if self.httpd is not None:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+            self.httpd = None
+
+    def restart(self):
+        self.stop()
+        return self.start()
+
+    def user_version(self):
+        """The schema version recorded in the file, read from outside the mock."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()

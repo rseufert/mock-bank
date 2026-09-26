@@ -141,6 +141,31 @@ reason codes are the ISO 20022 external codes a real bank uses.
 | `silent` | Sends no `pain.002` at all | none | 0.1 |
 | `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point | 0.1 |
 
+### The accounts it starts with
+
+Four, the same four every time, one per failure you are likely to want. The
+IBANs carry real mod-97 check digits and `MOCK` is not an assigned bank code,
+so they are valid to parse and belong to nobody. They are the same accounts
+`tests/samples/pain001_four_payments.xml` names, so the sample file works
+against the mock out of the box.
+
+| Id | IBAN | Balance | Behaviour | Why it is there |
+| --- | --- | --- | --- | --- |
+| `ACME` | `NL41MOCK0000000001` | 125,000.00 EUR | `accept` | The debtor everything works from |
+| `GLOBEX` | `NL14MOCK0000000002` | 12.50 EUR | `insufficient-funds` | One ordinary payment breaches it |
+| `INITECH` | `NL84MOCK0000000003` | 0.00 EUR | `closed-account` | Closed; the creditor a payment is rejected for with `AC04` |
+| `EURODIS` | `NL57MOCK0000000004` | 0.00 EUR | `bad-bank-id` | A `BIC` of the right shape (`ZZZZNL2AXXX`) that resolves to nothing |
+
+Balances are whole numbers of minor units everywhere the mock talks about
+money: 12.50 EUR is `1250`, and `PATCH`ing `12.50` is a `400` rather than a
+rounding. `POST /_mock/reset` brings these four back exactly as they are here.
+
+There is no debtor/creditor field: which side an account stands on belongs to a
+payment, not to the account. The sample pays `GLOBEX`, and a test that wants
+insufficient funds sends *from* `GLOBEX`. The sample's fifth party,
+`NL30MOCK0000000005`, is deliberately not seeded - a creditor at another bank
+is not an account this bank holds, and a payment to one simply settles.
+
 Two rules hold whatever the behaviour, because real banks apply them:
 
 - A payment received after the cutoff (default 15:00 bank time) settles on the
@@ -158,7 +183,9 @@ like mock-edi's so the two feel the same.
 | Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets | now |
 | Payment file in | `POST /payments` | Answers with a JSON summary: accepted, rejected, what is queued | 0.1 |
 | Collect answers | `GET /_mock/mailbox` | `?leave` to peek, `?raw` for the XML | 0.1 |
-| Accounts | `GET/POST /_mock/accounts`, `PATCH /_mock/accounts/<id>` | Balances, behaviour, holiday list | 0.1 |
+| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters | now |
+| Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on | now |
+| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on | 0.1 |
 | Clock | `POST /_mock/advance` | `?days=N` or `?to=YYYY-MM-DD`; releases statements and returns that come due | 0.1 |
 | Validate only | `POST /_mock/validate` | Findings in prose, nothing changed | 0.1 |
 | Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders | 0.2 |
@@ -188,9 +215,10 @@ docker run -p 8080:8080 mock-bank
 ## Layout
 
 ```
-mockbank/accounts.py   the account behaviours, declared once
+mockbank/accounts.py   the account behaviours, and what a valid account is
+mockbank/db.py         the schema, the upgrade, and the seeded accounts
 mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
-mockbank/server.py     the HTTP surface: control plane today, the pipeline as 0.1 lands
+mockbank/server.py     the HTTP surface: control plane, dictionary and accounts today, the pipeline as 0.1 lands
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
