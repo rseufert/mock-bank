@@ -116,6 +116,27 @@ class EndOfDay(StatementCase):
         self.assertEqual(self.get("/_mock/accounts/NOPE/statements").status, 404)
 
 
+class APatchedBalance(StatementCase):
+
+    def test_the_next_opening_shows_the_jump_and_each_statement_still_adds_up(self):
+        # A balance set by PATCH is a change no entry explains: the statement
+        # after it opens at the new balance, not where the last one closed,
+        # and still closes at its own opening less its own entries.
+        self.send(pain001("PB-1", ACME, [("P1", 1000, UMBRELLA)]))
+        self.advance(FRIDAY)
+        [thursday] = self.statements_for(ACME)
+        self.patch_account("ACME", balance=5000000)
+        self.send(pain001("PB-2", ACME, [("P2", 2000, UMBRELLA)]))
+        self.advance(MONDAY)
+        [friday] = self.statements_for(ACME)
+        self.assertEqual(friday["opening"], 5000000)
+        self.assertNotEqual(friday["opening"], thursday["closing"])
+        for statement in (thursday, friday):
+            self.assertEqual(statement["closing"],
+                             statement["opening"] - sum(a for _, a in statement["entries"]))
+        self.assertEqual(friday["closing"], 5000000 - 2000)
+
+
 class StatementGap(StatementCase):
 
     def test_one_entry_is_missing_and_the_balances_still_tell_the_truth(self):

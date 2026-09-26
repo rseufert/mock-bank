@@ -46,6 +46,17 @@ says so where it does.
   collected rather than shown on a terminal - the warning sat in a buffer until
   something else filled it, and a warning that reaches `docker logs` minutes
   after the port opened is not a warning.
+- **The mock checks its own output against the standard** (#10).
+  `GeneratedMessagesAreValid` sends the sample under every account behaviour
+  and walks every message the mock writes against its dictionary, counting
+  them, so a path that stops writing fails. Because the writers and that
+  dictionary could be wrong together, it is also held to eleven files from
+  outside the project (`tests/samples/external/`, each with its source and
+  licence) and, by `tools/check_xsd.py` in CI, to the published XSDs. That
+  found three mistakes, now fixed: `UETR` and `OrgnlUETR` are 36 characters,
+  not 35; a postal address's proprietary `AdrTp` is an identifier with its
+  issuer, not text; and `ACCC` is a status code the mock now knows.
+
 - **The end-of-day statement** (#9). As the clock passes the end of a
   business day, every open account gets a `camt.053.001.08` for it, in
   order, empty days included: `OPBD` and `CLBD`, an entry per booked debit

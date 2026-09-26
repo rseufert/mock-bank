@@ -29,7 +29,7 @@ sys.path.insert(0, HERE)
 
 from mockbank.__main__ import (build_parser, check_auth, exposure_warning,   # noqa: E402
                                is_loopback, main)
-from mockbank.server import Config                                          # noqa: E402
+from mockbank.server import SUPPORTED, Config                               # noqa: E402
 
 from support import MockServerCase                                          # noqa: E402
 
@@ -83,26 +83,32 @@ class WithAuth(MockServerCase):
             401)
 
     def test_every_endpoint_is_behind_it_including_health_and_the_index(self):
-        # A mock that answers an unauthenticated probe has told whoever is
-        # probing that it is there and which version it is.
-        for method, path in (("GET", "/"), ("GET", "/_mock/health"),
-                             ("GET", "/_mock/state"),
-                             ("GET", "/_mock/accounts"),
-                             ("GET", "/_mock/accounts/ACME"),
-                             ("GET", "/_mock/dictionary"),
-                             ("GET", "/_mock/holidays"),
-                             ("GET", "/_mock/mailbox"),
-                             ("GET", "/_mock/payments"),
-                             ("GET", "/_mock/statements"),
-                             ("POST", "/_mock/reset"),
-                             ("POST", "/_mock/advance?days=1"),
-                             ("POST", "/payments"),
-                             ("POST", "/_mock/validate"),
-                             ("PATCH", "/_mock/accounts/ACME"),
-                             ("PUT", "/_mock/holidays"),
-                             ("GET", "/no/such/path")):
-            with self.subTest(method=method, path=path):
+        """Every endpoint the server declares, not a list I kept up by hand.
+
+        Taken from `server.SUPPORTED`, so an endpoint added without the flag
+        covering it fails here rather than waiting to be noticed. The hand-kept
+        version had already drifted: it named `/_mock/statements`, which is not
+        a path this mock has - the statements live under an account - so it was
+        asserting a 401 on nothing, and it had missed `/_mock/behaviours`
+        entirely.
+
+        Health and the index are in the list on purpose. A mock that answers an
+        unauthenticated probe has told whoever is probing that it is there and
+        which version it is.
+        """
+        self.assertGreater(len(SUPPORTED), 8, "SUPPORTED looks empty")
+        for endpoint in SUPPORTED:
+            method, path = endpoint.split(" ", 1)
+            path = path.replace("<id>", "ACME" if "accounts" in path else "1")
+            with self.subTest(endpoint=endpoint):
                 self.assertEqual(self.request(method, path).status, 401)
+
+    def test_a_path_it_does_not_have_is_a_401_rather_than_a_404(self):
+        # The check runs before routing, so a 404 cannot be used to map what
+        # exists on an unguarded-looking port.
+        for path in ("/no/such/path", "/_mock/nonesuch", "/payments/extra"):
+            with self.subTest(path=path):
+                self.assertEqual(self.get(path).status, 401)
 
     def test_a_reset_without_credentials_does_not_reset_anything(self):
         self.patch("/_mock/accounts/ACME", {"behaviour": "silent"},

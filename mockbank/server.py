@@ -151,7 +151,10 @@ class State:
         """Back to the seeded bank, without restarting the process.
 
         The tables are emptied and reseeded rather than the file replaced, so a
-        mock on ``--db`` keeps being the same mock at the same path.
+        mock on ``--db`` keeps being the same mock at the same path. That
+        includes the ``counter`` table, so statement numbers and ``camt.054``
+        ``MsgId`` s start again at 1: a reset is a new bank, not a restart of
+        the old one, which is what keeps its numbers (see ``db.next_value``).
         """
         with self.lock:
             for table in ("statement", "counter", "message", "payment", "file",

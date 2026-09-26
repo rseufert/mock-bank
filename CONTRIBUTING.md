@@ -56,6 +56,7 @@ python3 -m mockbank --port 8080        # it is already runnable
 python3 -m unittest discover -s tests -v
 python3 tools/check_docs.py
 python3 tools/check_changelog.py
+python3 tools/check_xsd.py              # fetches the published XSDs; skips without a network
 ```
 
 Python 3.8 or newer. There is no build step, no virtualenv to create and
