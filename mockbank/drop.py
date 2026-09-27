@@ -68,14 +68,26 @@ class Invalid(ValueError):
 
 
 def check_directories(drop_dir: str, pickup_dir: str) -> None:
-    """Refuse a drop and pickup pair that would feed the bank its own output.
+    """Refuse a drop and pickup pair the mock cannot keep straight.
 
-    The same directory for both, or either inside the other, means every
-    `pain.002` the bank writes lands somewhere it is watching - so it reads its
-    own status report back as if it were a payment file, answers it with `FF01`,
-    writes *that* answer into the directory too, and goes round again. It fails
-    loudly at startup instead, because the alternative is a mock that looks
-    busy and is only talking to itself.
+    **The same directory for both** feeds the bank its own output: every
+    `pain.002` it writes lands where it is watching, so it reads its own status
+    report back as a payment file, answers it `FF01`, writes that answer into the
+    directory too, and goes round again - a mock that looks busy and is only
+    talking to itself.
+
+    **Either inside the other** is refused as well, and for a different reason,
+    which is worth being accurate about: it would *not* loop, because `ready()`
+    lists only the top level of the drop directory. What it would do is mix the
+    bank's answers in with the files it manages - `processed/` and `failed/` live
+    inside the drop directory, so a pickup directory there leaves a reader unable
+    to tell what arrived from what the bank sent, and a pickup directory
+    containing the drop directory does the same in reverse. It is also one
+    change away from being a real loop, the change being anything that made the
+    scan recurse.
+
+    Refusing it costs nobody anything: two directories side by side is what
+    every real SFTP drop looks like.
     """
     if not (drop_dir and pickup_dir):
         return
@@ -86,13 +98,15 @@ def check_directories(drop_dir: str, pickup_dir: str) -> None:
             "--drop-dir and --pickup-dir are the same directory (%s). The bank "
             "would read every message it wrote back in as a payment file; give "
             "them separate directories." % drop)
-    for inner, outer, flags in ((pickup, drop, "--pickup-dir is inside --drop-dir"),
+    for inner, outer, which in ((pickup, drop, "--pickup-dir is inside --drop-dir"),
                                 (drop, pickup, "--drop-dir is inside --pickup-dir")):
         if inner.startswith(outer + os.sep):
             raise Invalid(
-                "%s (%s inside %s). The bank would read what it wrote back in "
-                "as a payment file; give them directories side by side."
-                % (flags, inner, outer))
+                "%s (%s inside %s). The bank's answers would be mixed in with "
+                "the files it manages - processed/ and failed/ are in the drop "
+                "directory - and nobody reading either could tell what arrived "
+                "from what was sent. Give them directories side by side."
+                % (which, inner, outer))
 
 
 class Scanned:

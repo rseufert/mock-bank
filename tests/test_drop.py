@@ -385,12 +385,30 @@ class TheFolderDoorIsOutsideAuth(MockServerCase):
 
 class APickupDirectoryItCannotWriteTo(DropCase):
 
+    def break_the_pickup(self):
+        """Put a regular file where the pickup directory should be.
+
+        Not `chmod 0o500`: that does not stop file creation on Windows, and does
+        not stop root on Linux either, so the first version of these tests was
+        red on the Windows runner and would have been a false pass under Docker.
+        A file where a directory belongs makes `makedirs` raise on every
+        platform, which is the failure being tested - the mock cannot write
+        there - and removing the file makes it work again.
+        """
+        shutil.rmtree(self.pickup)
+        with open(self.pickup, "w", encoding="utf-8") as handle:
+            handle.write("not a directory")
+
+    def fix_the_pickup(self):
+        os.unlink(self.pickup)
+        os.makedirs(self.pickup, exist_ok=True)
+
     def test_the_failure_is_reported_rather_than_silent(self):
         # A pickup directory that fills up or loses its permissions used to fail
         # silently and for ever: the bank looked healthy, the client collected
         # nothing from the folder, and nothing said why.
-        os.chmod(self.pickup, 0o500)
-        self.addCleanup(os.chmod, self.pickup, 0o700)
+        self.break_the_pickup()
+        self.addCleanup(self.fix_the_pickup)
         self.drop_file("payments.xml")
         self.scan()
         unwritten = self.get("/_mock/drop").json()["unwritten"]
@@ -400,11 +418,11 @@ class APickupDirectoryItCannotWriteTo(DropCase):
 
     def test_it_is_written_once_the_directory_works_again(self):
         # written_at is only set on success, so a later release retries it.
-        os.chmod(self.pickup, 0o500)
+        self.break_the_pickup()
         self.drop_file("payments.xml")
         self.scan()
+        self.fix_the_pickup()
         self.assertEqual(self.listing(self.pickup), [])
-        os.chmod(self.pickup, 0o700)
         self.get("/_mock/mailbox?leave")            # releases, and so retries
         self.assertTrue(self.listing(self.pickup))
 
@@ -516,10 +534,15 @@ class AFolderPairTheMockWillNotHonour(unittest.TestCase):
             self.assertIn("read every message it wrote back in", message)
 
     def test_the_pickup_inside_the_drop_is_refused(self):
+        # Refused for mixing the bank's answers in with the files it manages,
+        # not for looping: `ready()` lists only the top level of the drop
+        # directory, so a nested pickup would not actually be read back. The
+        # senior pointed that out and the message says the true reason now.
         with tempfile.TemporaryDirectory() as outer:
             inner = os.path.join(outer, "out")
             message = self.refusal(outer, inner)
             self.assertIn("--pickup-dir is inside --drop-dir", message)
+            self.assertIn("processed/ and failed/", message)
 
     def test_the_drop_inside_the_pickup_is_refused(self):
         with tempfile.TemporaryDirectory() as outer:
