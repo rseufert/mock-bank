@@ -58,7 +58,8 @@ has this mock, [mock-sap](https://github.com/rseufert/mock-sap),
 [mock-edi](https://github.com/rseufert/mock-edi) and the worked examples that
 use them together. mock-bank is the third leg: `po_bridge` sends the order,
 `invoice_check` approves the invoice, and `payment_run` (coming in 0.2) moves
-the money.
+the money. Until then, [`pay_invoices`](#worked-example-paying-the-suppliers-invoices)
+pays mock-edi's invoices through this mock directly.
 
 ---
 
@@ -408,6 +409,47 @@ written when it is released, and so is a `pain.002` for a file you posted over
 HTTP. The pickup directory is the bank's outbound side, not the drop
 directory's reply.
 
+## Worked example: paying the supplier's invoices
+
+[`examples/pay_invoices.py`](examples/pay_invoices.py) is the payment leg of an
+order-to-pay flow, joining this mock to
+[mock-edi](https://github.com/rseufert/mock-edi). The supplier bills in EDIFACT;
+the integration pays each `INVOIC` on its due date and then decides, from what
+the bank sends back, which invoices are actually paid:
+
+```
+mock-edi  ──INVOIC──▶  pay_invoices  ──pain.001──▶  mock-bank
+                                     ◀──pain.002──  accepted: scheduled, not paid
+                                     ◀──camt.054──  the money left
+                                     ◀──camt.053──  on the statement: paid
+```
+
+Standard library only, and it imports neither mock: it reads the `INVOIC` by
+hand, builds the `pain.001` with `xml.etree`, and matches every answer to its
+invoice by `EndToEndId` and `MsgId`. Seven tests, each one a way a payment run
+goes wrong quietly:
+
+| Test | What it proves |
+| --- | --- |
+| `test_accepted_is_scheduled_and_the_statement_makes_it_paid` | A `pain.002` that accepts a payment schedules it on the due date; only the `camt.053` makes the invoice paid |
+| `test_closed_supplier_account_leaves_the_invoice_open` | `AC04` leaves the invoice open with the reason, held rather than retried, and nothing debited |
+| `test_an_invoice_sent_twice_is_paid_once` | mock-edi's `duplicate-invoice` sends it twice; it is paid once |
+| `test_a_run_retried_after_a_crash_does_not_pay_twice` | The same payments make the same `MsgId`, so a retried run's file is refused with `DUPL`, and that refusal does not reopen what the first file paid |
+| `test_insufficient_funds_leaves_invoices_open` | `AM04` on every payment is read payment by payment, even though the group status is `RJCT` |
+| `test_a_returned_payment_reopens_the_invoice` | Under `return-later` the invoice is paid, then the `pacs.004`'s credit on a later statement reopens it |
+| `test_a_payment_missing_from_the_statement_is_not_paid` | Under `statement-gap` the `camt.054` says the money left and the `camt.053` does not show it; the invoice is not paid, and says why |
+
+```bash
+pip install mock-edi
+mock-edi --port 8080 &
+python3 -m mockbank --port 8090 &
+cd examples && python3 -m unittest -v test_pay_invoices
+```
+
+`EDI_URL` and `BANK_URL` point the tests at mocks running elsewhere. The tests
+switch mock-edi's `ACME` partner to EDIFACT `D:96A:UN`, which bills in euros,
+so the buyer is ACME in both mocks. CI runs them against mock-edi from PyPI.
+
 ## Docker
 
 ```bash
@@ -436,7 +478,8 @@ mockbank/validate.py   findings about a payment file: refusals, structure, and t
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
-HTTP; `tools/` holds the checks CI runs; `examples/demo.sh` is the curl tour.
+HTTP; `tools/` holds the checks CI runs; `examples/demo.sh` is the curl tour, and
+`examples/pay_invoices.py` the worked integration with mock-edi.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says how the pieces are meant to
 fit, and [docs/FILES.md](docs/FILES.md) describes every file.
 
