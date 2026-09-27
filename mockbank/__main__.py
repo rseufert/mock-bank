@@ -40,6 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
                         "Without it, anyone who can reach the port can POST "
                         "/_mock/reset, rewrite every account and read every "
                         "message")
+    p.add_argument("--drop-dir", default="", metavar="PATH",
+                   help="a directory to watch for payment files, fed to the "
+                        "same pipeline as POST /payments; read files move to "
+                        "processed/ or to failed/ beside a .findings.txt")
+    p.add_argument("--pickup-dir", default="", metavar="PATH",
+                   help="a directory to write every released message into, as "
+                        "<type>-<account>-<id>.xml, written to a temporary name "
+                        "and renamed so a poller never reads half a file")
+    p.add_argument("--drop-settle-ms", type=int, default=250, metavar="MS",
+                   help="leave a file alone until it has been untouched this "
+                        "long, so one still being written is not read "
+                        "half-finished (default: 250; 0 to read at once)")
+    p.add_argument("--drop-interval-ms", type=int, default=1000, metavar="MS",
+                   help="how often to look in --drop-dir (default: 1000). "
+                        "POST /_mock/drop/scan looks now, which is what a test "
+                        "should use rather than waiting")
     p.add_argument("--allow-duplicates", action="store_true",
                    help="accept a file whose MsgId the bank has seen before "
                         "(by default it is rejected with DUPL, as a real bank does)")
@@ -114,7 +130,10 @@ def main(argv=None) -> int:
     config = Config(host=args.host, port=args.port, db_path=args.db_path,
                     quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
                     clock=args.clock, allow_duplicates=args.allow_duplicates,
-                    status_delay_ms=args.status_delay_ms, auth=args.auth)
+                    status_delay_ms=args.status_delay_ms, auth=args.auth,
+                    drop_dir=args.drop_dir, pickup_dir=args.pickup_dir,
+                    drop_settle_ms=args.drop_settle_ms,
+                    drop_interval_ms=args.drop_interval_ms)
     refused = check_auth(config.auth)
     if refused:
         print("mock-bank: %s" % refused, file=sys.stderr, flush=True)
