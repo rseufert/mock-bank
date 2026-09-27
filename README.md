@@ -360,11 +360,23 @@ SFTP host, and a scheduler that polls them. So the bank has a second door.
 
 ```bash
 mkdir -p bank/in bank/out
-python3 -m mockbank --port 8080 --drop-dir bank/in --pickup-dir bank/out
+python3 -m mockbank --port 8080 --drop-dir bank/in --pickup-dir bank/out \
+        --drop-settle-ms 0
+```
+
+Then, in another terminal:
+
+```bash
 cp tests/samples/pain001_four_payments.xml bank/in/
 curl -s -X POST http://127.0.0.1:8080/_mock/drop/scan
 ls bank/in/processed bank/out
 ```
+
+`--drop-settle-ms 0` is there so that the scan reads the file you just copied
+instead of leaving it for the next pass — the default waits 250ms for a file to
+stop changing, which is right for a real drop and wrong for the line after a
+`cp`. Without it the scan reports `"scanned": 0` and the poller picks the file
+up a second later, which looks like the scan not working.
 
 A file dropped into `--drop-dir` goes through **the same pipeline** as a file
 posted to `/payments` — the same decisions, the same `pain.002`, the same
@@ -408,6 +420,24 @@ file produced — a `camt.054` or a `camt.053` released days later by the clock 
 written when it is released, and so is a `pain.002` for a file you posted over
 HTTP. The pickup directory is the bank's outbound side, not the drop
 directory's reply.
+
+Each file is named `<type>-<account>-<id>.xml`, with the full versioned type:
+`pain.002.001.10-ACME-1.xml` is the first message the bank wrote and it is about
+`ACME`, and `camt.053.001.08-GLOBEX-5.xml` is a statement for `GLOBEX`. The id
+is the message's own and it is what makes the name unique; it is not a sort key,
+since `-11` sorts before `-3` and the type comes first anyway. Read the order
+off `GET /_mock/mailbox?leave`, which is oldest first, or off the ids as
+numbers.
+Nothing already there is overwritten — `POST /_mock/reset` empties the message
+table and the ids start again, so a name can recur while the earlier file is
+still waiting to be collected, and the new one is suffixed.
+
+**A restart delivers nothing twice.** Whether a message has been written is a
+column on its row, not a set in memory, so a mock stopped and started on the
+same `--db` picks up where it left off instead of writing out every message it
+ever released. This is worth stating because the first version did keep a set,
+and restarting it filled the pickup directory with months of files the client
+had collected long before.
 
 ## Worked example: paying the supplier's invoices
 
