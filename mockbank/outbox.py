@@ -69,17 +69,19 @@ def upcoming(conn, file_id) -> List[Dict[str, Any]]:
              "due_on": r["settlement_date"]} for r in rows]
 
 
-def release_due(conn, now, today, clock=None) -> List[Dict[str, Any]]:
+def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     """Book what has come due, write its ``camt.054``, and release every
     queued message whose time has come. Returns what was released.
 
-    With a ``clock``, payments from a ``return-later`` account are scheduled
-    to come back as they book, and those whose day has come are credited back
-    with a ``pacs.004`` and a ``camt.054`` credit (``_release_returns``)."""
+    Payments from a ``return-later`` account are scheduled to come back as
+    they book, which needs the ``clock`` for its business days, and those
+    whose day has come are credited back with a ``pacs.004`` and a
+    ``camt.054`` credit (``_release_returns``). The clock is required rather
+    than optional: a caller that left it out would book payments whose
+    returns then silently never happened."""
     booked = accounts.book_due(conn, today, commit=False)
-    if clock is not None:
-        accounts.schedule_returns(conn, booked, clock)
-        _release_returns(conn, now, today)
+    accounts.schedule_returns(conn, booked, clock)
+    _release_returns(conn, now, today)
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in booked:
         groups.setdefault((row["account_id"], row["settlement_date"]), []).append(row)
