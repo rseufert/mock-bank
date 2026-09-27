@@ -25,6 +25,7 @@ SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
 SCHEMA_V2 = os.path.join(HERE, "fixtures", "schema-v2.sql")
 SCHEMA_V3 = os.path.join(HERE, "fixtures", "schema-v3.sql")
 SCHEMA_V4 = os.path.join(HERE, "fixtures", "schema-v4.sql")
+SCHEMA_V5 = os.path.join(HERE, "fixtures", "schema-v5.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -201,6 +202,57 @@ class FromVersionFour(FileDatabaseCase):
                           payment["returned_at"]), (None, None, None))
 
 
+class FromVersionFive(FileDatabaseCase):
+    """A file written before the mock recorded what it had put in the pickup
+    directory: it gains the column, and a message it had already delivered is
+    not delivered again."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        self.pickup = os.path.join(os.path.dirname(self.db_path), "out")
+        os.makedirs(self.pickup, exist_ok=True)
+        self.config_kwargs = dict(self.config_kwargs, pickup_dir=self.pickup)
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V5, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME Corporation', 'NL41MOCK0000000001', 'MOCKNL2A',"
+            " 'EUR', 1000, 'accept')")
+        # Released and collected, before written_at existed.
+        conn.execute("INSERT INTO message (type, account, due_at, released_at,"
+                     " taken_at, body) VALUES ('pain.002.001.10', 'ACME',"
+                     " '2026-09-01T09:00:00Z', '2026-09-01T09:00:00Z',"
+                     " '2026-09-01T09:05:00Z', '<Document/>')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_column_and_delivers_the_old_message_once(self):
+        # An upgraded row has written_at NULL, so the message *is* written once
+        # after the upgrade - the mock cannot know whether a file it has no
+        # record of is still in the directory, and writing it once is the safe
+        # side of that. What must not happen is writing it again on every
+        # release, which is what the in-memory set did after any restart.
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        # Nothing is written until something releases; the first advance does.
+        self.request("POST", "/_mock/advance?days=1")
+        self.assertEqual(self.pain002_files(), ["pain.002.001.10-ACME-1.xml"])
+        # And then never again, which is the whole point: the in-memory set
+        # rewrote every released message on every restart. The directory does
+        # keep growing - each advance closes another business day and writes
+        # its camt.053 - so the claim is about *this* message, not the count.
+        for _ in range(3):
+            self.request("POST", "/_mock/advance?days=1")
+        self.assertEqual(self.pain002_files(), ["pain.002.001.10-ACME-1.xml"])
+
+    def pain002_files(self):
+        return sorted(name for name in os.listdir(self.pickup)
+                      if name.startswith("pain.002"))
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -235,7 +287,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (5, "10d9f2a955cea625")
+    FINGERPRINT = (6, "a0eff71b361f16e0")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

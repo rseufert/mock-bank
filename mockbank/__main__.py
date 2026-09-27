@@ -8,6 +8,7 @@ import sys
 from . import __version__
 from .accounts import BEHAVIOURS
 from .clock import DEFAULT_CUTOFF, Invalid
+from .drop import Invalid as DropInvalid
 from .server import Config, make_server
 
 
@@ -40,6 +41,22 @@ def build_parser() -> argparse.ArgumentParser:
                         "Without it, anyone who can reach the port can POST "
                         "/_mock/reset, rewrite every account and read every "
                         "message")
+    p.add_argument("--drop-dir", default="", metavar="PATH",
+                   help="a directory to watch for payment files, fed to the "
+                        "same pipeline as POST /payments; read files move to "
+                        "processed/ or to failed/ beside a .findings.txt")
+    p.add_argument("--pickup-dir", default="", metavar="PATH",
+                   help="a directory to write every released message into, as "
+                        "<type>-<account>-<id>.xml, written to a temporary name "
+                        "and renamed so a poller never reads half a file")
+    p.add_argument("--drop-settle-ms", type=int, default=250, metavar="MS",
+                   help="leave a file alone until it has been untouched this "
+                        "long, so one still being written is not read "
+                        "half-finished (default: 250; 0 to read at once)")
+    p.add_argument("--drop-interval-ms", type=int, default=1000, metavar="MS",
+                   help="how often to look in --drop-dir (default: 1000). "
+                        "POST /_mock/drop/scan looks now, which is what a test "
+                        "should use rather than waiting")
     p.add_argument("--allow-duplicates", action="store_true",
                    help="accept a file whose MsgId the bank has seen before "
                         "(by default it is rejected with DUPL, as a real bank does)")
@@ -114,7 +131,10 @@ def main(argv=None) -> int:
     config = Config(host=args.host, port=args.port, db_path=args.db_path,
                     quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
                     clock=args.clock, allow_duplicates=args.allow_duplicates,
-                    status_delay_ms=args.status_delay_ms, auth=args.auth)
+                    status_delay_ms=args.status_delay_ms, auth=args.auth,
+                    drop_dir=args.drop_dir, pickup_dir=args.pickup_dir,
+                    drop_settle_ms=args.drop_settle_ms,
+                    drop_interval_ms=args.drop_interval_ms)
     refused = check_auth(config.auth)
     if refused:
         print("mock-bank: %s" % refused, file=sys.stderr, flush=True)
@@ -131,10 +151,20 @@ def main(argv=None) -> int:
         print(warning, file=sys.stderr, flush=True)
     try:
         httpd = make_server(config)
-    except Invalid as error:
-        # A clock the mock cannot keep is refused at startup rather than at the
-        # first payment: every settlement date in the run depends on it.
+    except (Invalid, DropInvalid) as error:
+        # A clock the mock cannot keep, or a folder pair it cannot honour, is
+        # refused at startup rather than at the first payment: every settlement
+        # date in the run depends on the one, and the other would have the bank
+        # reading its own output back.
         print("mock-bank: %s" % error, file=sys.stderr, flush=True)
+        return 2
+    except OSError as error:
+        # A port already in use, or an address this host does not have. The
+        # rest of startup refuses by name, and this is the commonest failure of
+        # the lot: a traceback for "something is already on 8080" makes a reader
+        # look for a bug in the mock.
+        print("mock-bank: cannot listen on %s:%d - %s"
+              % (config.host, config.port, error), file=sys.stderr, flush=True)
         return 2
     if not args.quiet:
         print("mock-bank %s listening on http://%s:%d/  (db: %s, bank time: "

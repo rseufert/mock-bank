@@ -145,6 +145,13 @@ SCHEMA = [
         due_at       TEXT NOT NULL,
         released_at  TEXT,
         taken_at     TEXT,
+        -- when it was written into --pickup-dir, if there is one. On the row
+        -- rather than in memory: the first version of the folder transport kept
+        -- the written ids in a set, so a restart on --db wrote every message
+        -- ever released into the directory again - including ones the client
+        -- had collected long before. It also survives a crash between
+        -- releasing and writing, which a set seeded at startup would not.
+        written_at   TEXT,
         -- the XML, UTF-8
         body         TEXT NOT NULL
     )
@@ -206,7 +213,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class DatabaseError(Exception):

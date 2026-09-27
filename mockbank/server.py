@@ -32,9 +32,9 @@ import threading
 import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from . import (__version__, accounts, clock as clock_module, db, outbox, schema,
+from . import (__version__, accounts, clock as clock_module, db, drop, outbox, schema,
                validate)
 from .accounts import BEHAVIOURS
 
@@ -57,6 +57,7 @@ SUPPORTED = [
     "GET /_mock/mailbox", "GET /_mock/mailbox/<id>",
     "POST /_mock/mailbox/<id>/unread",
     "GET /_mock/requests",
+    "GET /_mock/drop", "POST /_mock/drop/scan",
 ]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
@@ -81,6 +82,8 @@ NOTES = {
                            "?to=YYYY-MM-DD",
     "PUT /_mock/holidays": "a JSON list of YYYY-MM-DD dates the bank does "
                            "not settle on",
+    "POST /_mock/drop/scan": "read the drop directory now, instead of waiting "
+                             "for the next poll",
     "POST /_mock/reset": "back to the four seeded accounts",
     "POST /_mock/validate": "send a pain.001, get its findings as prose, one "
                             "line each; nothing is stored",
@@ -109,7 +112,9 @@ class Config:
 
     def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
                  timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock="",
-                 allow_duplicates=False, status_delay_ms=0, auth=""):
+                 allow_duplicates=False, status_delay_ms=0, auth="",
+                 drop_dir="", pickup_dir="", drop_settle_ms=250,
+                 drop_interval_ms=1000):
         self.host = host
         # A MsgId seen before is DUPL unless this is set, as at a real bank.
         self.allow_duplicates = allow_duplicates
@@ -118,6 +123,12 @@ class Config:
         # "user:password", or empty for a mock anyone who can reach the port
         # may reset. Checked by Handler._authorised.
         self.auth = auth
+        # The second door: a directory the bank reads files from and one it
+        # writes released messages into. Empty means no file work at all.
+        self.drop_dir = drop_dir
+        self.pickup_dir = pickup_dir
+        self.drop_settle_ms = drop_settle_ms
+        self.drop_interval_ms = drop_interval_ms
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
@@ -147,6 +158,17 @@ class State:
         self.clock.on_advance.append(self._on_advance)
         self.started = db.utcnow()
         self.resets = 0
+        # Set by make_server when --drop-dir or --pickup-dir is given. None
+        # rather than an inert object, so that the default mock does no file
+        # work at all and nothing has to remember to check a flag.
+        self.dropbox = None
+        if config.drop_dir or config.pickup_dir:
+            self.dropbox = drop.DropBox(
+                self, config.drop_dir, config.pickup_dir,
+                config.drop_settle_ms, config.drop_interval_ms)
+            # Created now, so a misspelled path fails at startup rather than at
+            # the first file.
+            self.dropbox.prepare()
 
     def _on_advance(self, before, after):
         # Book first, so a day's statement sees that day's bookings.
@@ -154,6 +176,7 @@ class State:
         outbox.release_due(self.conn, now, after.date(), self.clock)
         outbox.issue_statements(
             self.conn, self.clock, outbox.ended_business_days(self.clock, before, after), now)
+        self.deliver()
 
     def _holidays(self):
         return [row["day"] for row in db.rows(
@@ -175,6 +198,8 @@ class State:
             self.conn.commit()
             db.seed(self.conn)
             self.clock.reset()
+            if self.dropbox is not None:
+                self.dropbox.forget()
             self.resets += 1
 
     def now(self):
@@ -187,7 +212,61 @@ class State:
 
     def release(self):
         """Book what is due and release what is due; see outbox.release_due."""
-        return outbox.release_due(self.conn, self.now(), self.today(), self.clock)
+        released = outbox.release_due(self.conn, self.now(), self.today(), self.clock)
+        self.deliver()
+        return released
+
+    def deliver(self):
+        """Put whatever is released into the pickup directory, if there is one.
+
+        Called after every release rather than handed the rows, so that a
+        release path nobody remembered still gets its files written on the next
+        one. See DropBox.write_released.
+        """
+        if self.dropbox is not None:
+            self.dropbox.write_released()
+
+    def receive(self, body: bytes, content_type: str = ""):
+        """The pipeline, once: read, validate, decide, book, queue, release.
+
+        `ARCHITECTURE.md` says one pipeline fed by two doors, and this is the
+        pipeline. `POST /payments` wraps it in JSON and the drop directory calls
+        it with the bytes of a file; neither knows anything the other does not,
+        which is the only way the claim stays true. Returns the same answer the
+        endpoint serves, and the findings, which the drop directory writes out
+        beside a file it could not put through.
+        """
+        conn, now, today = self.conn, self.now(), self.today()
+        payment_file, findings = validate.inspect(body, content_type, today)
+        decision = accounts.decide(payment_file, findings, conn, self.clock, now,
+                                   self.config.allow_duplicates)
+        file_id = accounts.book(conn, decision)
+        queued = outbox.queue_status(conn, decision, file_id, now,
+                                     self.config.status_delay_ms)
+        released = {row["id"] for row in self.release()}
+        queued = [dict(q, released=q["id"] in released) for q in queued]
+        queued += outbox.upcoming(conn, file_id) if file_id else []
+        # the rows went in in decision order, so they line up one for one
+        booked = [r["booked_at"] is not None for r in db.rows(
+            conn, "SELECT booked_at FROM payment WHERE file_id = ? ORDER BY id",
+            (file_id,))]
+        answer = {
+            "msg_id": decision.msg_id,
+            "status": decision.status,
+            "reason": decision.reason,
+            "reason_text": decision.reason_text,
+            "reported": decision.reported,
+            "accepted": len(decision.accepted),
+            "rejected": len(decision.rejected),
+            "payments": [dict(d.to_json(), booked=done)
+                         for d, done in zip(decision.payments, booked)],
+            "findings": [f._asdict() for f in findings],
+            # What the bank will send, and when: the pain.002 (released at
+            # once unless --status-delay-ms says otherwise) and a camt.054
+            # for each account and settlement date still to come.
+            "queued": queued,
+        }
+        return answer, decision, findings
 
     def close(self) -> None:
         """Close the database, under the lock every request takes.
@@ -195,6 +274,11 @@ class State:
         Closing SQLite while a statement is running is a use-after-free in C:
         it takes the interpreter with it instead of raising.
         """
+        if self.dropbox is not None and not self.dropbox.stop():
+            # Named rather than ignored: when it next takes the lock it finds
+            # the connection closed, which is an ordinary exception.
+            sys.stderr.write("mock-bank: the drop poller did not stop in time; "
+                             "closing the database once it lets go\n")
         with self.lock:
             self.conn.close()
 
@@ -219,6 +303,8 @@ class State:
                                         "released_at IS NOT NULL AND taken_at IS NULL"),
                     "taken": db.count(self.conn, "message", "taken_at IS NOT NULL"),
                 },
+                "transport": (self.dropbox.state_json() if self.dropbox
+                              else {"dropDir": "", "pickupDir": ""}),
                 "behaviours": sorted(BEHAVIOURS),
                 "supported": SUPPORTED,
                 "planned": PLANNED,
@@ -378,6 +464,24 @@ class Handler(BaseHTTPRequestHandler):
         if head == "mailbox":
             return self._mailbox(method, rest, query)
 
+        if head == "drop":
+            if not rest:
+                if method != "GET":
+                    return self._method_not_allowed(method, ["GET"])
+                return self._json(200, self._transport())
+            if rest == ["scan"]:
+                if method != "POST":
+                    return self._method_not_allowed(method, ["POST"])
+                if self.state.dropbox is None:
+                    return self._json(409, {
+                        "error": "this mock has no drop directory; start it "
+                                 "with --drop-dir PATH",
+                        "transport": self._transport()})
+                found = self.state.dropbox.scan()
+                return self._json(200, {"scanned": len(found),
+                                        "files": [f.to_json() for f in found]})
+            return self._not_found()
+
         if head == "requests" and not rest:
             if method != "GET":
                 return self._method_not_allowed(method, ["GET"])
@@ -508,36 +612,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, days)
 
     def _payments_in(self, body: bytes) -> None:
-        """POST /payments: read, validate, decide, book; answer in JSON."""
-        conn, now, today = self.state.conn, self.state.now(), self.state.today()
-        payment_file, findings = validate.inspect(body, self.headers.get("Content-Type"), today)
-        decision = accounts.decide(payment_file, findings, conn, self.state.clock, now,
-                                   self.state.config.allow_duplicates)
-        file_id = accounts.book(conn, decision)
-        queued = outbox.queue_status(conn, decision, file_id, now,
-                                     self.state.config.status_delay_ms)
-        released = {row["id"] for row in self.state.release()}
-        queued = [dict(q, released=q["id"] in released) for q in queued]
-        queued += outbox.upcoming(conn, file_id) if file_id else []
-        # the rows went in in decision order, so they line up one for one
-        booked = [r["booked_at"] is not None for r in db.rows(
-            conn, "SELECT booked_at FROM payment WHERE file_id = ? ORDER BY id", (file_id,))]
-        answer = {
-            "msg_id": decision.msg_id,
-            "status": decision.status,
-            "reason": decision.reason,
-            "reason_text": decision.reason_text,
-            "reported": decision.reported,
-            "accepted": len(decision.accepted),
-            "rejected": len(decision.rejected),
-            "payments": [dict(d.to_json(), booked=done)
-                         for d, done in zip(decision.payments, booked)],
-            "findings": [f._asdict() for f in findings],
-            # What the bank will send, and when: the pain.002 (released at
-            # once unless --status-delay-ms says otherwise) and a camt.054
-            # for each account and settlement date still to come.
-            "queued": queued,
-        }
+        """POST /payments: the pipeline, and its answer as JSON.
+
+        The work is `State.receive`, which the drop directory calls with the
+        same bytes; this is the HTTP door onto it and nothing more.
+        """
+        answer, decision, _findings = self.state.receive(
+            body, self.headers.get("Content-Type") or "")
         return self._json(422 if decision.rejected_outright else 202, answer)
 
     def _mailbox(self, method: str, rest: List[str],
@@ -590,6 +671,14 @@ class Handler(BaseHTTPRequestHandler):
             "error": "no message %r" % given,
             "waiting": outbox.waiting_ids(self.state.conn),
         })
+
+    def _transport(self) -> Dict[str, Any]:
+        """What the folder transport is doing, or that there is none."""
+        if self.state.dropbox is None:
+            return {"dropDir": "", "pickupDir": "",
+                    "note": "no folder transport; start the mock with "
+                            "--drop-dir and/or --pickup-dir"}
+        return self.state.dropbox.state_json()
 
     def _requests(self, query: Dict[str, List[str]]) -> List[Dict[str, Any]]:
         """The newest rows of the request log, so a tester can see what they sent.
@@ -901,7 +990,14 @@ class _Server(ThreadingHTTPServer):
     """
 
     daemon_threads = True
-    state: State
+
+    # None until `make_server` sets it, and that is not only tidiness: when the
+    # bind fails - a port already in use - `socketserver.TCPServer.__init__`
+    # calls `server_close()` on the way out, before `make_server` gets to
+    # assign. Without this the real error ("Address already in use") was
+    # replaced by `AttributeError: '_Server' object has no attribute 'state'`,
+    # which says nothing about the port.
+    state: Optional[State] = None
 
     def server_bind(self):
         """Bind without asking DNS what this machine is called.
@@ -927,7 +1023,8 @@ class _Server(ThreadingHTTPServer):
 
     def server_close(self):
         super().server_close()
-        self.state.close()
+        if self.state is not None:
+            self.state.close()
 
 
 def make_server(config: Config) -> _Server:
@@ -940,4 +1037,8 @@ def make_server(config: Config) -> _Server:
         state.close()
         raise
     httpd.state = state
+    if state.dropbox is not None:
+        # Started after the socket is bound, so a port already in use fails
+        # before a poller exists to have to stop again.
+        state.dropbox.start()
     return httpd
