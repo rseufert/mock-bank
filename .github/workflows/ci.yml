@@ -3,7 +3,19 @@ name: CI
 on:
   push:
     branches: [main]
+  # `labeled` and `unlabeled` are here for one reason: the changelog check is
+  # lifted by the `no changelog` label, and the workflow reads the labels from
+  # the event. Without them, applying the label ran nothing, and re-running the
+  # failed job reused the original event - which had no label - so the only way
+  # to get a run that saw it was to close and reopen the pull request. That
+  # happened on #37.
+  #
+  # It does mean any label change re-runs everything. The concurrency group
+  # below is keyed on the ref, which for a pull request is refs/pull/N/merge,
+  # so a label change cancels the run in progress for that pull request rather
+  # than queueing a second one beside it.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:

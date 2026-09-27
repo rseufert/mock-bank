@@ -185,6 +185,49 @@ class TheStatementArithmetic(MockServerCase):
         self.assertIn("no statements", result.stdout.decode("utf-8"))
 
 
+class TheWorkflowRerunsOnALabelChange(unittest.TestCase):
+    """The `no changelog` label has to be able to turn a red run green.
+
+    `tools/check_changelog.py` reads the labels from the event, so without
+    `labeled` in the trigger, applying the label ran nothing and re-running the
+    failed job reused the original event. The only way to get a run that saw the
+    label was to close and reopen the pull request, which happened on #37.
+
+    A test cannot prove what GitHub does with a workflow; what it can do is stop
+    the types being dropped again by somebody tidying the file. The behaviour
+    itself is demonstrated on the pull request, by toggling the label.
+    """
+
+    ROOT = os.path.dirname(HERE)
+
+    def workflow(self):
+        with open(os.path.join(self.ROOT, ".github", "workflows", "ci.yml"),
+                  encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_pull_request_trigger_listens_for_label_changes(self):
+        text = self.workflow()
+        types = re.search(r"pull_request:\s*\n\s*types: \[([^\]]*)\]", text)
+        self.assertIsNotNone(types, "the pull_request trigger has no types list")
+        listed = {name.strip() for name in types.group(1).split(",")}
+        # The three defaults have to stay, or ordinary pushes stop running.
+        for needed in ("opened", "synchronize", "reopened", "labeled", "unlabeled"):
+            with self.subTest(type=needed):
+                self.assertIn(needed, listed)
+
+    def test_the_concurrency_group_is_keyed_on_the_ref(self):
+        # Which is what keeps a label change from queueing a second full run
+        # beside the one already going.
+        text = self.workflow()
+        self.assertIn("group: ci-${{ github.ref }}", text)
+        self.assertIn("cancel-in-progress: true", text)
+
+    def test_the_changelog_check_still_reads_the_labels(self):
+        # If this ever stops being passed, the label does nothing however many
+        # event types the trigger lists.
+        self.assertIn("--labels", self.workflow())
+
+
 class TheTourOnlyUsesEndpointsThisMockHas(unittest.TestCase):
     """A static check, so it holds on the runners that cannot run bash.
 

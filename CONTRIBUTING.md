@@ -133,7 +133,9 @@ If a change touches more than one of these, it is usually two changes.
 - **A line in the changelog.** `tools/check_changelog.py` fails a pull request
   that touches `mockbank/` without adding an entry under `## [Unreleased]`. A
   change that genuinely needs no entry can carry the `no changelog` label; say
-  in the description why, and the maintainer will apply it.
+  in the description why, and the maintainer will apply it. Applying or removing
+  the label re-runs the checks on its own — no push and no reopen — because the
+  workflow listens for `labeled` and `unlabeled`.
 - **No new dependencies.** See above.
 - **A commit message that says what changed and why.** The why is the part a
   reader cannot reconstruct. Wrap at 72 characters.
