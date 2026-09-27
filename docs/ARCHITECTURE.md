@@ -50,6 +50,20 @@ return is set for `business_days_after(settlement, days)`, and the advance that
 reaches that day credits it back and writes the `pacs.004`. A three-day return
 is a test line.
 
+## How a request finds its function
+
+Each surface of the mock is one module under `mockbank/routes/`, and each
+endpoint in it is a function registered with `@route(method, pattern)`. The
+pattern is written the way the index lists it, `/_mock/accounts/<id>`, and the
+function is called with the handler and each placeholder's segment. `handler.py`
+authenticates, reads the body, takes the lock and looks the request up in that
+one table. It knows nothing about any endpoint. A path the table does not have
+is a `404` that names what it does have. A path it has only with other methods
+is a `405` naming those methods. So adding an endpoint touches one file under
+`routes/`, plus `SUPPORTED` for the index until #45 derives that from the table.
+What lasts between requests, the connection, the clock and the pipeline, is
+`State` in `state.py`, which the routes reach as `h.state`.
+
 ## Refusing, and saying who is asking
 
 The control plane can reset the bank, rewrite every balance and behaviour and
