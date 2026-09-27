@@ -164,6 +164,7 @@ def _replace(mapping, header, **changes):
 PAIN002 = schema.MESSAGES["pain.002.001.10"]
 CAMT054 = schema.MESSAGES["camt.054.001.08"]
 CAMT053 = schema.MESSAGES["camt.053.001.08"]
+PACS004 = schema.MESSAGES["pacs.004.001.09"]
 EXTERNAL = os.path.join(SAMPLES, "external")
 ZONED = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
 
@@ -193,7 +194,11 @@ class GeneratedMessagesAreValid(MockServerCase):
         "insufficient-funds": ("ACME", {"balance": 200000}, 1,
                                {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
         "bad-bank-id": ("GLOBEX", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
-        "return-later": ("ACME", {}, 1, {PAIN002: 1, CAMT054: 1, CAMT053: 3}),
+        # a day, not the default three, so the return lands on the Friday
+        # this test advances to: both accepted payments come back, in one
+        # pacs.004 (one original file) and one camt.054 credit beside the debit
+        "return-later": ("ACME", {"parameters": {"days": 1}}, 1,
+                         {PAIN002: 1, CAMT054: 2, CAMT053: 3, PACS004: 1}),
         "reject-file": ("ACME", {}, 1, {PAIN002: 1, CAMT053: 3}),
         "duplicate-file": ("ACME", {}, 2, {PAIN002: 2, CAMT054: 1, CAMT053: 3}),
         "silent": ("ACME", {}, 1, {CAMT054: 1, CAMT053: 3}),

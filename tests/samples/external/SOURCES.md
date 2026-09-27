@@ -54,6 +54,7 @@ from these pinned commits and must match these SHA-256s before use:
 | `pain.001.001.09.xsd` | [prog-nov/iso20022-struct-go](https://github.com/prog-nov/iso20022-struct-go) (Apache-2.0) @ `b105620042e86826436edfdc45fdfa079b19894e` | `xsd/pain.001.001.09.xsd` | `de038b373e47b0077b1832ddd81f4b2f1eb25d35721f62da1e38b7f5a09fda24` |
 | `pain.001.001.03.xsd` | same | `xsd/pain.001.001.03.xsd` | `6bb5c6f24250ab807f31f6164142bafd6d43bad8d162a926e258ff4c11e128af` |
 | `pain.002.001.10.xsd` | same | `xsd/pain.002.001.10.xsd` | `2f9f8d0e9891fa9f31ccf0576397afe501614384d688ae6e43ba694b3d24b0cf` |
+| `pacs.004.001.09.xsd` | same | `xsd/pacs.004.001.09.xsd` | `e2b13023bed19429bd8347ed9e13d31e6dec33fa4a8ef07dd03138d5442826b9` |
 | `camt.053.001.08.xsd` | [genkgo/camt](https://github.com/genkgo/camt) (MIT) @ `56e047d1599854ca34db0ccabce15230fcdd3f16` | `assets/camt.053.001.08.xsd` | `c3cfac080dc31476bde7444b05d00e1b23558d5e44529e58d0ad562e6013873d` |
 | `camt.054.001.08.xsd` | same | `assets/camt.054.001.08.xsd` | `2b392a1f7e70e70902fd0d803ff85989613bd1cae351663240b0bb9243be2c28` |
 

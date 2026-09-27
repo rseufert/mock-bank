@@ -120,7 +120,14 @@ SCHEMA = [
         reason           TEXT,
         reason_text      TEXT,
         settlement_date  TEXT,
-        booked_at        TEXT
+        booked_at        TEXT,
+        -- A return (0.2): the business day the money comes back, the
+        -- ExternalReturnReason1Code it comes back with, and when it did.
+        -- Set when a payment from a return-later account books; the payment's
+        -- status becomes `returned` when the clock reaches return_due.
+        return_due       TEXT,
+        return_reason    TEXT,
+        returned_at      TEXT
     )
     """,
     # What the bank sends back, queued for when it is due. The writers (#7)
@@ -184,6 +191,8 @@ INDEXES = [
     # What is waiting to book, per account: the insufficient-funds check and
     # the clock both ask it.
     "CREATE INDEX IF NOT EXISTS ix_payment_due ON payment (account_id, booked_at)",
+    # What is waiting to come back: the clock asks it on every advance.
+    "CREATE INDEX IF NOT EXISTS ix_payment_return ON payment (return_due, returned_at)",
     # The queue releases by due time; the mailbox reads what is released and
     # not yet taken.
     "CREATE INDEX IF NOT EXISTS ix_message_due ON message (released_at, due_at)",
@@ -197,7 +206,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class DatabaseError(Exception):

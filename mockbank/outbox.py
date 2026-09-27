@@ -1,6 +1,6 @@
 """What the bank sends back, and when.
 
-Three kinds of message leave the bank in 0.1, on three schedules:
+Four kinds of message leave the bank, each on its own schedule:
 
 * **``pain.002``** is written when a file is decided and queued in the
   ``message`` table, due ``--status-delay-ms`` after receipt (0 by default,
@@ -8,6 +8,8 @@ Three kinds of message leave the bank in 0.1, on three schedules:
   A ``silent`` debtor gets none, and neither does a body the bank could not
   read far enough to find a ``MsgId``: a status report has to name the
   message it reports on, and the mock will not invent one.
+* **``pacs.004``** is written when a returned payment comes back, on the day
+  ``return-later`` set for it, with a ``camt.054`` credit beside it.
 * **``camt.054``** is written when payments book: one per account for each
   booking, an entry per payment, so everything one move of the clock books
   on an account is reported together. It cannot be written earlier, because
@@ -67,10 +69,17 @@ def upcoming(conn, file_id) -> List[Dict[str, Any]]:
              "due_on": r["settlement_date"]} for r in rows]
 
 
-def release_due(conn, now, today) -> List[Dict[str, Any]]:
+def release_due(conn, now, today, clock=None) -> List[Dict[str, Any]]:
     """Book what has come due, write its ``camt.054``, and release every
-    queued message whose time has come. Returns what was released."""
+    queued message whose time has come. Returns what was released.
+
+    With a ``clock``, payments from a ``return-later`` account are scheduled
+    to come back as they book, and those whose day has come are credited back
+    with a ``pacs.004`` and a ``camt.054`` credit (``_release_returns``)."""
     booked = accounts.book_due(conn, today, commit=False)
+    if clock is not None:
+        accounts.schedule_returns(conn, booked, clock)
+        _release_returns(conn, now, today)
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in booked:
         groups.setdefault((row["account_id"], row["settlement_date"]), []).append(row)
@@ -94,6 +103,37 @@ def release_due(conn, now, today) -> List[Dict[str, Any]]:
                  " AND due_at <= ?", (stamp, stamp))
     conn.commit()
     return released
+
+
+def _release_returns(conn, now, today):
+    """Credit back what is due to come back, and tell the client twice: a
+    ``pacs.004`` per account, day and original file, and a ``camt.054`` credit
+    per account and day - the same granularity as the debits."""
+    returned = accounts.book_returns(conn, today)
+    stamp = db.stamp(now)
+    by_file: Dict[tuple, List[Dict[str, Any]]] = {}
+    by_day: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in returned:
+        by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
+        by_day.setdefault((row["account_id"], row["return_due"]), []).append(row)
+    for (account_id, day, file_id), rows in sorted(by_file.items()):
+        account = accounts.require(conn, account_id)
+        sequence = db.next_value(conn, "pacs.004:" + account_id)
+        body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
+                                      "MB-P004-%s-%d" % (account_id[:18], sequence), now)
+        conn.execute(
+            "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
+            (messages.PACS004.name, account_id, file_id, stamp, body.decode("utf-8")))
+    for (account_id, day), rows in sorted(by_day.items()):
+        account = accounts.require(conn, account_id)
+        sequence = db.next_value(conn, "camt.054:" + account_id)
+        body = messages.write_camt054(account, [dict(r, credit=True) for r in rows],
+                                      datetime.date.fromisoformat(day),
+                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        conn.execute(
+            "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
+    return returned
 
 
 def collect(conn, now, leave=False, kind="") -> List[Dict[str, Any]]:
@@ -226,8 +266,9 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
     issuing is safe to repeat.
 
     The balances are computed, not carried: the closing balance of a day is
-    the account's balance now less every debit booked after that day, and the
-    opening is the closing plus that day's debits. So closing is opening
+    the account's balance now with every movement after that day undone - the
+    debits booked and the returns credited since - and the opening is the
+    closing with that day's own movements undone. So closing is opening
     less the entries to the cent, and the next opening is this closing, as
     long as the balance only moved by booking. A balance changed by ``PATCH``
     is a change no entry explains, and the next opening shows the jump.
@@ -244,17 +285,31 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
                     conn, "SELECT id FROM statement WHERE account = ? AND day = ?",
                     (account["id"], day.isoformat())):
                 continue
-            later = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
-                                 " WHERE account_id = ? AND booked_at IS NOT NULL"
-                                 " AND settlement_date > ?",
-                           (account["id"], day.isoformat()))["total"]
+            when = day.isoformat()
+            # Debits booked after the day took money out since; returns that
+            # came back after it put money in. Undo both to reach the day's end.
+            later_debits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                                        " WHERE account_id = ? AND booked_at IS NOT NULL"
+                                        " AND settlement_date > ?",
+                                  (account["id"], when))["total"]
+            later_credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                                         " WHERE account_id = ? AND returned_at IS NOT NULL"
+                                         " AND return_due > ?",
+                                   (account["id"], when))["total"]
             booked = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
                                    " JOIN file ON file.id = payment.file_id"
                                    " WHERE account_id = ? AND booked_at IS NOT NULL"
                                    " AND settlement_date = ? ORDER BY payment.id",
-                             (account["id"], day.isoformat()))
-            closing = account["balance"] + int(later)
-            opening = closing + sum(p["amount"] for p in booked)
+                             (account["id"], when))
+            came_back = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
+                                      " JOIN file ON file.id = payment.file_id"
+                                      " WHERE account_id = ? AND returned_at IS NOT NULL"
+                                      " AND return_due = ? ORDER BY payment.id",
+                                (account["id"], when))
+            booked += [dict(p, credit=True) for p in came_back]
+            closing = account["balance"] + int(later_debits) - int(later_credits)
+            opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
+                                    for p in booked)
             shown = booked[:-1] if account["behaviour"] == "statement-gap" else booked
             number = db.next_value(conn, "camt.053:" + account["id"])
             msg_id = "MB-C053-%s-%d" % (account["id"][:18], number)

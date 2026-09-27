@@ -24,6 +24,7 @@ OLD_SCHEMA = os.path.join(HERE, "fixtures", "schema-v0.sql")
 SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
 SCHEMA_V2 = os.path.join(HERE, "fixtures", "schema-v2.sql")
 SCHEMA_V3 = os.path.join(HERE, "fixtures", "schema-v3.sql")
+SCHEMA_V4 = os.path.join(HERE, "fixtures", "schema-v4.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -102,7 +103,7 @@ class FromVersionOne(FileDatabaseCase):
         self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
         state = self.get("/_mock/state").json()
         self.assertEqual(state["payments"], {"files": 0, "accepted": 0, "rejected": 0,
-                                             "booked": 0})
+                                             "returned": 0, "booked": 0})
         self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 424242)
         self.assertEqual(self.get("/_mock/payments").json(), [])
 
@@ -168,6 +169,38 @@ class FromVersionThree(FileDatabaseCase):
                          ["pain.002.001.10"])
 
 
+class FromVersionFour(FileDatabaseCase):
+    """A 0.1.0 file, before returns: its payments gain the return columns,
+    empty, and are still there."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V4, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME Corporation', 'NL41MOCK0000000001', 'MOCKNL2A',"
+            " 'EUR', 1000, 'accept')")
+        conn.execute("INSERT INTO file (msg_id, message, received_at, status)"
+                     " VALUES ('OLD-4', 'pain.001.001.09', '2026-09-01T09:00:00Z', 'ACCP')")
+        conn.execute("INSERT INTO payment (file_id, end_to_end_id, account_id, amount,"
+                     " currency, status, settlement_date, booked_at) VALUES (1, 'E2E-V4',"
+                     " 'ACME', 700, 'EUR', 'accepted', '2026-09-01', '2026-09-01T09:00:00Z')")
+        conn.commit()
+        conn.close()
+
+    def test_its_payments_gain_the_return_columns_and_survive(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        payment = self.get("/_mock/payments/E2E-V4").json()
+        self.assertEqual((payment["amount"], payment["status"]), (700, "accepted"))
+        self.assertEqual((payment["return_due"], payment["return_reason"],
+                          payment["returned_at"]), (None, None, None))
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -202,7 +235,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (4, "558042c3b4cebbbe")
+    FINGERPRINT = (5, "10d9f2a955cea625")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

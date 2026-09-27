@@ -65,6 +65,8 @@ XSDS = {
                         "6bb5c6f24250ab807f31f6164142bafd6d43bad8d162a926e258ff4c11e128af"),
     "pain.002.001.10": (_PROGNOV + "pain.002.001.10.xsd",
                         "2f9f8d0e9891fa9f31ccf0576397afe501614384d688ae6e43ba694b3d24b0cf"),
+    "pacs.004.001.09": (_PROGNOV + "pacs.004.001.09.xsd",
+                        "e2b13023bed19429bd8347ed9e13d31e6dec33fa4a8ef07dd03138d5442826b9"),
     "camt.053.001.08": (_GENKGO + "camt.053.001.08.xsd",
                         "c3cfac080dc31476bde7444b05d00e1b23558d5e44529e58d0ad562e6013873d"),
     "camt.054.001.08": (_GENKGO + "camt.054.001.08.xsd",
@@ -214,8 +216,10 @@ def files_to_check():
 
 def written_by_the_mock():
     """(label, XML) for every message a running mock writes for the sample:
-    its status report and a DUPL rejection, the debit notification, and the
-    statements for the days an advance crosses."""
+    its status report and a DUPL rejection, the debit notification, the
+    return a return-later account brings (a pacs.004 and a camt.054 credit),
+    and the statements for the days an advance crosses, the return's among
+    them."""
     from mockbank.server import Config, make_server
     httpd = make_server(Config(port=0, quiet=True, clock="2026-10-01T09:00"))
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -232,6 +236,9 @@ def written_by_the_mock():
     try:
         with open(os.path.join(SAMPLES, "pain001_four_payments.xml"), "rb") as handle:
             sample = handle.read()
+        # return-later on a day, so the advance below brings a pacs.004 back
+        call("PATCH", "/_mock/accounts/ACME", json.dumps(
+            {"behaviour": "return-later", "parameters": {"days": 1}}).encode("utf-8"))
         call("POST", "/payments", sample)
         call("POST", "/payments", sample)                 # DUPL: a rejection
         call("POST", "/_mock/advance?to=2026-10-06")
