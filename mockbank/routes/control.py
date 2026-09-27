@@ -2,39 +2,18 @@
 
 Everything the plan promises and this release has not built yet answers 404
 with a body naming what *is* supported, which is the rule the sibling mocks
-follow: refuse by name rather than half-implement. `SUPPORTED` and `PLANNED`
-are that body, and the index page lists them.
+follow: refuse by name rather than half-implement. `routes.SUPPORTED` and
+`PLANNED` are that body, and the index page lists them.
 """
 from __future__ import annotations
 
 import html
 from typing import List
 
-from .. import __version__, db, schema
+from .. import __version__, db, routes, schema
 from ..accounts import BEHAVIOURS
 from . import route
 
-# What this release answers, so a 404 can say so and the index can list it.
-SUPPORTED = [
-    "GET /",
-    "GET /_mock/health",
-    "GET /_mock/state",
-    "POST /_mock/reset",
-    "GET /_mock/dictionary", "GET /_mock/dictionary/<message>",
-    "GET /_mock/behaviours",
-    "GET /_mock/accounts", "POST /_mock/accounts",
-    "GET /_mock/accounts/<id>", "PATCH /_mock/accounts/<id>",
-    "GET /_mock/accounts/<id>/statements",
-    "POST /_mock/advance",
-    "GET /_mock/holidays", "PUT /_mock/holidays",
-    "POST /_mock/validate",
-    "POST /payments",
-    "GET /_mock/payments", "GET /_mock/payments/<EndToEndId>",
-    "GET /_mock/mailbox", "GET /_mock/mailbox/<id>",
-    "POST /_mock/mailbox/<id>/unread",
-    "GET /_mock/requests",
-    "GET /_mock/drop", "POST /_mock/drop/scan",
-]
 
 # The endpoints the plan commits to, so a 404 can say what is coming.
 # Empty, and that is the news: with the mailbox and the request log, every
@@ -45,37 +24,9 @@ SUPPORTED = [
 # client may read, and because 0.3's NACHA and BAI2 will fill it again.
 PLANNED: List[str] = []
 
-# A line of explanation for the endpoints that are not self-evident from their
-# path; the rest of the index just lists them.
-NOTES = {
-    "GET /_mock/dictionary": "the ISO 20022 declarations the mock reads and "
-                             "writes by",
-    "GET /_mock/accounts": "the accounts the bank holds, with their balances "
-                           "and their behaviours",
-    "PATCH /_mock/accounts/<id>": "change a behaviour, a balance or the "
-                                  "closed flag while it runs",
-    "POST /_mock/advance": "move bank time: ?days=N (calendar days) or "
-                           "?to=YYYY-MM-DD",
-    "PUT /_mock/holidays": "a JSON list of YYYY-MM-DD dates the bank does "
-                           "not settle on",
-    "POST /_mock/drop/scan": "read the drop directory now, instead of waiting "
-                             "for the next poll",
-    "POST /_mock/reset": "back to the four seeded accounts",
-    "POST /_mock/validate": "send a pain.001, get its findings as prose, one "
-                            "line each; nothing is stored",
-    "POST /payments": "send a pain.001: the bank decides each payment, books "
-                      "what is due and answers with a JSON summary",
-    "GET /_mock/payments": "every payment the bank decided on, newest first",
-    "GET /_mock/accounts/<id>/statements": "the camt.053 statements issued "
-                                           "for an account, oldest first",
-    "GET /_mock/mailbox": "?leave to peek, ?raw for the XML, ?type=pain.002 to "
-                          "filter: the messages the bank has sent and you have not "
-                          "collected, oldest first; collecting takes them",
-}
-
 
 @route("GET", "/")
-@route("GET", "/index.html")
+@route("GET", "/index.html", listed=False)
 def index(h) -> None:
     h.text(200, index_page(), "text/html; charset=utf-8")
 
@@ -94,7 +45,8 @@ def state(h) -> None:
     h.json(200, h.state.snapshot())
 
 
-@route("POST", "/_mock/reset")
+@route("POST", "/_mock/reset",
+       note="back to the four seeded accounts")
 def reset(h) -> None:
     h.state.reset()
     h.json(200, {"reset": True, "accounts": db.count(h.state.conn, "account")})
@@ -105,7 +57,8 @@ def behaviours(h) -> None:
     h.json(200, BEHAVIOURS)
 
 
-@route("GET", "/_mock/dictionary")
+@route("GET", "/_mock/dictionary",
+       note="the ISO 20022 declarations the mock reads and writes by")
 def dictionary_index(h) -> None:
     h.json(200, schema.dictionary_index())
 
@@ -128,7 +81,7 @@ def dictionary(h, name: str) -> None:
 def _item(endpoint: str) -> str:
     # `<id>` and `<message>` are placeholders, not markup: escaped, or the
     # browser swallows them and the index lists an endpoint with a hole in it.
-    note = NOTES.get(endpoint)
+    note = routes.NOTES.get(endpoint)
     return ("  <li><code>%s</code>%s</li>"
             % (html.escape(endpoint), ": " + html.escape(note) if note else ""))
 
@@ -141,7 +94,7 @@ def index_page() -> str:
                    % "\n".join(_item(line) for line in PLANNED))
     return INDEX_TEMPLATE % {
         "version": __version__,
-        "supported": "\n".join(_item(line) for line in SUPPORTED),
+        "supported": "\n".join(_item(line) for line in routes.SUPPORTED),
         # Not an empty list under a heading, which reads as a page that failed
         # to load rather than as a mock with nothing left to promise.
         "planned": planned,

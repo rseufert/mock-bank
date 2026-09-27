@@ -144,7 +144,7 @@ that from tangling:
 | An account behaviour | `mockbank/accounts.py` `BEHAVIOURS`, then `decide` | Keep the precedence rules in the docstring true |
 | A validation check | `mockbank/validate.py` | Produce a finding, not a sentence: it has to render as a `pain.002` reason and as prose for `/_mock/validate` |
 | A message writer | `mockbank/messages.py` | Built from the declaration; a writer that hard-codes an element order is wrong even when it works |
-| An endpoint | the surface's module under `mockbank/routes/`, with `@route` | Add it to `SUPPORTED` in `routes/control.py` and the README table too |
+| An endpoint | the surface's module under `mockbank/routes/`, with `@route` | Give it a `note=` if its path does not explain it, and a row in the README's endpoint table, which `tools/check_docs.py` holds to the route table |
 | A CLI flag | `mockbank/__main__.py` and `server.Config` | And the README's Configuration table |
 | A table, column or index | `mockbank/db.py` `SCHEMA` / `INDEXES` | Bump `SCHEMA_VERSION`; `tests/test_upgrade.py` fails until you do |
 
@@ -162,8 +162,9 @@ If a change touches more than one of these, it is usually two changes.
 - **Documentation that keeps up.** `tools/check_docs.py` fails the build if a
   tracked file has no row in `docs/FILES.md`, if a row names a file that is
   gone, if a module is missing from the README's layout block, if a
-  command-line flag has no mention in the README's Configuration section, or
-  if a behaviour has no row in the README's behaviour table. It checks
+  command-line flag has no mention in the README's Configuration section, if
+  a behaviour has no row in the README's behaviour table, or if the README's
+  endpoint table and the route table disagree. It checks
   coverage, not prose; keeping the prose true is on you.
 - **A changelog fragment.** An entry is its own file: `changelog.d/<issue>.<kind>.md`,
   where kind is `added`, `changed`, `fixed` or `removed`, holding the bullet's

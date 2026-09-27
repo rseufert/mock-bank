@@ -282,6 +282,77 @@ class AssemblingARelease(ToolCase):
         self.assertIn("YYYY-MM-DD", out)
 
 
+class TheUnreleasedSectionHoldsOnlyThePointer(ToolCase):
+    """The check that exists because of a clean merge.
+
+    A branch replaced `## [Unreleased]`'s body with a pointer at `changelog.d/`
+    while `main` added an entry to it. Different lines, so git merged them with
+    no conflict and no marker, and the result said "Nothing is added here by
+    hand" directly above an entry added there by hand. A diff review does not
+    show it either: both sides are correct on their own.
+    """
+
+    def unreleased(self, extra_text):
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            "## [0.1.0] - 2026-09-26", extra_text + "## [0.1.0] - 2026-09-26"))
+
+    def test_a_bullet_is_refused_and_named_with_the_file_it_belongs_in(self):
+        self.unreleased("### Changed\n\n- **A thing** (#99). Written by hand.\n\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1)
+        self.assertIn("99.changed.md", out)
+        self.assertIn("A thing", out)
+
+    def test_a_bullet_with_no_issue_number_still_says_what_to_do(self):
+        self.unreleased("### Added\n\n- **A thing.** No issue number anywhere.\n\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1)
+        self.assertIn("<issue>.added.md", out)
+
+    def test_a_heading_alone_is_refused(self):
+        # --assemble writes the headings; one sitting there means somebody was
+        # about to write a bullet, or a merge left the section half converted.
+        self.unreleased("### Fixed\n\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1)
+        self.assertIn("Fixed", out)
+
+    def test_the_merge_that_produced_this_check_is_caught(self):
+        # Reproduced as git, because the point is that git is happy about it.
+        self.base_commit()
+        self.git("checkout", "-q", "-b", "the-pointer")
+        self.write("CHANGELOG.md", CHANGELOG)          # already the pointer
+        self.fragment("42.added.md")
+        self.commit_all("entries become fragments")
+
+        self.git("checkout", "-q", "main")
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            "## [0.1.0] - 2026-09-26",
+            "### Fixed\n\n- **Something** (#44). Added the old way.\n\n"
+            "## [0.1.0] - 2026-09-26"))
+        self.commit_all("an entry, the old way")
+
+        self.git("-c", "user.name=t", "-c", "user.email=t@t",
+                 "merge", "--no-ff", "--no-edit", "the-pointer")
+        # git merged it without a conflict. That is the whole problem.
+        self.assertNotIn("<<<<<<<", self.read("CHANGELOG.md"))
+        self.assertIn("**Something** (#44)", self.read("CHANGELOG.md"))
+
+        code, out = self.run_tool()
+        self.assertEqual(code, 1, "a clean merge left a wrong file and nothing said so")
+        self.assertIn("44.fixed.md", out)
+
+    def test_the_pointer_on_its_own_passes(self):
+        code, out = self.run_tool()
+        self.assertEqual(code, 0, out)
+
+    def test_a_released_section_may_of_course_hold_entries(self):
+        # [0.1.0] in the fixture has a bullet. Only [Unreleased] is a pointer.
+        self.assertIn("- **The first one.**", self.read("CHANGELOG.md"))
+        code, out = self.run_tool()
+        self.assertEqual(code, 0, out)
+
+
 class TwoPullRequestsEachAddingAnEntry(ToolCase):
     """The point of the whole change: they do not conflict.
 

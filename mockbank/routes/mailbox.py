@@ -17,7 +17,10 @@ REQUEST_LOG_PAGE = 100
 # time has come. Peeking should not show a different bank from collecting.
 
 
-@route("GET", "/_mock/mailbox")
+@route("GET", "/_mock/mailbox",
+       note=("?leave to peek, ?raw for the XML, ?type=pain.002 to filter: "
+            "the messages the bank has sent and you have not collected, "
+            "oldest first; collecting takes them"))
 def mailbox(h) -> None:
     """What the bank has sent and the client has not taken."""
     h.state.release()

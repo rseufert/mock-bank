@@ -23,20 +23,27 @@ What is checked:
    newest released heading.
 2. **Released sections are history.** Once a version is released its section
    is frozen: a change to it is either a mistake or a rewrite of the past.
-3. **Fragments are well formed.** The name carries an issue number and one of
+3. **`[Unreleased]` holds the pointer and nothing else.** This one exists
+   because of a *clean* merge: a branch replaced that section with a pointer
+   while `main` added an entry to it, git merged the two without a marker, and
+   the file then said "Nothing is added here by hand" above an entry added
+   there by hand. No conflict marker shows that and no diff review does either,
+   because both sides were right on their own. So it is asked directly, and the
+   answer names the fragment file the entry belongs in.
+4. **Fragments are well formed.** The name carries an issue number and one of
    the kinds Keep a Changelog defines; the body is not empty. A fragment named
    wrongly is refused by name rather than silently left out of the release,
    which is the failure that matters: it looks like an entry, it sits in the
    right directory, and it would vanish at assembly.
-4. **A change to the package brings a fragment.** A pull request that touches
+5. **A change to the package brings a fragment.** A pull request that touches
    `mockbank/` adds at least one file under `changelog.d/`, or cuts a release.
    A change that genuinely needs none - a comment, a rename, a pure refactor -
    carries the `no changelog` label, which lifts this rule and leaves the
    others standing.
 
-(2) and (4) need something to compare against, so they run only when `--base`
+(2) and (5) need something to compare against, so they run only when `--base`
 names a revision this checkout has; CI passes the pull request's base. Run it
-with no arguments and you get (1) and (3).
+with no arguments and you get (1), (3) and (4).
 
     python3 tools/check_changelog.py
     python3 tools/check_changelog.py --base origin/main
@@ -204,6 +211,46 @@ def _resolve(base: str) -> str:
                  "%s:refs/remotes/origin/%s" % (branch, branch)],
                 cwd=ROOT, stderr=subprocess.DEVNULL)
     return ""
+
+
+def check_unreleased_is_a_pointer(text: str):
+    """[Unreleased] holds the pointer and nothing else.
+
+    This is the check that exists because of a *clean* merge. While this change
+    was being written, `main` added an entry under `## [Unreleased]` and this
+    branch replaced that section with a pointer at `changelog.d/`. Git merged
+    the two without a conflict marker, and the result was a file that said
+    "Nothing is added here by hand" directly above an entry added there by hand.
+
+    Nothing about that is visible in a diff review, and no conflict marker will
+    ever show it: both sides were edited in different places, so git was right.
+    So it is asked directly. It also catches the plainer case of somebody
+    writing a bullet where they have always written one, and tells them the file
+    to write instead rather than only that they are wrong.
+    """
+    problems = []
+    body = dict((version, section) for version, _, section in sections(text))
+    unreleased = body.get("Unreleased", "")
+
+    kind = ""
+    for line in unreleased.splitlines():
+        if line.startswith("### "):
+            kind = line[4:].strip().lower()
+            problems.append(
+                "CHANGELOG.md's [Unreleased] has a `### %s` heading. That section "
+                "holds the pointer at %s/ and nothing else; %s writes the headings "
+                "at release time." % (line[4:].strip(), FRAGMENTS, "--assemble"))
+        elif BULLET.match(line):
+            entry = BULLET.sub("", line)
+            found = re.search(r"\(#(\d+)\)", entry)
+            name = "%s.%s.md" % (found.group(1) if found else "<issue>",
+                                 kind or "<kind>")
+            problems.append(
+                "CHANGELOG.md's [Unreleased] holds an entry: %s\n    Move it to "
+                "%s/%s. That section is a pointer now, so an entry written there "
+                "is never released - and a merge can put one there without a "
+                "conflict." % (_short(entry), FRAGMENTS, name))
+    return problems
 
 
 def check_structure(text: str, pyproject: str):
@@ -411,7 +458,8 @@ def main() -> int:
         return assemble(args.assemble, date)
 
     text = _read(CHANGELOG)
-    problems = check_structure(text, _read(PYPROJECT)) + check_fragments()
+    problems = (check_structure(text, _read(PYPROJECT))
+                + check_unreleased_is_a_pointer(text) + check_fragments())
 
     compared = ""
     if args.base:

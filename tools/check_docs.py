@@ -6,7 +6,7 @@ still true, only whether a file exists that nobody documented, or a file is
 documented that no longer exists.  That catches the common failure - a module
 added without a line in the index - and leaves the judgement calls to review.
 
-Six checks:
+Seven checks:
 
 1. every tracked file is named in docs/FILES.md
 2. every file named in docs/FILES.md exists
@@ -14,6 +14,7 @@ Six checks:
 4. every command-line flag is mentioned in the README
 5. every partner behaviour has a row in the README's behaviour table
 6. every file docs/ARCHITECTURE.md names exists
+7. the README's endpoint table and the route table name the same endpoints
 
 The sixth is the same check as the second, one document over: ARCHITECTURE.md
 explains the design by naming the modules that implement it, and it had been
@@ -24,6 +25,12 @@ looking would have concluded the document was describing a different project.
 The fourth asks the real argument parser for its flags, so a flag added to
 `mockbank/__main__.py` without a word in the README fails the build - fourteen
 of them once existed only in `--help`.
+
+The seventh reads both directions from the route table the server dispatches
+on, as the fourth and fifth read theirs. A hand-kept list of endpoints had
+drifted before (#27), naming a path the mock does not have and missing one it
+does; now an endpoint registered without a README row fails the build, and so
+does a row for an endpoint that is gone.
 
 There was a check holding the README to the number of tests the loader
 discovers.  It went when the number did.  An exact count sits in one line of
@@ -86,6 +93,33 @@ def behaviours():
     sys.path.insert(0, ROOT)
     from mockbank.accounts import BEHAVIOURS
     return sorted(BEHAVIOURS)
+
+
+def endpoints():
+    """Every endpoint the mock advertises, from its route table."""
+    sys.path.insert(0, ROOT)
+    from mockbank.routes import SUPPORTED
+    return list(SUPPORTED)
+
+
+# `GET /_mock/health`, or `GET/POST /_mock/accounts` for two methods on a path.
+ENDPOINT_RE = re.compile(r"`((?:GET|POST|PUT|PATCH|DELETE)(?:/(?:GET|POST|PUT|PATCH|DELETE))*)"
+                         r" (/[^`\s]*)`")
+
+
+def documented_endpoints(readme):
+    """The endpoints the README's endpoint table names, one per method."""
+    section = re.search(r"^## Endpoints\n(.*?)^## ", readme, re.S | re.M)
+    if section is None:
+        return None
+    found = []
+    for line in section.group(1).splitlines():
+        cells = line.split("|")
+        if not line.startswith("|") or len(cells) < 4:
+            continue
+        for methods, path in ENDPOINT_RE.findall(cells[2]):
+            found.extend("%s %s" % (method, path) for method in methods.split("/"))
+    return found
 
 
 def main():
@@ -160,6 +194,22 @@ def main():
             "%s mentions `%s`, which does not exist - name the file that does"
             % (ARCHITECTURE, token))
 
+    # 7. the README's endpoint table and the route table agree, both ways
+    documented = documented_endpoints(readme)
+    if documented is None:
+        problems.append("could not find the Endpoints section in %s" % README)
+    else:
+        for endpoint in endpoints():
+            if endpoint not in documented:
+                problems.append(
+                    "%s is served but has no row in the README's endpoint table"
+                    % endpoint)
+        for endpoint in documented:
+            if endpoint not in endpoints():
+                problems.append(
+                    "the README's endpoint table names %s, which the mock does "
+                    "not serve" % endpoint)
+
     if problems:
         print("documentation is out of date:\n")
         for problem in problems:
@@ -169,8 +219,9 @@ def main():
 
     print("docs/FILES.md covers every tracked file, names nothing that is gone, "
           "the README layout block lists every module, it mentions every "
-          "command-line flag, it has a row for every behaviour, and "
-          "docs/ARCHITECTURE.md names nothing that is not there.")
+          "command-line flag, it has a row for every behaviour, "
+          "docs/ARCHITECTURE.md names nothing that is not there, and the "
+          "README's endpoint table matches the route table.")
     return 0
 
 

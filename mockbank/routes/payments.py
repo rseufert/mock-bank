@@ -5,7 +5,9 @@ from .. import accounts
 from . import route
 
 
-@route("POST", "/payments")
+@route("POST", "/payments",
+       note=("send a pain.001: the bank decides each payment, books what "
+            "is due and answers with a JSON summary"))
 def payments_in(h) -> None:
     """POST /payments: the pipeline, and its answer as JSON.
 
@@ -17,7 +19,8 @@ def payments_in(h) -> None:
     h.json(422 if decision.rejected_outright else 202, answer)
 
 
-@route("GET", "/_mock/payments")
+@route("GET", "/_mock/payments",
+       note="every payment the bank decided on, newest first")
 def listing(h) -> None:
     h.json(200, accounts.payments(h.state.conn))
 
