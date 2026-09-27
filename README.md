@@ -303,6 +303,7 @@ like mock-edi's so the two feel the same.
 
 | Surface | Endpoint | Notes |
 | --- | --- | --- |
+| Index | `GET /` | An HTML page listing everything this build answers, from the same table the router dispatches on |
 | Health, state, reset | `GET /_mock/health`, `GET /_mock/state`, `POST /_mock/reset` | As in the other two mocks |
 | Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets |
 | Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright |

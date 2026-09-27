@@ -14,7 +14,7 @@ from typing import Optional
 
 from . import clock as clock_module
 from .handler import Handler
-from .routes.control import PLANNED, SUPPORTED  # noqa: F401 - read by the tests
+from .routes import SUPPORTED  # noqa: F401 - read by the tests
 from .state import State
 
 

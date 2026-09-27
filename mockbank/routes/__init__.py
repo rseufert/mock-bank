@@ -9,7 +9,10 @@ knows nothing about any endpoint, so adding one touches one file here.
 A pattern is written the way the index page and the 404 body list it, with
 ``<name>`` for a segment that can be anything: ``/_mock/accounts/<id>``. A
 route function is called with the handler and each placeholder's segment,
-percent-decoded, in order. The control plane is matched segment by segment, so
+percent-decoded, in order. A registration can carry a note, the line the index
+page shows beside it. `SUPPORTED`, the list the index, the 404 body and
+`/_mock/state` give, is computed from the table, so nothing lists endpoints by
+hand. The control plane is matched segment by segment, so
 ``/_mock/health/`` is health; the index and ``POST /payments`` are matched on
 the path exactly as sent, so ``/payments/`` is not the door a file goes
 through.
@@ -26,6 +29,8 @@ class Route(NamedTuple):
     pattern: str
     parts: Tuple[str, ...]
     function: Callable[..., None]
+    note: str
+    listed: bool
 
 
 # Every endpoint, in the order the modules registered them. The order is the
@@ -34,10 +39,16 @@ class Route(NamedTuple):
 TABLE: List[Route] = []
 
 
-def route(method: str, pattern: str):
-    """Register the decorated function as the answer to ``method pattern``."""
+def route(method: str, pattern: str, note: str = "", listed: bool = True):
+    """Register the decorated function as the answer to ``method pattern``.
+
+    ``note`` is a line of explanation for an endpoint that is not self-evident
+    from its path. ``listed=False`` is for an alias, answered but not
+    advertised: ``/index.html`` is the index page under another name.
+    """
     def register(function):
-        TABLE.append(Route(method, pattern, tuple(segments(pattern)), function))
+        TABLE.append(Route(method, pattern, tuple(segments(pattern)), function,
+                           note, listed))
         return function
     return register
 
@@ -119,3 +130,9 @@ def json_body(body: bytes) -> Any:
 # asks for them. The order here is the order of the table.
 from . import (control, accounts, clock, payments, mailbox,  # noqa: E402,F401
                validate, transport)
+
+# What this build answers, in the order the modules registered it, so a 404
+# can say so and the index can list it; and the notes the index shows.
+SUPPORTED = ["%s %s" % (entry.method, entry.pattern) for entry in TABLE if entry.listed]
+NOTES = {"%s %s" % (entry.method, entry.pattern): entry.note
+         for entry in TABLE if entry.note}

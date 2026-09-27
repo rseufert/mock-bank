@@ -6,7 +6,9 @@ from ..accounts import BEHAVIOURS
 from . import json_body, route
 
 
-@route("GET", "/_mock/accounts")
+@route("GET", "/_mock/accounts",
+       note=("the accounts the bank holds, with their balances and their "
+            "behaviours"))
 def listing(h) -> None:
     h.json(200, accounts.listing(h.state.conn))
 
@@ -35,7 +37,9 @@ def account(h, identifier: str) -> None:
     h.json(200, row)
 
 
-@route("PATCH", "/_mock/accounts/<id>")
+@route("PATCH", "/_mock/accounts/<id>",
+       note=("change a behaviour, a balance or the closed flag while it "
+            "runs"))
 def update(h, identifier: str) -> None:
     payload = json_body(h.body)
     if payload is None:
@@ -53,7 +57,8 @@ def update(h, identifier: str) -> None:
     h.json(200, row)
 
 
-@route("GET", "/_mock/accounts/<id>/statements")
+@route("GET", "/_mock/accounts/<id>/statements",
+       note="the camt.053 statements issued for an account, oldest first")
 def statements(h, identifier: str) -> None:
     if accounts.get(h.state.conn, identifier) is None:
         return unknown_account(h, identifier)

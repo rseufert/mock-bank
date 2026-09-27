@@ -78,6 +78,15 @@ says so where it does.
 
 ### Changed
 
+- **The list of endpoints is read from the route table** (#45), in the 404
+  body, the index page and `/_mock/state`'s `supported`, so it cannot drift
+  from what the mock serves. The same 25 endpoints and notes as before; the
+  order is now the order they are registered in, so `GET /_mock/behaviours`
+  comes before the dictionary and `POST /_mock/validate` after the request
+  log. The README gains the row for `GET /` it never had, which the new check
+  in `tools/check_docs.py` found on its first run: it now fails the build when
+  the README's endpoint table and the route table disagree either way.
+
 - **The pipeline moved from the request handler onto `server.State.receive`**,
   so that the folder transport and `POST /payments` are two doors onto one
   pipeline rather than two copies of it. No behaviour change: the answer, the

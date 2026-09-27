@@ -11,7 +11,9 @@ def drop(h) -> None:
     h.json(200, transport(h))
 
 
-@route("POST", "/_mock/drop/scan")
+@route("POST", "/_mock/drop/scan",
+       note=("read the drop directory now, instead of waiting for the next"
+            " poll"))
 def scan(h) -> None:
     if h.state.dropbox is None:
         return h.json(409, {

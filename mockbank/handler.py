@@ -31,7 +31,8 @@ from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 from . import __version__, db, routes
-from .routes.control import PLANNED, SUPPORTED
+from .routes import SUPPORTED
+from .routes.control import PLANNED
 
 if TYPE_CHECKING:                          # pragma: no cover
     from .state import State
