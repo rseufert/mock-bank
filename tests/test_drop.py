@@ -265,6 +265,23 @@ class WhatTheBankWritesBack(DropCase):
         self.assertTrue(any(n.startswith("camt.054") for n in new), new)
         self.assertTrue(any(n.startswith("camt.053") for n in new), new)
 
+    def test_a_return_lands_too_without_the_transport_knowing_about_returns(self):
+        # #14 added the pacs.004 after this branch was written, and nothing here
+        # was changed for it. That is the point of write_released asking the
+        # database what is released rather than being handed rows by whoever
+        # released it: a new kind of message needs no work here at all.
+        self.patch("/_mock/accounts/ACME",
+                   {"behaviour": "return-later", "parameters": {"days": 2}})
+        self.drop_file("payments.xml")
+        self.scan()
+        settles = sorted(p["settlement_date"] for p in
+                         self.get("/_mock/payments").json()
+                         if p["settlement_date"])
+        self.post("/_mock/advance?to=%s" % settles[0])
+        self.post("/_mock/advance?days=7")
+        written = self.listing(self.pickup)
+        self.assertTrue(any(n.startswith("pacs.004") for n in written), written)
+
     def test_posting_over_http_also_writes_to_the_pickup_directory(self):
         # The pickup directory is the bank's outbound side, not the drop
         # directory's reply: a message released by an HTTP post goes there too.
@@ -355,3 +372,31 @@ class ThePollerActuallyRuns(MockServerCase):
         self.assertEqual(len(self.get("/_mock/payments").json()), 4,
                          "the poller never read the file")
         self.assertIs(self.get("/_mock/drop").json()["polling"], True)
+
+
+class AStartupThatCannotHappen(MockServerCase):
+    """Two failures at startup that used to read as bugs in the mock.
+
+    Both are here rather than in `test_auth.py` because both were found while
+    building the transport: the drop directory made the mock start and stop far
+    more often than anything else had.
+    """
+
+    def test_a_port_already_in_use_is_named_rather_than_tracebacked(self):
+        import subprocess
+        import sys as _sys
+        port = self.base.rsplit(":", 1)[1]
+        result = subprocess.run(
+            [_sys.executable, "-m", "mockbank", "--port", port],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=120)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        # The real cause, not `AttributeError: '_Server' object has no
+        # attribute 'state'` - which is what came out before, because
+        # socketserver calls server_close() on the failed-bind path before
+        # make_server has assigned the state.
+        self.assertNotIn("AttributeError", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("cannot listen on", result.stderr)
+        self.assertIn(port, result.stderr)

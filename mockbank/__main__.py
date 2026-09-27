@@ -155,6 +155,14 @@ def main(argv=None) -> int:
         # first payment: every settlement date in the run depends on it.
         print("mock-bank: %s" % error, file=sys.stderr, flush=True)
         return 2
+    except OSError as error:
+        # A port already in use, or an address this host does not have. The
+        # rest of startup refuses by name, and this is the commonest failure of
+        # the lot: a traceback for "something is already on 8080" makes a reader
+        # look for a bug in the mock.
+        print("mock-bank: cannot listen on %s:%d - %s"
+              % (config.host, config.port, error), file=sys.stderr, flush=True)
+        return 2
     if not args.quiet:
         print("mock-bank %s listening on http://%s:%d/  (db: %s, bank time: "
               "%s, cutoff %s)"

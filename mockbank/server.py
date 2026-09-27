@@ -32,7 +32,7 @@ import threading
 import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import (__version__, accounts, clock as clock_module, db, drop, outbox, schema,
                validate)
@@ -990,7 +990,14 @@ class _Server(ThreadingHTTPServer):
     """
 
     daemon_threads = True
-    state: State
+
+    # None until `make_server` sets it, and that is not only tidiness: when the
+    # bind fails - a port already in use - `socketserver.TCPServer.__init__`
+    # calls `server_close()` on the way out, before `make_server` gets to
+    # assign. Without this the real error ("Address already in use") was
+    # replaced by `AttributeError: '_Server' object has no attribute 'state'`,
+    # which says nothing about the port.
+    state: Optional[State] = None
 
     def server_bind(self):
         """Bind without asking DNS what this machine is called.
@@ -1016,7 +1023,8 @@ class _Server(ThreadingHTTPServer):
 
     def server_close(self):
         super().server_close()
-        self.state.close()
+        if self.state is not None:
+            self.state.close()
 
 
 def make_server(config: Config) -> _Server:
