@@ -53,11 +53,10 @@ weekends and holidays are all computed against a bank-time clock that
 `POST /_mock/advance` moves; `clock.py` knows nothing about payments, and what
 happens when a date arrives belongs to the hooks the pipeline registers in
 `on_advance`. Advancing books what came due, writes the notifications for it,
-closes a statement for every business day whose end it passed, delivers
-whatever that released into `--pickup-dir`, and then prunes. That order is
-load-bearing in both halves: statements read the entries an advance has just
-booked, and a prune that ran before the delivery would be free to age out a
-message the folder was never given. The clock
+closes a statement for every business day whose end it passed, and delivers
+whatever that released into `--pickup-dir`. The order is load-bearing:
+statements read the entries the advance has just booked, and the delivery reads
+what both of them released. The clock
 holds an offset from real time rather than a stored instant, so it keeps ticking
 between advances; and it does not go backwards, because whatever was queued for
 a date it had passed would come due a second time. A return is the same idea

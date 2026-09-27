@@ -384,10 +384,11 @@ mailbox — and then moves out of the way: into `processed/` when the bank put i
 through, or into `failed/` when it could not (a file it cannot read, or one
 rejected at group level for `DUPL` or `FF01`). A `PART` counts as processed: the
 file was handled, and the rejections are in the `pain.002`, which is what a real
-bank's processed folder holds. Either way, when there is anything to say, the
-answer is written beside the file as `<name>.findings.txt` — the same prose
-`POST /_mock/validate` prints — so you do not have to ask the mock what became
-of it.
+bank's processed folder holds. Either way, the answer is written beside the file as
+`<name>.findings.txt`: the group status and `MsgId`, how many were accepted and
+rejected, and a line per payment with its `EndToEndId`, outcome and reason code.
+Where there are findings, those lines are the prose `POST /_mock/validate`
+prints. So you do not have to ask the mock what became of the file.
 
 Two things every folder integration gets wrong, which this handles rather than
 leaves to bite you:
