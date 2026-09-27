@@ -43,4 +43,4 @@ Changelog = "https://github.com/rseufert/mock-bank/blob/main/CHANGELOG.md"
 mock-bank = "mockbank.__main__:main"
 
 [tool.setuptools]
-packages = ["mockbank"]
+packages = ["mockbank", "mockbank.routes"]

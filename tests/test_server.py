@@ -51,6 +51,25 @@ class ControlPlane(MockServerCase):
         self.assertIn("GET /_mock/mailbox", body["supported"])
         self.assertIn("/_mock/nonesuch", body["path"])
 
+    # Three answers the route table (#44) changed, each a quirk of the old
+    # chain of ifs. A path the mock does not have is a 404 whatever the method,
+    # and only /_mock itself is the control plane.
+
+    def test_a_path_that_only_starts_with_mock_is_not_the_control_plane(self):
+        resp = self.get("/_mockxyz/health")
+        self.assertEqual(resp.status, 404)
+        self.assertEqual(resp.json()["error"], "not found")
+
+    def test_a_dictionary_path_too_long_to_exist_is_404_for_any_method(self):
+        for method in ("GET", "POST"):
+            resp = self.request(method, "/_mock/dictionary/pain.001.001.09/extra")
+            self.assertEqual(resp.status, 404, method)
+
+    def test_a_payments_path_too_long_to_exist_is_404_for_any_method(self):
+        for method in ("GET", "POST"):
+            resp = self.request(method, "/_mock/payments/E2E-1/extra")
+            self.assertEqual(resp.status, 404, method)
+
     def test_the_index_does_not_show_an_empty_list_of_promises(self):
         page = self.get("/").body.decode("utf-8")
         self.assertIn("What this build answers", page)
