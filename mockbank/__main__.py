@@ -8,6 +8,7 @@ import sys
 from . import __version__
 from .accounts import BEHAVIOURS
 from .clock import DEFAULT_CUTOFF, Invalid
+from .drop import Invalid as DropInvalid
 from .server import Config, make_server
 
 
@@ -150,9 +151,11 @@ def main(argv=None) -> int:
         print(warning, file=sys.stderr, flush=True)
     try:
         httpd = make_server(config)
-    except Invalid as error:
-        # A clock the mock cannot keep is refused at startup rather than at the
-        # first payment: every settlement date in the run depends on it.
+    except (Invalid, DropInvalid) as error:
+        # A clock the mock cannot keep, or a folder pair it cannot honour, is
+        # refused at startup rather than at the first payment: every settlement
+        # date in the run depends on the one, and the other would have the bank
+        # reading its own output back.
         print("mock-bank: %s" % error, file=sys.stderr, flush=True)
         return 2
     except OSError as error:

@@ -339,6 +339,76 @@ class AFileLeftClaimedByAnEarlierRun(MockServerCase):
         self.assertEqual(len(self.get("/_mock/payments").json()), 4)
 
 
+class TheFolderDoorIsOutsideAuth(MockServerCase):
+    """A file in the drop directory needs no credentials, and that is on purpose.
+
+    A directory is guarded by the filesystem, not by the bank, which is how a
+    real SFTP drop works - the credentials are the SSH account, not the payment
+    file. But it means `--auth` alone does not close the second door, and that
+    is worth a test rather than only a sentence in the README: somebody will
+    reach for `--auth` expecting it to cover everything.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp(prefix="mock-bank-authdrop-")
+        cls.drop = os.path.join(cls.directory, "in")
+        cls.config_kwargs = dict(cls.config_kwargs, drop_dir=cls.drop,
+                                 drop_settle_ms=0, auth="tester:s3cret")
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def credentials(self):
+        import base64
+        raw = base64.b64encode(b"tester:s3cret").decode()
+        return {"Authorization": "Basic " + raw}
+
+    def test_http_needs_credentials_and_the_folder_does_not(self):
+        # The same file, both doors.
+        self.assertEqual(
+            self.post("/payments", body=sample("pain001_four_payments.xml")).status,
+            401)
+        with open(os.path.join(self.drop, "dropped.xml"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(sample("pain001_four_payments.xml"))
+        self.assertEqual(
+            self.post("/_mock/drop/scan", headers=self.credentials()).json()["scanned"],
+            1)
+        payments = self.get("/_mock/payments", headers=self.credentials()).json()
+        self.assertEqual(len(payments), 4,
+                         "the folder door did not accept the file")
+
+
+class APickupDirectoryItCannotWriteTo(DropCase):
+
+    def test_the_failure_is_reported_rather_than_silent(self):
+        # A pickup directory that fills up or loses its permissions used to fail
+        # silently and for ever: the bank looked healthy, the client collected
+        # nothing from the folder, and nothing said why.
+        os.chmod(self.pickup, 0o500)
+        self.addCleanup(os.chmod, self.pickup, 0o700)
+        self.drop_file("payments.xml")
+        self.scan()
+        unwritten = self.get("/_mock/drop").json()["unwritten"]
+        self.assertTrue(unwritten, "a write that failed was not reported")
+        self.assertTrue(any("pain.002" in row["name"] for row in unwritten),
+                        unwritten)
+
+    def test_it_is_written_once_the_directory_works_again(self):
+        # written_at is only set on success, so a later release retries it.
+        os.chmod(self.pickup, 0o500)
+        self.drop_file("payments.xml")
+        self.scan()
+        self.assertEqual(self.listing(self.pickup), [])
+        os.chmod(self.pickup, 0o700)
+        self.get("/_mock/mailbox?leave")            # releases, and so retries
+        self.assertTrue(self.listing(self.pickup))
+
+
 class WhatItReportsAboutItself(DropCase):
 
     def test_state_names_both_directories(self):
@@ -422,6 +492,76 @@ class ThePollerActuallyRuns(MockServerCase):
         self.assertEqual(len(self.get("/_mock/payments").json()), 4,
                          "the poller never read the file")
         self.assertIs(self.get("/_mock/drop").json()["polling"], True)
+
+
+class AFolderPairTheMockWillNotHonour(unittest.TestCase):
+    """The bank must not be able to read its own output back as a payment file.
+
+    With one directory for both, every `pain.002` the bank writes lands somewhere
+    it is watching: it reads its status report back as a payment file, answers
+    that with `FF01`, writes *that* into the directory too, and goes round again.
+    A mock that looks busy and is only talking to itself.
+    """
+
+    def refusal(self, drop, pickup):
+        from mockbank import drop as drop_module
+        with self.assertRaises(drop_module.Invalid) as caught:
+            drop_module.check_directories(drop, pickup)
+        return str(caught.exception)
+
+    def test_the_same_directory_for_both_is_refused(self):
+        with tempfile.TemporaryDirectory() as one:
+            message = self.refusal(one, one)
+            self.assertIn("same directory", message)
+            self.assertIn("read every message it wrote back in", message)
+
+    def test_the_pickup_inside_the_drop_is_refused(self):
+        with tempfile.TemporaryDirectory() as outer:
+            inner = os.path.join(outer, "out")
+            message = self.refusal(outer, inner)
+            self.assertIn("--pickup-dir is inside --drop-dir", message)
+
+    def test_the_drop_inside_the_pickup_is_refused(self):
+        with tempfile.TemporaryDirectory() as outer:
+            inner = os.path.join(outer, "in")
+            message = self.refusal(inner, outer)
+            self.assertIn("--drop-dir is inside --pickup-dir", message)
+
+    def test_side_by_side_is_fine(self):
+        from mockbank import drop as drop_module
+        with tempfile.TemporaryDirectory() as parent:
+            drop_module.check_directories(os.path.join(parent, "in"),
+                                          os.path.join(parent, "out"))
+
+    def test_a_name_that_merely_starts_the_same_is_fine(self):
+        # `/tmp/bank-in` is not inside `/tmp/bank`, and a prefix test without a
+        # separator would have said it was.
+        from mockbank import drop as drop_module
+        with tempfile.TemporaryDirectory() as parent:
+            drop_module.check_directories(os.path.join(parent, "bank"),
+                                          os.path.join(parent, "bank-out"))
+
+    def test_one_directory_alone_is_fine(self):
+        from mockbank import drop as drop_module
+        with tempfile.TemporaryDirectory() as one:
+            drop_module.check_directories(one, "")
+            drop_module.check_directories("", one)
+
+    def test_a_directory_that_cannot_be_made_names_itself_and_its_flag(self):
+        import subprocess
+        import sys as _sys
+        result = subprocess.run(
+            [_sys.executable, "-m", "mockbank", "--port", "8099",
+             "--drop-dir", os.path.join(os.devnull, "nope")],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=120)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        # Not "cannot listen on 127.0.0.1:8099", which is where this used to
+        # surface and sends a reader to look at the port.
+        self.assertNotIn("cannot listen", result.stderr)
+        self.assertIn("--drop-dir", result.stderr)
+        self.assertIn("could not be created", result.stderr)
 
 
 class AStartupThatCannotHappen(MockServerCase):

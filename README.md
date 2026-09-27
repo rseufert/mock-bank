@@ -394,6 +394,14 @@ leaves to bite you:
 same reason `POST /_mock/advance` exists: a test that waits for a poll interval
 is slow and flaky, and one that asks is neither.
 
+**The folder door is outside `--auth`.** Credentials guard HTTP requests; a file
+in the drop directory is processed on its own, because a directory is guarded by
+the filesystem and not by the bank. That is how a real SFTP drop works too — the
+credentials are the SSH account, not the payment file — but it means `--auth`
+alone does not close the second door. If you run with both, the drop directory's
+permissions are the control, and anyone who can write into it can move money in
+this mock.
+
 Everything the bank releases lands in `--pickup-dir`, not only what a dropped
 file produced — a `camt.054` or a `camt.053` released days later by the clock is
 written when it is released, and so is a `pain.002` for a file you posted over

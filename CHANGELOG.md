@@ -38,7 +38,11 @@ says so where it does.
   changes rather than read again on every pass. `GET /_mock/drop` reports all of
   it, and `/_mock/state` names both directories. The database gains a
   `written_at` column on `message` (schema version 6); a 0.1.0 or 0.2 `--db`
-  file is upgraded in place.
+  file is upgraded in place. One directory for both, or either inside the other,
+  is refused at startup - the bank would read every message it wrote back in as
+  a payment file - and a file the mock cannot write is reported on stderr and in
+  `GET /_mock/drop` rather than failing silently. The folder door is outside
+  `--auth`, as a real SFTP drop is, and the README says so.
 
 ### Changed
 

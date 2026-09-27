@@ -63,6 +63,38 @@ IGNORED_SUFFIXES = (".tmp", ".part", ".filepart", ".writing", ".swp",
                     FINDINGS_SUFFIX, CLAIMED)
 
 
+class Invalid(ValueError):
+    """A folder transport the mock could not honour, and why. Refused at startup."""
+
+
+def check_directories(drop_dir: str, pickup_dir: str) -> None:
+    """Refuse a drop and pickup pair that would feed the bank its own output.
+
+    The same directory for both, or either inside the other, means every
+    `pain.002` the bank writes lands somewhere it is watching - so it reads its
+    own status report back as if it were a payment file, answers it with `FF01`,
+    writes *that* answer into the directory too, and goes round again. It fails
+    loudly at startup instead, because the alternative is a mock that looks
+    busy and is only talking to itself.
+    """
+    if not (drop_dir and pickup_dir):
+        return
+    drop = os.path.realpath(drop_dir)
+    pickup = os.path.realpath(pickup_dir)
+    if drop == pickup:
+        raise Invalid(
+            "--drop-dir and --pickup-dir are the same directory (%s). The bank "
+            "would read every message it wrote back in as a payment file; give "
+            "them separate directories." % drop)
+    for inner, outer, flags in ((pickup, drop, "--pickup-dir is inside --drop-dir"),
+                                (drop, pickup, "--drop-dir is inside --pickup-dir")):
+        if inner.startswith(outer + os.sep):
+            raise Invalid(
+                "%s (%s inside %s). The bank would read what it wrote back in "
+                "as a payment file; give them directories side by side."
+                % (flags, inner, outer))
+
+
 class Scanned:
     """What became of one dropped file."""
 
@@ -111,6 +143,9 @@ class DropBox:
         self.stuck: Dict[str, Tuple[int, float, str]] = {}
         # Files a previous run left mid-read, renamed back at startup.
         self.reclaimed: List[str] = []
+        # Files the mock could not write, by name, with why. A pickup directory
+        # that fills up is otherwise the quietest possible failure.
+        self.unwritten: Dict[str, str] = {}
         # Names already taken in the pickup directory, and what was written
         # instead: a reset empties the message table, so an id can recur while
         # the file from before is still waiting to be collected.
@@ -125,13 +160,30 @@ class DropBox:
     # -- lifecycle --------------------------------------------------------
 
     def prepare(self) -> None:
-        """Create the directories, and reclaim anything a previous run left."""
-        for path in (self.drop_dir, self.pickup_dir):
+        """Create the directories, and reclaim anything a previous run left.
+
+        A path that cannot be created is refused here, naming the directory and
+        the flag that asked for it. It used to surface through `main`'s catch-all
+        as "cannot listen on 127.0.0.1:8080", which sends a reader to look at
+        the port.
+        """
+        check_directories(self.drop_dir, self.pickup_dir)
+        for path, flag in ((self.drop_dir, "--drop-dir"),
+                           (self.pickup_dir, "--pickup-dir")):
             if path:
-                os.makedirs(path, exist_ok=True)
+                try:
+                    os.makedirs(path, exist_ok=True)
+                except OSError as error:
+                    raise Invalid("%s %s could not be created: %s"
+                                  % (flag, path, error)) from None
         if self.drop_dir:
             for name in (PROCESSED, FAILED):
-                os.makedirs(os.path.join(self.drop_dir, name), exist_ok=True)
+                inner = os.path.join(self.drop_dir, name)
+                try:
+                    os.makedirs(inner, exist_ok=True)
+                except OSError as error:
+                    raise Invalid("%s could not be created inside --drop-dir: %s"
+                                  % (inner, error)) from None
             self.reclaim()
 
     def reclaim(self) -> List[str]:
@@ -316,8 +368,21 @@ class DropBox:
         try:
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(lines) + "\n")
-        except OSError:                  # pragma: no cover - permissions
-            pass
+        except OSError as error:
+            # Same reasoning as the pickup write: a findings file nobody can
+            # write is a file somebody is looking for and will not find.
+            self._unwritable(os.path.basename(target), error)
+
+    def _unwritable(self, name: str, error: OSError) -> None:
+        """A file the mock could not write: said out loud and kept in the state.
+
+        Once per name, so a directory that has been full for an hour does not
+        fill the log with the same line instead.
+        """
+        if name not in self.unwritten:
+            sys.stderr.write("mock-bank: could not write %s into %s: %s\n"
+                             % (name, self.pickup_dir or self.drop_dir, error))
+        self.unwritten[name] = str(error)
 
     def _release(self, working: str, path: str) -> None:
         """Give a claimed file its own name back."""
@@ -409,7 +474,15 @@ class DropBox:
                     handle.write(row["body"])
                 target = _free_name(final)
                 os.replace(temporary, target)
-            except OSError:              # pragma: no cover - permissions
+            except OSError as error:
+                # Not swallowed. A pickup directory that fills up or loses its
+                # permissions would otherwise fail silently and for ever: the
+                # bank would look healthy, the client would collect nothing
+                # from the folder, and nothing anywhere would say why. And
+                # because `written_at` is only set on success, every later
+                # release retries it - so the failure repeats rather than
+                # passing, which is exactly why it has to be visible.
+                self._unwritable(name, error)
                 continue
             written_as = os.path.basename(target)
             if written_as != name:
@@ -449,6 +522,7 @@ class DropBox:
         self.refused = []
         self.renamed = []
         self.stuck = {}
+        self.unwritten = {}
 
     # -- reporting --------------------------------------------------------
 
@@ -464,6 +538,8 @@ class DropBox:
             "written": list(self.written[-20:]),
             "refused": list(self.refused[-20:]),
             "reclaimed": list(self.reclaimed),
+            "unwritten": [{"name": name, "reason": reason}
+                          for name, reason in sorted(self.unwritten.items())],
             "stuck": [{"name": name, "reason": reason}
                       for name, (_size, _mtime, reason)
                       in sorted(self.stuck.items())],
