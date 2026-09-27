@@ -40,6 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "Without it, anyone who can reach the port can POST "
                         "/_mock/reset, rewrite every account and read every "
                         "message")
+    p.add_argument("--keep-requests", type=int, default=5000, metavar="N",
+                   help="keep only the newest N rows of the request log, so a "
+                        "mock left running for weeks stays bounded (default: "
+                        "5000; 0 keeps every row)")
+    p.add_argument("--retention-days", type=float, default=0.0, metavar="D",
+                   help="remove request-log rows and already-collected messages "
+                        "older than D days (default: off). Payments, files and "
+                        "uncollected messages are never removed: they are the "
+                        "evidence a failing test is read against")
     p.add_argument("--allow-duplicates", action="store_true",
                    help="accept a file whose MsgId the bank has seen before "
                         "(by default it is rejected with DUPL, as a real bank does)")
@@ -114,7 +123,9 @@ def main(argv=None) -> int:
     config = Config(host=args.host, port=args.port, db_path=args.db_path,
                     quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
                     clock=args.clock, allow_duplicates=args.allow_duplicates,
-                    status_delay_ms=args.status_delay_ms, auth=args.auth)
+                    status_delay_ms=args.status_delay_ms, auth=args.auth,
+                    keep_requests=args.keep_requests,
+                    retention_days=args.retention_days)
     refused = check_auth(config.auth)
     if refused:
         print("mock-bank: %s" % refused, file=sys.stderr, flush=True)

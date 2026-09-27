@@ -339,6 +339,50 @@ def one(conn: sqlite3.Connection, sql: str,
     return dict(row) if row else None
 
 
+def prune(conn: sqlite3.Connection, keep_requests: int = 0,
+          retention_days: float = 0) -> Dict[str, int]:
+    """Bound what a long-running mock keeps, and say how much went.
+
+    A mock left up as a shared staging bank for a few weeks has a request log
+    and a message table that grow without end, and the only remedy was
+    ``POST /_mock/reset``, which also throws away the accounts.
+
+    ``keep_requests`` keeps the newest that many request-log rows (0 keeps them
+    all). ``retention_days`` removes what is older than that many days (0 keeps
+    everything): request-log rows, and messages a client has already taken.
+
+    What is *not* pruned is deliberate. ``payment`` and ``file`` are what the
+    bank did, and they are the evidence somebody reads when a test fails - a
+    mock that eats them is no use at the moment you need it. A message still
+    waiting to be collected is kept however old it is, because nobody has seen
+    it yet, and so are the accounts, the holidays and the counters: they are
+    what the mock *is*, not a record of what it did.
+    """
+    removed: Dict[str, int] = {}
+
+    def gone(table: str, cursor: sqlite3.Cursor) -> None:
+        if cursor.rowcount > 0:
+            removed[table] = removed.get(table, 0) + cursor.rowcount
+
+    if keep_requests > 0:
+        # By id rather than by timestamp: two rows can share a second, and
+        # "the newest N" has to mean exactly N.
+        gone("request_log", conn.execute(
+            "DELETE FROM request_log WHERE id <= (SELECT id FROM request_log"
+            " ORDER BY id DESC LIMIT 1 OFFSET ?)", (keep_requests,)))
+    if retention_days > 0:
+        cutoff = stamp(utcnow() - datetime.timedelta(days=retention_days))
+        gone("request_log", conn.execute(
+            "DELETE FROM request_log WHERE at < ?", (cutoff,)))
+        # Taken, and taken a while ago. A message nobody has collected stays,
+        # whatever its age: the whole point of the mailbox is that it waits.
+        gone("message", conn.execute(
+            "DELETE FROM message WHERE taken_at IS NOT NULL AND taken_at < ?",
+            (cutoff,)))
+    conn.commit()
+    return removed
+
+
 def count(conn: sqlite3.Connection, table: str, where: str = "") -> int:
     return int(conn.execute(
         "SELECT COUNT(*) AS n FROM %s%s"

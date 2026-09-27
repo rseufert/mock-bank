@@ -99,6 +99,10 @@ NOTES = {
 # few, and a mock left running for a day has thousands.
 REQUEST_LOG_PAGE = 100
 
+# How many requests between prunes. Often enough that a long-running mock stays
+# bounded, rarely enough that the cost is invisible: a prune is two DELETEs.
+PRUNE_EVERY = 500
+
 # A request body larger than this is refused rather than read into memory. A
 # pain.001 with a thousand payments is a few megabytes; this is generous.
 MAX_BODY = 32 * 1024 * 1024
@@ -109,7 +113,8 @@ class Config:
 
     def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
                  timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock="",
-                 allow_duplicates=False, status_delay_ms=0, auth=""):
+                 allow_duplicates=False, status_delay_ms=0, auth="",
+                 keep_requests=5000, retention_days=0.0):
         self.host = host
         # A MsgId seen before is DUPL unless this is set, as at a real bank.
         self.allow_duplicates = allow_duplicates
@@ -118,6 +123,10 @@ class Config:
         # "user:password", or empty for a mock anyone who can reach the port
         # may reset. Checked by Handler._authorised.
         self.auth = auth
+        # Retention, for a mock left running on a file database. Pruned at
+        # startup, after every advance, and every PRUNE_EVERY requests.
+        self.keep_requests = keep_requests      # newest rows kept; 0 keeps all
+        self.retention_days = retention_days    # older records go; 0 keeps all
         self.port = port
         self.db_path = db_path
         self.quiet = quiet
@@ -147,6 +156,11 @@ class State:
         self.clock.on_advance.append(self._on_advance)
         self.started = db.utcnow()
         self.resets = 0
+        # What retention has removed since the mock started, so a tester who
+        # wonders where their rows went can see rather than guess.
+        self.pruned: Dict[str, int] = {}
+        self.requests_since_prune = 0
+        self.prune()
 
     def _on_advance(self, before, after):
         # Book first, so a day's statement sees that day's bookings.
@@ -154,6 +168,17 @@ class State:
         outbox.release_due(self.conn, now, after.date(), self.clock)
         outbox.issue_statements(
             self.conn, self.clock, outbox.ended_business_days(self.clock, before, after), now)
+        self.prune()
+
+    def prune(self) -> Dict[str, int]:
+        """Apply --keep-requests and --retention-days, keeping a running total."""
+        with self.lock:
+            removed = db.prune(self.conn, self.config.keep_requests,
+                               self.config.retention_days)
+            for table, count in removed.items():
+                self.pruned[table] = self.pruned.get(table, 0) + count
+            self.requests_since_prune = 0
+        return removed
 
     def _holidays(self):
         return [row["day"] for row in db.rows(
@@ -175,6 +200,7 @@ class State:
             self.conn.commit()
             db.seed(self.conn)
             self.clock.reset()
+            self.pruned = {}
             self.resets += 1
 
     def now(self):
@@ -218,6 +244,11 @@ class State:
                     "waiting": db.count(self.conn, "message",
                                         "released_at IS NOT NULL AND taken_at IS NULL"),
                     "taken": db.count(self.conn, "message", "taken_at IS NOT NULL"),
+                },
+                "retention": {
+                    "keepRequests": self.config.keep_requests,
+                    "retentionDays": self.config.retention_days,
+                    "pruned": dict(self.pruned),
                 },
                 "behaviours": sorted(BEHAVIOURS),
                 "supported": SUPPORTED,
@@ -795,6 +826,9 @@ class Handler(BaseHTTPRequestHandler):
                     " VALUES (?,?,?,?)",
                     (self._log_method, self._log_path, status, db.now()))
                 self.state.conn.commit()
+                self.state.requests_since_prune += 1
+                if self.state.requests_since_prune >= PRUNE_EVERY:
+                    self.state.prune()
         except sqlite3.Error:      # pragma: no cover - logging must not fail a request
             pass
 

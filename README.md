@@ -344,6 +344,8 @@ Every flag `mock-bank --help` lists:
 | `--clock` | now | Start bank time at `YYYY-MM-DDTHH:MM` instead of now, for a run whose settlement dates are reproducible. `POST /_mock/reset` returns here. |
 | `--allow-duplicates` | off | Accept a file whose `MsgId` the bank has already received. Off, it is rejected with `DUPL`, as a real bank does. |
 | `--status-delay-ms` | `0` | How long after a file arrives its `pain.002` is due. `0` so a test sees it at once; a real bank takes a few minutes. |
+| `--keep-requests` | `5000` | Keep the newest N rows of the request log, so a mock left running for weeks stays bounded. `0` keeps every row. Trimmed at startup, after each `POST /_mock/advance`, and every few hundred requests — so the table sits *near* N rather than exactly at it, and can exceed it briefly between trims. |
+| `--retention-days` | off | Remove request-log rows and already-collected messages older than this many days. Payments, files and *uncollected* messages are never removed — they are the evidence a failing test gets read against, and a mock that eats them is no use at the moment you need it. |
 | `--auth` | off | Require HTTP basic `USER:PASSWORD` on every request, including `/_mock/health` and `/`. Without it, anyone who can reach the port can reset the bank. A value with no colon, or an empty user or password, is refused at startup rather than accepted as a credential nothing could match. |
 | `--quiet`, `-q` | off | Log nothing per request. Does not silence the startup warning about an unguarded non-loopback bind. |
 | `--version` | | Print the version and exit. |

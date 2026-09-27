@@ -10,6 +10,22 @@ says so where it does.
 
 ### Added
 
+- **Retention for a long-running mock** (#17). A mock left up as a shared
+  staging bank had a request log and a message table that grew without end, and
+  the only remedy was `POST /_mock/reset`, which throws the accounts away with
+  them. `--keep-requests N` (default 5000) keeps the newest N request-log rows
+  and `--retention-days D` (default off) removes request rows and
+  already-collected messages older than D days, trimmed at startup, after each
+  advance and every few hundred requests - so the default in-memory bank is
+  untouched. `GET /_mock/state` reports what has been removed, so a tester who
+  wonders where their rows went can look rather than guess. Payments, files,
+  *uncollected* messages, accounts, holidays and counters are never pruned: the
+  first two are the evidence a failing test is read against, an uncollected
+  message is the one thing a mailbox exists to hold, and the rest are what the
+  mock is rather than a record of what it did. The indexes the issue also asked
+  for turned out to be there already, so the tests now hold them in place by
+  name against the query plans.
+
 - **Returns** (#14). Under `return-later` a payment settles as usual and then
   comes back `days` business days later (3 by default) with `reason` (`AC04`
   by default), every payment or only the `end_to_end_id` named in the
