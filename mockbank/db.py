@@ -145,6 +145,13 @@ SCHEMA = [
         due_at       TEXT NOT NULL,
         released_at  TEXT,
         taken_at     TEXT,
+        -- when it was written into --pickup-dir, if there is one. On the row
+        -- rather than in memory: the first version of the folder transport kept
+        -- the written ids in a set, so a restart on --db wrote every message
+        -- ever released into the directory again - including ones the client
+        -- had collected long before. It also survives a crash between
+        -- releasing and writing, which a set seeded at startup would not.
+        written_at   TEXT,
         -- the XML, UTF-8
         body         TEXT NOT NULL
     )
@@ -206,7 +213,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class DatabaseError(Exception):
@@ -341,7 +348,8 @@ def one(conn: sqlite3.Connection, sql: str,
 
 def prune(conn: sqlite3.Connection, keep_requests: int = 0,
           retention_days: float = 0,
-          bank_now: Optional[datetime.datetime] = None) -> Dict[str, int]:
+          bank_now: Optional[datetime.datetime] = None,
+          require_written: bool = False) -> Dict[str, int]:
     """Bound what a long-running mock keeps, and say how much went.
 
     A mock left up as a shared staging bank for a few weeks has a request log
@@ -396,13 +404,18 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
         # 404, which is worse than saying the message is gone: the statement row
         # is the record, and it still reconciles.
         message_cutoff = stamp((bank_now or utcnow()) - window)
+        # `require_written` is set when a pickup directory is configured: a
+        # message the folder has not been given yet must not be aged out, or it
+        # is a message that simply never arrives for a client that polls a
+        # directory rather than the mailbox.
+        written_only = " AND written_at IS NOT NULL" if require_written else ""
         conn.execute(
             "UPDATE statement SET message_id = NULL WHERE message_id IN"
-            " (SELECT id FROM message WHERE taken_at IS NOT NULL AND taken_at < ?)",
-            (message_cutoff,))
+            " (SELECT id FROM message WHERE taken_at IS NOT NULL"
+            " AND taken_at < ?" + written_only + ")", (message_cutoff,))
         gone("message", conn.execute(
-            "DELETE FROM message WHERE taken_at IS NOT NULL AND taken_at < ?",
-            (message_cutoff,)))
+            "DELETE FROM message WHERE taken_at IS NOT NULL AND taken_at < ?"
+            + written_only, (message_cutoff,)))
     conn.commit()
     return removed
 

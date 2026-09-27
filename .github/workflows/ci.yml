@@ -104,6 +104,43 @@ jobs:
             sleep 0.25
           done
           python examples/client.py --base http://127.0.0.1:8082
+      - name: The tour again, against a mock trading through a folder
+        run: |
+          set -eu
+          mkdir -p /tmp/bank/in /tmp/bank/out
+          python -m mockbank --port 8084 -q \
+            --drop-dir /tmp/bank/in --pickup-dir /tmp/bank/out &
+          MOCK_PID=$!
+          trap 'kill $MOCK_PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8084/_mock/health >/dev/null && break
+            sleep 0.25
+          done
+          BASE=http://127.0.0.1:8084 bash examples/demo.sh >/dev/null
+          # The tour goes in over HTTP; the pickup directory is the bank's
+          # outbound side either way, so its answers have to be on disk.
+          ls /tmp/bank/out | grep -q '^pain.002' \
+            || { echo "no pain.002 in the pickup directory"; ls -la /tmp/bank/out; exit 1; }
+          # And a file dropped in the folder goes through the same pipeline.
+          cp tests/samples/pain001_four_payments.xml /tmp/bank/in/dropped.xml
+          # Asking for a scan rather than only waiting, but asserting the
+          # *outcome* rather than which reader got there first: the poller runs
+          # every --drop-interval-ms and may well have taken the file already,
+          # in which case the scan honestly reports nothing to do. Either way
+          # the file ends up filed away and its payments in the bank, and that
+          # is the claim worth making.
+          sleep 1
+          curl -sS -X POST http://127.0.0.1:8084/_mock/drop/scan >/dev/null
+          for _ in $(seq 1 20); do
+            test -f /tmp/bank/in/processed/dropped.xml && break
+            sleep 0.5
+          done
+          test -f /tmp/bank/in/processed/dropped.xml \
+            || { echo "dropped file was not filed away"; find /tmp/bank/in; exit 1; }
+          curl -sf http://127.0.0.1:8084/_mock/payments \
+            | python -c "import json,sys; p=json.load(sys.stdin); \
+                         assert len(p) >= 4, len(p); \
+                         print('the folder fed the pipeline:', len(p), 'payments')"
       - name: Both again, against a mock that wants credentials
         run: |
           set -eu

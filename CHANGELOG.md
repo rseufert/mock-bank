@@ -30,7 +30,10 @@ says so where it does.
   clears the statement's reference to it rather than leaving one that answers
   `404`, and a `--retention-days` the mock cannot act on - `nan`, `inf`, a
   negative, or a century and a half - is refused at startup instead of crashing
-  or being silently off.
+  or being silently off. With a `--pickup-dir` configured, retention only
+  removes a message the folder has actually been given: aging out one the
+  directory never received would lose it silently, because a client that polls a
+  directory has no other way to see it.
 
 - **Returns** (#14). Under `return-later` a payment settles as usual and then
   comes back `days` business days later (3 by default) with `reason` (`AC04`
@@ -43,6 +46,35 @@ says so where it does.
   `GET /_mock/payments/<EndToEndId>` shows `returned` with the reason and
   when it was due. The database gains three return columns on `payment`
   (schema version 5); a 0.1.0 `--db` file is upgraded in place.
+- **Folder transport** (#15). Most bank connections are two directories on an
+  SFTP host rather than an HTTP endpoint, so the bank has a second door.
+  `--drop-dir` is watched (every `--drop-interval-ms`, and `POST
+  /_mock/drop/scan` looks now); each settled file goes through **the same
+  pipeline** as `POST /payments` and then moves to `processed/`, or to `failed/`
+  when the bank could not put it through, with the answer written beside it as
+  `<name>.findings.txt` in the same prose `POST /_mock/validate` prints.
+  `--pickup-dir` receives every released message as
+  `<type>-<account>-<id>.xml`, written to a temporary name and renamed so a
+  poller never reads half a file - including the `camt.054` and `camt.053` the
+  clock releases days later, and messages from files posted over HTTP. A file
+  still being written is left alone for `--drop-settle-ms`; a file is claimed by
+  renaming before it is read, so a scan and the poller cannot both take it; and
+  one that could not be moved out of the way is remembered and left until it
+  changes rather than read again on every pass. `GET /_mock/drop` reports all of
+  it, and `/_mock/state` names both directories. The database gains a
+  `written_at` column on `message` (schema version 6); a 0.1.0 or 0.2 `--db`
+  file is upgraded in place. One directory for both, or either inside the other,
+  is refused at startup - the bank would read every message it wrote back in as
+  a payment file - and a file the mock cannot write is reported on stderr and in
+  `GET /_mock/drop` rather than failing silently. The folder door is outside
+  `--auth`, as a real SFTP drop is, and the README says so.
+
+### Changed
+
+- **The pipeline moved from the request handler onto `server.State.receive`**,
+  so that the folder transport and `POST /payments` are two doors onto one
+  pipeline rather than two copies of it. No behaviour change: the answer, the
+  statuses and the mailbox are what they were.
 
 ## [0.1.0] - 2026-09-26
 

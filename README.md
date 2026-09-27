@@ -316,7 +316,7 @@ like mock-edi's so the two feel the same.
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
 | Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
-| Folder in and out | `--drop-dir`, `--pickup-dir` | Most bank connections are still SFTP folders **(not yet — 0.2)** |
+| Folder in and out | `--drop-dir`, `--pickup-dir`, `GET /_mock/drop`, `POST /_mock/drop/scan` | Most bank connections are still SFTP folders, so the bank reads one directory and writes another |
 
 `GET /_mock/mailbox?raw` returns the message bodies one after another, each
 with its own XML declaration — what a bank's drop directory looks like to a
@@ -346,9 +346,69 @@ Every flag `mock-bank --help` lists:
 | `--status-delay-ms` | `0` | How long after a file arrives its `pain.002` is due. `0` so a test sees it at once; a real bank takes a few minutes. |
 | `--keep-requests` | `5000` | Keep the newest N rows of the request log, so a mock left running for weeks stays bounded. `0` keeps every row. Trimmed at startup, after each `POST /_mock/advance`, and every few hundred requests — so the table sits *near* N rather than exactly at it, and can exceed it briefly between trims. |
 | `--retention-days` | off | Remove request-log rows and already-collected messages older than this many days — a message's age on the bank clock, which `--clock` and `POST /_mock/advance` move, and a request's age in real time, because that is when it arrived. Fractions are allowed; `nan`, a negative and anything past a century are refused at startup rather than silently ignored. Payments, files and *uncollected* messages are never removed — they are the evidence a failing test gets read against, and a mock that eats them is no use at the moment you need it. |
+| `--drop-dir` | off | A directory to watch for payment files. Each one is fed to the same pipeline as `POST /payments`, then moved to `processed/`, or to `failed/` when the bank could not put it through. |
+| `--pickup-dir` | off | A directory to write every released message into, as `<type>-<account>-<id>.xml`. Written to a temporary name and renamed, so a poller never reads half a file. |
+| `--drop-settle-ms` | `250` | Leave a file alone until it has been untouched this long, so one still being written is not read half-finished. `0` reads at once. |
+| `--drop-interval-ms` | `1000` | How often to look in `--drop-dir`. A test should use `POST /_mock/drop/scan` rather than waiting. |
 | `--auth` | off | Require HTTP basic `USER:PASSWORD` on every request, including `/_mock/health` and `/`. Without it, anyone who can reach the port can reset the bank. A value with no colon, or an empty user or password, is refused at startup rather than accepted as a credential nothing could match. |
 | `--quiet`, `-q` | off | Log nothing per request. Does not silence the startup warning about an unguarded non-loopback bind. |
 | `--version` | | Print the version and exit. |
+
+## Trading through a folder
+
+Most bank connections are not an HTTP endpoint: they are two directories on an
+SFTP host, and a scheduler that polls them. So the bank has a second door.
+
+```bash
+mkdir -p bank/in bank/out
+python3 -m mockbank --port 8080 --drop-dir bank/in --pickup-dir bank/out
+cp tests/samples/pain001_four_payments.xml bank/in/
+curl -s -X POST http://127.0.0.1:8080/_mock/drop/scan
+ls bank/in/processed bank/out
+```
+
+A file dropped into `--drop-dir` goes through **the same pipeline** as a file
+posted to `/payments` — the same decisions, the same `pain.002`, the same
+mailbox — and then moves out of the way: into `processed/` when the bank put it
+through, or into `failed/` when it could not (a file it cannot read, or one
+rejected at group level for `DUPL` or `FF01`). A `PART` counts as processed: the
+file was handled, and the rejections are in the `pain.002`, which is what a real
+bank's processed folder holds. Either way, when there is anything to say, the
+answer is written beside the file as `<name>.findings.txt` — the same prose
+`POST /_mock/validate` prints — so you do not have to ask the mock what became
+of it.
+
+Two things every folder integration gets wrong, which this handles rather than
+leaves to bite you:
+
+- **A file still being written is not read.** One modified within
+  `--drop-settle-ms` is left for the next pass, and `.tmp`, `.part` and
+  dotfiles are never read at all. The mock writes its own files to a temporary
+  name and renames them, because a mock that will not follow the convention it
+  recommends is not much of an example.
+- **A file is read once.** It is claimed by renaming before it is read, so the
+  poller and a scan cannot both take it; and a file that could not be moved out
+  of the way afterwards is remembered and left alone until it changes, rather
+  than read again on every pass. `GET /_mock/drop` reports those, and anything
+  waiting.
+
+`POST /_mock/drop/scan` reads the directory now and says what it found, for the
+same reason `POST /_mock/advance` exists: a test that waits for a poll interval
+is slow and flaky, and one that asks is neither.
+
+**The folder door is outside `--auth`.** Credentials guard HTTP requests; a file
+in the drop directory is processed on its own, because a directory is guarded by
+the filesystem and not by the bank. That is how a real SFTP drop works too — the
+credentials are the SSH account, not the payment file — but it means `--auth`
+alone does not close the second door. If you run with both, the drop directory's
+permissions are the control, and anyone who can write into it can move money in
+this mock.
+
+Everything the bank releases lands in `--pickup-dir`, not only what a dropped
+file produced — a `camt.054` or a `camt.053` released days later by the clock is
+written when it is released, and so is a `pain.002` for a file you posted over
+HTTP. The pickup directory is the bank's outbound side, not the drop
+directory's reply.
 
 ## Docker
 
@@ -368,6 +428,7 @@ stderr at startup if you do not. `-q` does not silence that warning.
 ```
 mockbank/accounts.py   the account behaviours, and what a valid account is
 mockbank/clock.py      bank time: the cutoff, business days, holidays, and advancing
+mockbank/drop.py       the second door: a directory watched, and one written
 mockbank/db.py         the schema, the upgrade, and the seeded accounts
 mockbank/messages.py   reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
 mockbank/outbox.py     what the bank sends and when: the message queue, release as the clock moves, the mailbox
