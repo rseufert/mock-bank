@@ -11,7 +11,9 @@ works and gets slower every week.
 """
 import datetime
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -341,6 +343,133 @@ class RealPaymentsThroughAPrunedMock(MockServerCase):
         self.assertEqual(len(self.get("/_mock/payments").json()), 4)
         self.assertTrue(self.get("/_mock/mailbox?leave").json())
         self.assertLessEqual(self.get("/_mock/state").json()["requests"], 5)
+
+
+class AMessageTheFolderNeverReceived(unittest.TestCase):
+    """The guard that only matters once the folder door and retention are both on.
+
+    A client that polls a directory has no mailbox to fall back on: if
+    retention ages out a message before it was written, that message is gone
+    with nothing to say so. So with a pickup directory configured, a message is
+    prunable only once `written_at` is set.
+
+    Driven on a connection for the same reason as `WhatRetentionDaysRemoves`:
+    these timestamps are real UTC and moving the bank clock would not age them.
+    """
+
+    def setUp(self):
+        self.conn = db.connect(":memory:")
+        db.seed(self.conn)
+        self.addCleanup(self.conn.close)
+
+    def old(self, days):
+        return db.stamp(db.utcnow() - datetime.timedelta(days=days))
+
+    def add_message(self, written):
+        """Released and collected forty days ago; written, or not."""
+        self.conn.execute(
+            "INSERT INTO message (type, account, due_at, released_at, taken_at,"
+            " written_at, body) VALUES ('pain.002.001.10', 'ACME', ?, ?, ?, ?,"
+            " '<Document/>')",
+            (self.old(40), self.old(40), self.old(40),
+             self.old(40) if written else None))
+        self.conn.commit()
+
+    def test_an_unwritten_message_stays_however_old(self):
+        self.add_message(written=False)
+        db.prune(self.conn, retention_days=7, require_written=True)
+        self.assertEqual(db.count(self.conn, "message"), 1)
+
+    def test_once_it_has_been_written_it_ages_out_as_before(self):
+        # The other half: the guard delays a message, it does not exempt it.
+        self.add_message(written=True)
+        removed = db.prune(self.conn, retention_days=7, require_written=True)
+        self.assertEqual(removed.get("message"), 1)
+        self.assertEqual(db.count(self.conn, "message"), 0)
+
+    def test_without_the_guard_the_unwritten_message_goes(self):
+        # Without this, the two tests above would also pass if `require_written`
+        # did nothing at all and no mock ever wrote `written_at`.
+        self.add_message(written=False)
+        removed = db.prune(self.conn, retention_days=7)
+        self.assertEqual(removed.get("message"), 1)
+
+    def test_a_pruned_statement_message_still_clears_its_reference(self):
+        # The guard narrows which messages go; it must not let one go while
+        # leaving a statement pointing at it.
+        self.add_message(written=True)
+        message_id = db.one(self.conn, "SELECT id FROM message")["id"]
+        self.conn.execute(
+            "INSERT INTO statement (account, day, number, opening, closing,"
+            " entries, message_id) VALUES ('ACME', '2026-01-02', 1, 0, 0, 0, ?)",
+            (message_id,))
+        self.conn.commit()
+        db.prune(self.conn, retention_days=7, require_written=True)
+        self.assertIsNone(
+            db.one(self.conn, "SELECT message_id FROM statement")["message_id"])
+
+
+class ThePickupDirectoryTurnsTheGuardOn(MockServerCase):
+    """That the rule above is wired to the flag, not just available.
+
+    Two mocks, one with a pickup directory and one without, and the same row
+    put into each. A guard nothing switches on is the failure this catches.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pickup = tempfile.mkdtemp()
+        cls.config_kwargs = dict(cls.config_kwargs, pickup_dir=cls.pickup,
+                                 retention_days=7)
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(cls.pickup, ignore_errors=True)
+
+    def unwritten_message(self):
+        """A message released and collected long ago that was never written."""
+        state = self.httpd.state
+        old = db.stamp(db.utcnow() - datetime.timedelta(days=40))
+        with state.lock:
+            state.conn.execute(
+                "INSERT INTO message (type, account, due_at, released_at,"
+                " taken_at, written_at, body) VALUES ('pain.002.001.10',"
+                " 'ACME', ?, ?, ?, NULL, '<Document/>')", (old, old, old))
+            state.conn.commit()
+            return db.count(state.conn, "message")
+
+    def test_it_is_not_pruned_while_the_folder_has_not_had_it(self):
+        before = self.unwritten_message()
+        self.httpd.state.prune()
+        with self.httpd.state.lock:
+            self.assertEqual(db.count(self.httpd.state.conn, "message"), before)
+
+
+class WithNoPickupDirectoryNothingWaits(MockServerCase):
+    """The same row on a mock with no pickup directory: it ages out.
+
+    `written_at` is NULL on every message a mock without a pickup directory
+    ever wrote, so a guard that ignored the flag would switch retention off
+    entirely and this is what would notice.
+    """
+
+    config_kwargs = {"retention_days": 7}
+
+    def test_an_old_collected_message_still_goes(self):
+        state = self.httpd.state
+        old = db.stamp(db.utcnow() - datetime.timedelta(days=40))
+        with state.lock:
+            state.conn.execute(
+                "INSERT INTO message (type, account, due_at, released_at,"
+                " taken_at, written_at, body) VALUES ('pain.002.001.10',"
+                " 'ACME', ?, ?, ?, NULL, '<Document/>')", (old, old, old))
+            state.conn.commit()
+        state.prune()
+        with state.lock:
+            self.assertEqual(db.count(state.conn, "message"), 0)
+
 
 
 if __name__ == "__main__":
