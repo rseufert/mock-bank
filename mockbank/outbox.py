@@ -34,12 +34,27 @@ from typing import Any, Dict, List
 from . import accounts, db, messages
 
 
-def queue_status(conn, decision, file_id, now, delay_ms=0) -> List[Dict[str, Any]]:
-    """Queue the ``pain.002`` for a decided and booked file; what was queued."""
-    if not decision.reported or decision.msg_id is None or file_id is None:
+def queue_status(conn, decision, file_id, now, delay_ms=0,
+                 source="") -> List[Dict[str, Any]]:
+    """Queue the ``pain.002`` for a decided file; what was queued.
+
+    A file refused before it had a ``MsgId`` is not booked, so it has no
+    ``file_id``, and is still answered: one pipeline, two doors, one answer
+    (#64). Over HTTP the refusal is in the response too, but a folder client
+    has only the pickup directory. Its ``pain.002`` is numbered from its own
+    sequence, and names ``source``, the dropped file, if there is one.
+    """
+    if not decision.reported:
         return []
-    msg_id = "MB-P002-%06d" % file_id
-    body = messages.write_pain002(decision, msg_id, now)
+    if file_id is not None:
+        msg_id = "MB-P002-%06d" % file_id
+    elif decision.msg_id is None and decision.rejected_outright:
+        if _silent(conn, decision):
+            return []
+        msg_id = "MB-P002-N%06d" % db.next_value(conn, "pain002-unread")
+    else:
+        return []
+    body = messages.write_pain002(decision, msg_id, now, source)
     due = now + datetime.timedelta(milliseconds=delay_ms)
     # A file with batches from several debtor accounts gets one pain.002, and
     # it is attributed to the first debtor account the bank holds; the
@@ -56,6 +71,16 @@ def queue_status(conn, decision, file_id, now, delay_ms=0) -> List[Dict[str, Any
         (messages.PAIN002.name, debtor, file_id, db.stamp(due), body.decode("utf-8")))
     return [{"id": cursor.lastrowid, "type": messages.PAIN002.name, "account": debtor,
              "due_at": db.stamp(due)}]
+
+
+def _silent(conn, decision) -> bool:
+    """Whether a debtor the bank could read is ``silent``, which sends nothing."""
+    batches = decision.payment_file.batches if decision.payment_file else []
+    for batch in batches:
+        held = accounts.by_iban(conn, batch.debtor_account or "")
+        if held and held["behaviour"] == "silent":
+            return True
+    return False
 
 
 def upcoming(conn, file_id) -> List[Dict[str, Any]]:

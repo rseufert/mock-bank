@@ -219,7 +219,12 @@ def _reason(code, text):
     return out
 
 
-def write_pain002(decision, msg_id, created_at) -> bytes:
+# ISO 20022's value for a mandatory identifier the sender does not know: what
+# a status report names as the original when the file had no MsgId to read.
+NOT_PROVIDED = "NOTPROVIDED"
+
+
+def write_pain002(decision, msg_id, created_at, source="") -> bytes:
     """The status report for a decided file: ``pain.002.001.10``.
 
     ``OrgnlGrpInfAndSts`` carries the original ``MsgId`` and the group status
@@ -227,17 +232,27 @@ def write_pain002(decision, msg_id, created_at) -> bytes:
     its reason only. Otherwise there is one ``OrgnlPmtInfAndSts`` per batch,
     with the batch's own status, and a ``TxInfAndSts`` per payment carrying
     ``OrgnlEndToEndId``, ``TxSts`` and, for a rejection, ``StsRsnInf/Rsn/Cd``.
+
+    A file that could not be read far enough to have a ``MsgId`` - or to be a
+    ``pain.001`` at all - is reported as ``NOTPROVIDED`` rather than under an
+    identifier the bank made up (#64). ``source``, the name of a dropped file,
+    goes in ``AddtlInf``: for a folder client it is the only thing left to
+    match the refusal to.
     """
     payment_file = decision.payment_file
-    payments = payment_file.payments
-    group = {"OrgnlMsgId": payment_file.msg_id,
-             "OrgnlMsgNmId": payment_file.message,
-             "OrgnlNbOfTxs": len(payments),
-             "OrgnlCtrlSum": _decimal_sum((p.amount, p.currency) for p in payments
-                                          if p.amount is not None),
-             "GrpSts": decision.status}
+    payments = payment_file.payments if payment_file else []
+    group = {"OrgnlMsgId": (payment_file and payment_file.msg_id) or NOT_PROVIDED,
+             "OrgnlMsgNmId": (payment_file and payment_file.message) or NOT_PROVIDED}
+    if payment_file:
+        group["OrgnlNbOfTxs"] = len(payments)
+        group["OrgnlCtrlSum"] = _decimal_sum((p.amount, p.currency) for p in payments
+                                             if p.amount is not None)
+    group["GrpSts"] = decision.status
     if decision.rejected_outright:
-        group["StsRsnInf"] = [_reason(decision.reason, decision.reason_text)]
+        reason = _reason(decision.reason, decision.reason_text)
+        if source:
+            reason.setdefault("AddtlInf", []).append(("file %s" % source)[:105])
+        group["StsRsnInf"] = [reason]
     batches = []
     if not decision.rejected_outright:
         for batch in payment_file.batches:

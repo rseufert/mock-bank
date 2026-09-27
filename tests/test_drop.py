@@ -180,6 +180,21 @@ class AFileTheBankCannotPutThrough(DropCase):
         self.assertIn("RJCT", text)
         self.assertIn("FF01", text)
 
+    def test_an_unreadable_file_is_answered_in_the_pickup_directory(self):
+        # A folder client has no HTTP response to read: the pain.002 is its
+        # only answer, and the file's name is all it has to match it to (#64).
+        self.drop_file("rubbish.xml", "this is not XML at all")
+        self.scan()
+        written = self.listing(self.pickup)
+        self.assertEqual(len(written), 1, written)
+        # No account could be read, so the name falls back to the bank's.
+        self.assertTrue(written[0].startswith("pain.002.001.10-bank-"), written)
+        with open(os.path.join(self.pickup, written[0]), encoding="utf-8") as handle:
+            text = handle.read()
+        for expected in ("<GrpSts>RJCT</GrpSts>", "<Cd>FF01</Cd>",
+                         "<OrgnlMsgId>NOTPROVIDED</OrgnlMsgId>", "file rubbish.xml"):
+            self.assertIn(expected, text)
+
     def test_a_duplicate_lands_in_failed_too(self):
         # Rejected at group level: the bank could not put the file through, so
         # it is somebody's to look at.
