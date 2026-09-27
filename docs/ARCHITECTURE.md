@@ -2,7 +2,7 @@
 
 If you want to know *what each file is*, read [FILES.md](FILES.md). This
 document is about why the pieces are shaped the way they are. It describes
-what 0.1 actually does; the two or three things it deliberately does not do yet
+what 0.2 actually does; the two or three things it deliberately does not do yet
 are named as such, and the issue that builds each one is the place to argue
 with it.
 
@@ -23,8 +23,12 @@ self-consistent.
 
 ## One pipeline, two doors
 
-A `pain.001` arrives by `POST /payments`; a drop directory is the second door
-and is 0.2. The pipeline is read, validate, decide, book, queue.
+A `pain.001` arrives by `POST /payments`, or it is dropped into `--drop-dir`.
+Both doors call `State.receive`, which is the pipeline: read, validate, decide,
+book, queue. The folder door was written second and the pipeline was pulled out
+of the HTTP handler to make room for it, rather than the handler being called
+with a fabricated request - two doors that agree because there is only one
+thing behind them, not because two code paths were kept in step.
 `accounts.decide` reads the behaviour of whichever account the rule is about -
 debtor-side ones from the debtor, `closed-account` and `bad-bank-id` from a
 creditor account the bank holds - and produces an outcome and a reason code per
@@ -34,6 +38,14 @@ receipt, and the `camt.054` and `camt.053` are written as the clock reaches
 them rather than predicted in advance, because a later file can add payments to
 the same account and day.
 
+The way out is the same shape. Every message the bank releases is a row, and
+`--pickup-dir` is a view of the released rows that have not been written yet:
+`drop.write_released` asks the database rather than being handed the rows by
+whoever released them, so a release path added later cannot forget to deliver,
+and `message.written_at` is a column rather than a set in memory, so a restart
+on `--db` does not write the whole history out again. The mailbox and the pickup
+directory are two readers of one table, not two queues.
+
 ## A clock, not a sleep
 
 Nothing in the mock waits. Settlement dates, the cutoff (15:00 by default),
@@ -41,7 +53,10 @@ weekends and holidays are all computed against a bank-time clock that
 `POST /_mock/advance` moves; `clock.py` knows nothing about payments, and what
 happens when a date arrives belongs to the hooks the pipeline registers in
 `on_advance`. Advancing books what came due, writes the notifications for it,
-and closes a statement for every business day whose end it passed. The clock
+closes a statement for every business day whose end it passed, and delivers
+whatever that released into `--pickup-dir`. The order is load-bearing:
+statements read the entries the advance has just booked, and the delivery reads
+what both of them released. The clock
 holds an offset from real time rather than a stored instant, so it keeps ticking
 between advances; and it does not go backwards, because whatever was queued for
 a date it had passed would come due a second time. A return is the same idea
@@ -55,7 +70,10 @@ is a test line.
 The control plane can reset the bank, rewrite every balance and behaviour and
 read every message it wrote, so `--auth` puts HTTP basic on every request
 including `/_mock/health` - a mock that answers an unauthenticated probe has
-told whoever is probing that it is there. The check runs before the body is
+told whoever is probing that it is there. The folder door is not covered by it:
+a file in the drop directory carries no credentials and is processed on its
+own, because what guards a directory is the filesystem. That is true of a real
+SFTP drop as well, and it means `--auth` alone does not close both doors. The check runs before the body is
 read and before routing, so an unauthenticated file is never parsed and a `404`
 cannot be used to map what exists. Binding an address other machines can reach
 without `--auth` says so on stderr at startup, and `-q` does not silence it.
@@ -63,9 +81,17 @@ without `--auth` says so on stderr at startup, and `-q` does not silence it.
 ## Findings, not exceptions
 
 Validation produces findings: an element path, a code, a sentence. The same
-finding renders as a `pain.002` reason and as prose from `/_mock/validate`. A
-file the mock cannot read still gets a `pain.002` saying why, because that is
-what a bank does.
+finding renders as a `pain.002` reason and as prose from `/_mock/validate`.
+
+A file the mock cannot read is answered rather than dropped, but the two doors
+answer differently, and the difference is worth knowing before you build
+against one. Over HTTP the refusal comes back as a `pain.002` in the response
+itself. Through the drop directory there is nobody to answer, so the file is
+filed under `failed/` with a `<name>.findings.txt` beside it; no message row is
+written, so nothing about it reaches the mailbox or `--pickup-dir`. A real SFTP
+drop returns a status file, so this is a difference to close rather than a
+design, and it needs a decision about the pipeline rather than about the
+directory.
 
 ## What is deliberately absent
 
