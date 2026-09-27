@@ -98,15 +98,14 @@ without `--auth` says so on stderr at startup, and `-q` does not silence it.
 Validation produces findings: an element path, a code, a sentence. The same
 finding renders as a `pain.002` reason and as prose from `/_mock/validate`.
 
-A file the mock cannot read is answered rather than dropped, but the two doors
-answer differently, and the difference is worth knowing before you build
-against one. Over HTTP the refusal comes back as a `pain.002` in the response
-itself. Through the drop directory there is nobody to answer, so the file is
-filed under `failed/` with a `<name>.findings.txt` beside it; no message row is
-written, so nothing about it reaches the mailbox or `--pickup-dir`. A real SFTP
-drop returns a status file, so this is a difference to close rather than a
-design, and it needs a decision about the pipeline rather than about the
-directory.
+A file the mock cannot read is answered rather than dropped, and both doors
+answer it the same way: a `pain.002` queued like any other, which reaches the
+mailbox and `--pickup-dir`. A file with no `MsgId` is not booked, since there is
+nothing a duplicate check could match it on, so its report names the original as
+`NOTPROVIDED` and, for a dropped file, carries the file's name. Through the drop
+directory there is no caller to hand the answer to, so the status message is
+the only answer a folder client gets, which is why the pipeline, not the door,
+writes it (#64).
 
 ## What is deliberately absent
 

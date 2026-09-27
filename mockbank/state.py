@@ -141,7 +141,7 @@ class State:
         if self.dropbox is not None:
             self.dropbox.write_released()
 
-    def receive(self, body: bytes, content_type: str = ""):
+    def receive(self, body: bytes, content_type: str = "", source: str = ""):
         """The pipeline, once: read, validate, decide, book, queue, release.
 
         `ARCHITECTURE.md` says one pipeline fed by two doors, and this is the
@@ -149,7 +149,8 @@ class State:
         it with the bytes of a file; neither knows anything the other does not,
         which is the only way the claim stays true. Returns the same answer the
         endpoint serves, and the findings, which the drop directory writes out
-        beside a file it could not put through.
+        beside a file it could not put through. ``source`` is a dropped file's
+        name, which a refusal's ``pain.002`` carries.
         """
         conn, now, today = self.conn, self.now(), self.today()
         payment_file, findings = validate.inspect(body, content_type, today)
@@ -157,7 +158,7 @@ class State:
                                    self.config.allow_duplicates)
         file_id = accounts.book(conn, decision)
         queued = outbox.queue_status(conn, decision, file_id, now,
-                                     self.config.status_delay_ms)
+                                     self.config.status_delay_ms, source)
         released = {row["id"] for row in self.release()}
         queued = [dict(q, released=q["id"] in released) for q in queued]
         queued += outbox.upcoming(conn, file_id) if file_id else []

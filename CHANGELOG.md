@@ -94,6 +94,18 @@ says so where it does.
 
 ### Fixed
 
+- **A file the bank cannot read now gets a `pain.002` through either door**
+  (#64). A body with no `MsgId` used to be answered only in the HTTP response
+  (#26), so a client banking through `--drop-dir` got prose in `failed/` and
+  nothing in `--pickup-dir`. Now the refusal is queued as a message like any
+  other `pain.002`: `RJCT` with its reason, `OrgnlMsgId` (and `OrgnlMsgNmId`,
+  when the message type could not be read either) `NOTPROVIDED` rather than an
+  identifier the bank made up, and a dropped file's name in
+  `StsRsnInf/AddtlInf`. It reaches the mailbox and the pickup directory, and
+  `POST /payments` lists it in `queued`. It is filed under the debtor's account
+  when one could be read, and as `bank` when none could. A `silent` debtor still
+  hears nothing, and a `DUPL` refusal, which has a `MsgId`, is unchanged.
+
 - **Three answers from the old router, which the route table (#44) no longer
   gives.** `server.py` is split into `handler.py`, `state.py` and one module
   per surface under `routes/`, with every endpoint in one table. Moving the

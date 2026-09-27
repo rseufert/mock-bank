@@ -190,8 +190,11 @@ The `camt.054` profile is a choice too: the mock sends one debit notification
 per account each time payments book - on receipt when the settlement date is
 today, or when the clock crosses it - with an entry per payment, rather than one
 notification per payment. Both are common; this is the one it follows. A body
-the mock cannot read far enough to find a `MsgId` gets no `pain.002`, because a
-status report has to name the message it reports on; `POST /payments` says so.
+the mock cannot read far enough to find a `MsgId` still gets a `pain.002`,
+`RJCT` with the reason, and names the original as `NOTPROVIDED`: the ISO 20022
+convention for a mandatory identifier the sender did not give. The bank does not
+invent one. A dropped file's name goes in `StsRsnInf/AddtlInf`, since that is all
+a folder client has to match the refusal to.
 
 Each payment keeps its `EndToEndId` through every message, so a client can
 match a status, a statement line and a return to the invoice it paid.
@@ -391,7 +394,10 @@ bank's processed folder holds. Either way, the answer is written beside the file
 `<name>.findings.txt`: the group status and `MsgId`, how many were accepted and
 rejected, and a line per payment with its `EndToEndId`, outcome and reason code.
 Where there are findings, those lines are the prose `POST /_mock/validate`
-prints. So you do not have to ask the mock what became of the file.
+prints. So you do not have to ask the mock what became of the file. The
+`pain.002` lands in `--pickup-dir` as well, even for a file the bank could not
+read at all, named `pain.002.001.10-bank-<n>.xml` when no debtor account could
+be read from it.
 
 Two things every folder integration gets wrong, which this handles rather than
 leaves to bite you:
