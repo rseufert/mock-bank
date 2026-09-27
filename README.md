@@ -499,15 +499,25 @@ stderr at startup if you do not. `-q` does not silence that warning.
 ## Layout
 
 ```
-mockbank/accounts.py   the account behaviours, and what a valid account is
-mockbank/clock.py      bank time: the cutoff, business days, holidays, and advancing
-mockbank/drop.py       the second door: a directory watched, and one written
-mockbank/db.py         the schema, the upgrade, and the seeded accounts
-mockbank/messages.py   reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
-mockbank/outbox.py     what the bank sends and when: the message queue, release as the clock moves, the mailbox
-mockbank/schema.py     the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
-mockbank/server.py     the HTTP surface: the control plane, the dictionary, the accounts, the pipeline and the mailbox
-mockbank/validate.py   findings about a payment file: refusals, structure, and the mock's own checks
+mockbank/accounts.py           the account behaviours, and what a valid account is
+mockbank/clock.py              bank time: the cutoff, business days, holidays, and advancing
+mockbank/drop.py               the second door: a directory watched, and one written
+mockbank/db.py                 the schema, the upgrade, and the seeded accounts
+mockbank/handler.py            the request handler: authentication, the body, the request log, and the lookup in the route table
+mockbank/messages.py           reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
+mockbank/outbox.py             what the bank sends and when: the message queue, release as the clock moves, the mailbox
+mockbank/routes/__init__.py    the route table: each surface registers method, path pattern and function
+mockbank/routes/control.py     health, state, reset, behaviours, the dictionary and the index page
+mockbank/routes/accounts.py    the accounts and their statements
+mockbank/routes/clock.py       advancing bank time, and the holidays
+mockbank/routes/payments.py    POST /payments, and /_mock/payments
+mockbank/routes/mailbox.py     the mailbox, and the request log
+mockbank/routes/validate.py    POST /_mock/validate
+mockbank/routes/transport.py   the folder transport's state, and a scan on demand
+mockbank/schema.py             the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
+mockbank/server.py             Config, and make_server, which puts the state, the handler and the routes together
+mockbank/state.py              what survives between requests: the database, the clock, the lock, and the pipeline both doors feed
+mockbank/validate.py           findings about a payment file: refusals, structure, and the mock's own checks
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
