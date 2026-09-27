@@ -7,6 +7,7 @@ import json
 import os
 import re
 import unittest
+from unittest import mock
 from xml.etree import ElementTree as ET
 
 from support import MockServerCase
@@ -336,6 +337,91 @@ class ExternalSamples(unittest.TestCase):
         for path in glob.glob(os.path.join(EXTERNAL, "**", "*.xml"), recursive=True):
             relative = os.path.relpath(path, EXTERNAL).replace(os.sep, "/")
             self.assertIn("`%s`" % relative, sources, "no source recorded for " + relative)
+
+
+class FetchingTheXSDs(unittest.TestCase):
+    """tools/check_xsd.py rides out a network blip and not a wrong pin (#60).
+
+    The network is stood in for: `urlopen` and `time.sleep` are patched, the
+    cache is a temporary directory and the pin is made up here, so nothing is
+    fetched and nothing real is overwritten. Everything is patched through
+    `mock.patch.object`, which puts it back - these are modules the whole run
+    shares.
+    """
+
+    DATA = b"<xs:schema/>"
+
+    def setUp(self):
+        import hashlib
+        import importlib.util
+        import shutil
+        import tempfile
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "check_xsd.py")
+        spec = importlib.util.spec_from_file_location("check_xsd_under_test", path)
+        self.tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.tool)
+        cache = tempfile.mkdtemp(prefix="mock-bank-xsd-")
+        self.addCleanup(shutil.rmtree, cache, True)
+        self.url = "https://example.invalid/test.xsd"
+        self.patch(self.tool, "CACHE", cache)
+        self.patch(self.tool, "XSDS", {"test": (self.url, hashlib.sha256(self.DATA).hexdigest())})
+        self.pauses = []
+        self.patch(self.tool.time, "sleep", self.pauses.append)     # noted, not slept
+        self.calls = 0
+
+    def patch(self, target, name, value):
+        patcher = mock.patch.object(target, name, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def network(self, fail_first=0, body=None):
+        """An urlopen that fails `fail_first` times, then answers `body`."""
+        import io
+        import urllib.error
+
+        def urlopen(url, timeout=None):
+            self.calls += 1
+            if self.calls <= fail_first:
+                raise urllib.error.URLError("the network, standing in")
+            return io.BytesIO(self.DATA if body is None else body)
+        self.patch(self.tool.urllib.request, "urlopen", urlopen)
+
+    def test_a_fetch_that_fails_twice_and_then_succeeds_passes(self):
+        self.network(fail_first=2)
+        path = self.tool.fetch("test")
+        self.assertIsNotNone(path)
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), self.DATA)
+        self.assertEqual(self.calls, 3)
+        self.assertEqual(self.pauses, [0.5, 1.0])          # growing, and only between tries
+
+    def test_a_fetch_that_always_fails_says_how_hard_it_tried(self):
+        import contextlib
+        import io
+        import sys
+        self.network(fail_first=99)
+        self.assertIsNone(self.tool.fetch("test"))
+        self.assertEqual(self.calls, self.tool.ATTEMPTS)
+        # and main's note under --require names the attempts, the URL and the hash
+        self.patch(sys, "argv", ["check_xsd.py", "--require"])
+        self.patch(self.tool.schema, "MESSAGES", {})       # nothing to compare
+        self.patch(self.tool.shutil, "which", lambda name: None)   # nothing to validate
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.tool.main(), 1)
+        note = out.getvalue()
+        self.assertIn("after %d attempts" % self.tool.ATTEMPTS, note)
+        self.assertIn(self.url, note)
+        self.assertIn(self.tool.XSDS["test"][1], note)
+
+    def test_a_wrong_hash_fails_on_the_first_attempt(self):
+        self.network(body=b"not the pinned file")
+        with self.assertRaises(SystemExit) as caught:
+            self.tool.fetch("test")
+        self.assertIn(self.url, str(caught.exception))
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.pauses, [])
 
 
 if __name__ == "__main__":
