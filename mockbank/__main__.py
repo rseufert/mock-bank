@@ -8,6 +8,7 @@ import sys
 from . import __version__
 from .accounts import BEHAVIOURS
 from .clock import DEFAULT_CUTOFF, Invalid
+from .db import Unusable
 from .drop import Invalid as DropInvalid
 from .server import Config, make_server
 
@@ -41,6 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "Without it, anyone who can reach the port can POST "
                         "/_mock/reset, rewrite every account and read every "
                         "message")
+    p.add_argument("--keep-requests", type=int, default=5000, metavar="N",
+                   help="keep only the newest N rows of the request log, so a "
+                        "mock left running for weeks stays bounded (default: "
+                        "5000; 0 keeps every row)")
+    p.add_argument("--retention-days", type=float, default=0.0, metavar="D",
+                   help="remove request-log rows and already-collected messages "
+                        "older than D days (default: off). Payments, files and "
+                        "uncollected messages are never removed: they are the "
+                        "evidence a failing test is read against")
     p.add_argument("--drop-dir", default="", metavar="PATH",
                    help="a directory to watch for payment files, fed to the "
                         "same pipeline as POST /payments; read files move to "
@@ -132,6 +142,8 @@ def main(argv=None) -> int:
                     quiet=args.quiet, timezone=args.timezone, cutoff=args.cutoff,
                     clock=args.clock, allow_duplicates=args.allow_duplicates,
                     status_delay_ms=args.status_delay_ms, auth=args.auth,
+                    keep_requests=args.keep_requests,
+                    retention_days=args.retention_days,
                     drop_dir=args.drop_dir, pickup_dir=args.pickup_dir,
                     drop_settle_ms=args.drop_settle_ms,
                     drop_interval_ms=args.drop_interval_ms)
@@ -151,11 +163,14 @@ def main(argv=None) -> int:
         print(warning, file=sys.stderr, flush=True)
     try:
         httpd = make_server(config)
-    except (Invalid, DropInvalid) as error:
-        # A clock the mock cannot keep, or a folder pair it cannot honour, is
-        # refused at startup rather than at the first payment: every settlement
-        # date in the run depends on the one, and the other would have the bank
-        # reading its own output back.
+    except (Invalid, DropInvalid, Unusable) as error:
+        # Everything the mock cannot start with, refused here rather than at
+        # the first payment, the first file or the first prune: a clock it
+        # cannot keep, a folder pair that would have it reading its own output
+        # back, and a retention setting it cannot act on. A mistyped
+        # --retention-days used to be silently "off", which is the worst of
+        # those outcomes - the operator believes the mock is bounded and it is
+        # not.
         print("mock-bank: %s" % error, file=sys.stderr, flush=True)
         return 2
     except OSError as error:

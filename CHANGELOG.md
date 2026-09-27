@@ -10,6 +10,31 @@ says so where it does.
 
 ### Added
 
+- **Retention for a long-running mock** (#17). A mock left up as a shared
+  staging bank had a request log and a message table that grew without end, and
+  the only remedy was `POST /_mock/reset`, which throws the accounts away with
+  them. `--keep-requests N` (default 5000) keeps the newest N request-log rows
+  and `--retention-days D` (default off) removes request rows and
+  already-collected messages older than D days, trimmed at startup, after each
+  advance and every few hundred requests - so the default in-memory bank is
+  untouched. `GET /_mock/state` reports what has been removed, so a tester who
+  wonders where their rows went can look rather than guess. Payments, files,
+  *uncollected* messages, accounts, holidays and counters are never pruned: the
+  first two are the evidence a failing test is read against, an uncollected
+  message is the one thing a mailbox exists to hold, and the rest are what the
+  mock is rather than a record of what it did. The indexes the issue also asked
+  for turned out to be there already, so the tests now hold them in place by
+  name against the query plans. A message's age is measured on the *bank* clock,
+  because that is what wrote its `taken_at`; the request log's age is real
+  elapsed time, because that is when the request arrived. Pruning a `camt.053`
+  clears the statement's reference to it rather than leaving one that answers
+  `404`, and a `--retention-days` the mock cannot act on - `nan`, `inf`, a
+  negative, or a century and a half - is refused at startup instead of crashing
+  or being silently off. With a `--pickup-dir` configured, retention only
+  removes a message the folder has actually been given: aging out one the
+  directory never received would lose it silently, because a client that polls a
+  directory has no other way to see it.
+
 - **A worked example with mock-edi** (#35). `examples/pay_invoices.py` pays
   the supplier invoices mock-edi sends as EDIFACT `INVOIC`s: one `pain.001`,
   each payment on its invoice's due date, then the `pain.002`, `camt.054` and
