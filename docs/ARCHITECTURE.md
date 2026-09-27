@@ -74,8 +74,9 @@ function is called with the handler and each placeholder's segment. `handler.py`
 authenticates, reads the body, takes the lock and looks the request up in that
 one table. It knows nothing about any endpoint. A path the table does not have
 is a `404` that names what it does have. A path it has only with other methods
-is a `405` naming those methods. So adding an endpoint touches one file under
-`routes/`, plus `SUPPORTED` for the index until #45 derives that from the table.
+is a `405` naming those methods. The index page, the `404` body and `/_mock/state` list
+what the table holds, so adding an endpoint touches one file under `routes/`,
+and `tools/check_docs.py` fails until the README's endpoint table has its row.
 What lasts between requests, the connection, the clock and the pipeline, is
 `State` in `state.py`, which the routes reach as `h.state`.
 

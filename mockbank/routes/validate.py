@@ -5,7 +5,9 @@ from .. import validate
 from . import route
 
 
-@route("POST", "/_mock/validate")
+@route("POST", "/_mock/validate",
+       note=("send a pain.001, get its findings as prose, one line each; "
+            "nothing is stored"))
 def validate_file(h) -> None:
     """The findings as prose, one line each, or as JSON when asked for."""
     payment_file, findings = validate.inspect(

@@ -7,7 +7,8 @@ from .. import clock as clock_module
 from . import first, route
 
 
-@route("POST", "/_mock/advance")
+@route("POST", "/_mock/advance",
+       note="move bank time: ?days=N (calendar days) or ?to=YYYY-MM-DD")
 def advance(h) -> None:
     """Move bank time, then let whatever came due happen.
 
@@ -49,7 +50,8 @@ def holidays(h) -> None:
     h.json(200, h.state.clock.snapshot()["holidays"])
 
 
-@route("PUT", "/_mock/holidays")
+@route("PUT", "/_mock/holidays",
+       note="a JSON list of YYYY-MM-DD dates the bank does not settle on")
 def set_holidays(h) -> None:
     """The days the bank does not settle on, as a JSON list of dates.
 

@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any, Dict
 
 from . import __version__, accounts, clock as clock_module, db, drop, outbox, validate
 from .accounts import BEHAVIOURS
-from .routes.control import PLANNED, SUPPORTED
+from .routes import SUPPORTED
+from .routes.control import PLANNED
 
 if TYPE_CHECKING:                          # pragma: no cover
     from .server import Config
@@ -90,7 +91,6 @@ class State:
                 self.pruned[table] = self.pruned.get(table, 0) + count
             self.requests_since_prune = 0
         return removed
-        self.deliver()
 
     def _holidays(self):
         return [row["day"] for row in db.rows(
