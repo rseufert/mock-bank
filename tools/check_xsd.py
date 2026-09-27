@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from xml.etree import ElementTree as ET
@@ -74,17 +75,37 @@ XSDS = {
 }
 
 
-def fetch(message):
-    """The local path of a message's XSD, fetching it once; None if it cannot."""
+# How many times a fetch is tried, and the pause before the first retry; each
+# later pause is twice the one before. A fetch that failed once turned a
+# pull request's docs job red for a reason unrelated to the pull request (#60),
+# and a check people learn to re-run without reading is worse than no check.
+ATTEMPTS = 3
+PAUSE = 0.5
+
+
+def fetch(message, attempts=ATTEMPTS, pause=PAUSE):
+    """The local path of a message's XSD, fetching it once; None if it cannot.
+
+    A network failure is retried, up to `attempts` tries with a growing pause
+    between them. A file that arrives with the wrong hash is not: that is the
+    pin, not the network, and it stops the check at once.
+    """
     url, digest = XSDS[message]
     path = os.path.join(CACHE, message + ".xsd")
     if os.path.exists(path) and _sha256(path) == digest:
         return path
     os.makedirs(CACHE, exist_ok=True)
-    try:
-        with urllib.request.urlopen(url, timeout=30) as response:
-            data = response.read()
-    except (urllib.error.URLError, OSError):
+    data = None
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(pause * 2 ** (attempt - 1))
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                data = response.read()
+            break
+        except (urllib.error.URLError, OSError):
+            continue
+    if data is None:
         return None
     if hashlib.sha256(data).hexdigest() != digest:
         raise SystemExit("%s is not the file this check was pinned to; refusing to "
@@ -261,7 +282,8 @@ def main():
     missing = sorted(name for name, path in paths.items() if path is None)
     if missing:
         # URL and hash both, so a re-pin is copy and paste.
-        skipped.append("could not fetch the XSD for %s:\n%s" % (", ".join(missing), "\n".join(
+        skipped.append("could not fetch the XSD for %s after %d attempts each:\n%s" % (
+            ", ".join(missing), ATTEMPTS, "\n".join(
             "      %s\n        from %s\n        sha256 %s" % (name, XSDS[name][0], XSDS[name][1])
             for name in missing)))
 

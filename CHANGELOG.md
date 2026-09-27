@@ -35,6 +35,13 @@ says so where it does.
   directory never received would lose it silently, because a client that polls a
   directory has no other way to see it.
 
+- **A worked example with mock-edi** (#35). `examples/pay_invoices.py` pays
+  the supplier invoices mock-edi sends as EDIFACT `INVOIC`s: one `pain.001`,
+  each payment on its invoice's due date, then the `pain.002`, `camt.054` and
+  `camt.053` matched back by `EndToEndId` and `MsgId`. Seven tests in
+  `examples/test_pay_invoices.py` cover a clean run, `AC04`, a duplicate
+  invoice, a run retried after a crash (`DUPL`), `AM04`, a return and a
+  statement gap. CI's smoke job runs them against mock-edi from PyPI.
 - **Returns** (#14). Under `return-later` a payment settles as usual and then
   comes back `days` business days later (3 by default) with `reason` (`AC04`
   by default), every payment or only the `end_to_end_id` named in the

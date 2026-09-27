@@ -3,7 +3,19 @@ name: CI
 on:
   push:
     branches: [main]
+  # `labeled` and `unlabeled` are here for one reason: the changelog check is
+  # lifted by the `no changelog` label, and the workflow reads the labels from
+  # the event. Without them, applying the label ran nothing, and re-running the
+  # failed job reused the original event - which had no label - so the only way
+  # to get a run that saw it was to close and reopen the pull request. That
+  # happened on #37.
+  #
+  # It does mean any label change re-runs everything. The concurrency group
+  # below is keyed on the ref, which for a pull request is refs/pull/N/merge,
+  # so a label change cancels the run in progress for that pull request rather
+  # than queueing a second one beside it.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -104,6 +116,21 @@ jobs:
             sleep 0.25
           done
           python examples/client.py --base http://127.0.0.1:8082
+      - name: Run the pay_invoices example against mock-edi from PyPI
+        run: |
+          set -euo pipefail
+          python -m pip install mock-edi
+          mock-edi --port 8080 -q &
+          EDI_PID=$!
+          python -m mockbank --port 8090 -q &
+          BANK_PID=$!
+          trap 'kill $EDI_PID $BANK_PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8080/_mock/health >/dev/null \
+              && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
+            sleep 0.25
+          done
+          cd examples && python -m unittest -v test_pay_invoices
       - name: The tour again, against a mock trading through a folder
         run: |
           set -eu
