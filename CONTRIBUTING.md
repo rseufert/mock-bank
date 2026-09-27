@@ -69,19 +69,37 @@ that from tangling:
 
 - **Your queue is your label.** Issues labelled `senior` are the senior
   developer's; issues labelled `junior` are the junior developer's. Work them
-  by priority (`P1` before `P2` before `P3`) and then by number, inside the
-  earliest open milestone. If your queue is empty, ask before pulling from
-  the other one; an issue is scoped for the person it is labelled for.
+  by priority (`P1` before `P2` before `P3`) and then in the order the
+  delegation notes give, inside the earliest open milestone. If your queue is
+  empty, ask before pulling from the other one; an issue is scoped for the
+  person it is labelled for. A later milestone is not started until the earlier
+  one is released, unless the maintainer says otherwise on the issue.
+- **Claim an issue before you start it.** The first thing you do is comment on
+  it, opening with "Taking this" and a sentence or two on the approach, and
+  comment again if the approach changes. An issue with a claim is taken and
+  nobody else starts it. This is the rule that stops two sessions from
+  building the same issue twice, so the claim goes up before the branch.
 - **One branch per issue**, named `<number>-<short-slug>` from `main`, and one
-  pull request per issue. The pull request title is the issue title and the
-  description starts with `Closes #<number>`. Do not bundle two issues into one
-  pull request, even if they touch the same file.
-- **Comment on the issue before you start** with a sentence on the approach,
-  and again if the approach changes. An issue with an open pull request is
-  yours; an issue with no comment is up for grabs by whoever it is labelled for.
+  pull request per issue. The pull request title is the issue title, the
+  description starts with `Closes #<number>`, and the milestone is set when it
+  is opened. Do not bundle two issues into one pull request, even if they touch
+  the same file.
+- **One capability per pull request.** If a pull request is heading past about
+  400 added lines, not counting fixtures and samples, say so on the issue and
+  split it: the pure functions first, then a schema column with its migration,
+  then the wiring that uses both. Each step has to leave `main` working on its
+  own. A large issue is split into its steps before anyone starts, not
+  halfway through.
 - **Say when you are blocked.** If an issue depends on another that is not
-  merged yet, say so on the issue and take the next one; do not build on an
-  unmerged branch.
+  merged yet, say so on the issue, apply the `blocked` label and take the next
+  one; do not build on an unmerged branch.
+- **Two issues on one file are sequenced up front.** When two issues touch the
+  same file, each one's delegation note says which lands first: the small one
+  lands, and the large one brings `main` in. A conflict is resolved by the
+  author of the branch it is on, never by anyone else pushing to it. Schema
+  version numbers are handed out on the issue before anyone writes a
+  migration, so that two migrations never claim the same one; ask for the next
+  number rather than reading `SCHEMA_VERSION` and adding one.
 - **Keeping up with `main`: rebase before the pull request exists, merge after.**
   While a branch is only yours, rebase it onto `main` as often as you like. Once
   a pull request is open and a review has started, bring `main` in with a merge
@@ -89,17 +107,32 @@ that from tangling:
   the commits a reviewer has already read and can lose their comments' place.
   The maintainer squashes on merge, so the merge commits do not survive into
   `main` either way. This came up on every branch in 0.1, because `main` moved
-  under each of them more than once.
+  under each of them more than once. A pull request that conflicts with `main`
+  gets no CI run at all, so a conflict is the first thing to clear, before you
+  wonder why the checks have not started.
+- **Green CI before you ask for review.** The checks are the first reader;
+  do not spend anyone else's attention on a pull request they have not passed.
 - **Do not merge.** Pull requests are merged by the maintainer, after CI is
   green and a review. Never force-push over a review; push follow-up commits
   instead. Do not tag releases or edit `pyproject.toml`'s version; that is part
   of the release.
+- **Squash is the only merge method here.** A squash lands one commit whose
+  parent is the tip of `main`, and `git branch --merged` can then tell a merged
+  branch from an unmerged one. After a rebase or a merge commit it cannot: the
+  branch's commits are either rewritten or still sitting off to the side, and
+  every later question about whether a branch is in becomes guesswork.
 - **The junior developer's pull requests get the senior developer's review
   first**, as a comment on the pull request, before the maintainer looks. The
-  senior developer's pull requests go straight to the maintainer.
+  senior developer's pull requests go straight to the maintainer. A review asks
+  whether the change is faithful to the standard, whether it holds to the
+  principles above, and whether the test it adds could actually fail.
+- **One worktree per session.** `git worktree add ../mock-bank-<slug> -b
+  <branch>` gives a session its own checkout and its own branch. Two sessions
+  sharing one checkout switch its branch under each other, and the uncommitted
+  work in it belongs to whoever looked last. This is not a style preference;
+  it has already cost this project a rewritten `server.py`.
 - **Ask on the issue, not in private.** Questions and decisions live on the
   issue so the next person can read them.
-
 ## Where things live
 
 | Adding this | Goes here | Notes |
@@ -152,6 +185,12 @@ namespaces, the message version and the reason code all matter.
 the mock's reading of a file as prose, without changing anything.
 
 ## Releasing (maintainers)
+
+A release is one step by one actor: whoever merges the release pull request
+tags that commit and publishes the GitHub Release in the same sitting. A tag
+that waits for the next person leaves `main` claiming a version that has no
+release, and a release that waits leaves a tag nothing was built from.
+Releases are the maintainer's.
 
 `pyproject.toml` is the only place the version is written;
 `mockbank.__version__` reads it back from the installed package metadata.
