@@ -91,7 +91,7 @@ not wire files.
 | File | What it is |
 | --- | --- |
 | `tools/check_docs.py` | Fails if a tracked file has no row here, if a row names a missing file, if the README's layout block misses a module, if a CLI flag is unmentioned in the README, if a behaviour has no row in the README's table, or if `docs/ARCHITECTURE.md` names a file that does not exist. |
-| `tools/check_xsd.py` | Holds the dictionary and the mock's output to the published XSDs, fetched from pinned commits and checked by SHA-256 into `tools/.xsd/`: compares every declared element with the XSD (place, order, occurrence, group or value, length), and with `xmllint` validates the project's clean samples, the external ones (and fails the invalid ones), and every message a running mock writes. Skips without a network or `xmllint`; `--require`, which CI passes, makes a skip a failure. |
+| `tools/check_xsd.py` | Holds the dictionary and the mock's output to the published XSDs, fetched from pinned commits and checked by SHA-256 into `tools/.xsd/`: compares every declared element with the XSD (place, order, occurrence, group or value, length), and with `xmllint` validates the project's clean samples, the external ones (and fails the invalid ones), and every message a running mock writes. A fetch that fails on the network is tried three times with a growing pause; one with the wrong hash stops at once. Skips without a network or `xmllint`; `--require`, which CI passes, makes a skip a failure. |
 | `tools/check_changelog.py` | Fails if the changelog is malformed, if a released section changed, if an unreleased entry vanished, or if a pull request touches `mockbank/` without adding an entry (lifted by the `no changelog` label). |
 
 ## `.github/workflows/`
