@@ -165,12 +165,25 @@ If a change touches more than one of these, it is usually two changes.
   command-line flag has no mention in the README's Configuration section, or
   if a behaviour has no row in the README's behaviour table. It checks
   coverage, not prose; keeping the prose true is on you.
-- **A line in the changelog.** `tools/check_changelog.py` fails a pull request
-  that touches `mockbank/` without adding an entry under `## [Unreleased]`. A
-  change that genuinely needs no entry can carry the `no changelog` label; say
-  in the description why, and the maintainer will apply it. Applying or removing
-  the label re-runs the checks on its own — no push and no reopen — because the
-  workflow listens for `labeled` and `unlabeled`.
+- **A changelog fragment.** An entry is its own file: `changelog.d/<issue>.<kind>.md`,
+  where kind is `added`, `changed`, `fixed` or `removed`, holding the bullet's
+  text as it would have been written under `## [Unreleased]`. Nothing goes into
+  `CHANGELOG.md` by hand; `tools/check_changelog.py --assemble` writes the
+  fragments into a release section at release time. This is a directory of small
+  files rather than one section because every pull request used to edit the same
+  lines, a conflicting pull request gets no CI run at all, and resolving that
+  conflict by hand is one keystroke from dropping somebody's entry — which has
+  happened, in a sibling project. Two pull requests now add two different files
+  and there is nothing to resolve.
+
+  `tools/check_changelog.py` fails a pull request that touches `mockbank/` and
+  adds no fragment, and refuses a fragment with an unknown kind, no issue number
+  or an empty body by name, rather than letting it look like an entry and vanish
+  at assembly. A change that genuinely needs no entry can carry the
+  `no changelog` label; say in the description why, and the maintainer will
+  apply it. Applying or removing the label re-runs the checks on its own — no
+  push and no reopen — because the workflow listens for `labeled` and
+  `unlabeled`.
 - **No new dependencies.** See above.
 - **A commit message that says what changed and why.** The why is the part a
   reader cannot reconstruct. Wrap at 72 characters.
@@ -198,16 +211,25 @@ Releases are the maintainer's.
 `mockbank.__version__` reads it back from the installed package metadata.
 
 ```bash
-# bump `version` in pyproject.toml, commit, then:
-git tag v0.1.0 && git push origin v0.1.0
-gh release create v0.1.0 --generate-notes     # or write the notes by hand
+# assemble the waiting entries into a release section, bump `version` in
+# pyproject.toml to match, commit both, then:
+python3 tools/check_changelog.py --assemble 0.2.0 --date 2026-10-01
+git tag v0.2.0 && git push origin v0.2.0
+gh release create v0.2.0 --generate-notes     # or write the notes by hand
 ```
+
+`--assemble` writes every file in `changelog.d/` into `## [VERSION] - DATE`,
+grouped by kind and ordered by issue number, fixes the two link references at
+the foot of the file, and deletes the fragments. It can be run twice without
+doing anything the second time, which is the property that matters on the one
+day nobody wants to guess.
 
 Publishing the GitHub Release runs the tests, builds the distributions, checks
 that the tag, `pyproject.toml` and the built wheel agree, and uploads to PyPI
 through [Trusted Publishing](https://docs.pypi.org/trusted-publishers/). Running
-the `Publish` workflow by hand publishes to TestPyPI instead. Add the release
-to [`CHANGELOG.md`](CHANGELOG.md) in the same commit as the version bump.
+the `Publish` workflow by hand publishes to TestPyPI instead. The assembled
+[`CHANGELOG.md`](CHANGELOG.md) section and the empty `changelog.d/` go in the
+same commit as the version bump.
 
 Verify a release with a pinned version and a fresh index:
 

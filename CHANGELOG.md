@@ -8,80 +8,10 @@ says so where it does.
 
 ## [Unreleased]
 
-### Added
-
-- **Retention for a long-running mock** (#17). A mock left up as a shared
-  staging bank had a request log and a message table that grew without end, and
-  the only remedy was `POST /_mock/reset`, which throws the accounts away with
-  them. `--keep-requests N` (default 5000) keeps the newest N request-log rows
-  and `--retention-days D` (default off) removes request rows and
-  already-collected messages older than D days, trimmed at startup, after each
-  advance and every few hundred requests - so the default in-memory bank is
-  untouched. `GET /_mock/state` reports what has been removed, so a tester who
-  wonders where their rows went can look rather than guess. Payments, files,
-  *uncollected* messages, accounts, holidays and counters are never pruned: the
-  first two are the evidence a failing test is read against, an uncollected
-  message is the one thing a mailbox exists to hold, and the rest are what the
-  mock is rather than a record of what it did. The indexes the issue also asked
-  for turned out to be there already, so the tests now hold them in place by
-  name against the query plans. A message's age is measured on the *bank* clock,
-  because that is what wrote its `taken_at`; the request log's age is real
-  elapsed time, because that is when the request arrived. Pruning a `camt.053`
-  clears the statement's reference to it rather than leaving one that answers
-  `404`, and a `--retention-days` the mock cannot act on - `nan`, `inf`, a
-  negative, or a century and a half - is refused at startup instead of crashing
-  or being silently off. With a `--pickup-dir` configured, retention only
-  removes a message the folder has actually been given: aging out one the
-  directory never received would lose it silently, because a client that polls a
-  directory has no other way to see it.
-
-- **A worked example with mock-edi** (#35). `examples/pay_invoices.py` pays
-  the supplier invoices mock-edi sends as EDIFACT `INVOIC`s: one `pain.001`,
-  each payment on its invoice's due date, then the `pain.002`, `camt.054` and
-  `camt.053` matched back by `EndToEndId` and `MsgId`. Seven tests in
-  `examples/test_pay_invoices.py` cover a clean run, `AC04`, a duplicate
-  invoice, a run retried after a crash (`DUPL`), `AM04`, a return and a
-  statement gap. CI's smoke job runs them against mock-edi from PyPI.
-- **Returns** (#14). Under `return-later` a payment settles as usual and then
-  comes back `days` business days later (3 by default) with `reason` (`AC04`
-  by default), every payment or only the `end_to_end_id` named in the
-  account's `parameters`. The bank credits the debtor account back and sends
-  a `pacs.004.001.09` - declared in the dictionary and checked against its
-  published XSD like the rest - with a `camt.054` credit beside it; the day's
-  `camt.053` carries a `CRDT` entry under `PMNT`/`ICDT`/`RRTN` whose
-  `RtrInf` names the reason, and still reconciles.
-  `GET /_mock/payments/<EndToEndId>` shows `returned` with the reason and
-  when it was due. The database gains three return columns on `payment`
-  (schema version 5); a 0.1.0 `--db` file is upgraded in place.
-- **Folder transport** (#15). Most bank connections are two directories on an
-  SFTP host rather than an HTTP endpoint, so the bank has a second door.
-  `--drop-dir` is watched (every `--drop-interval-ms`, and `POST
-  /_mock/drop/scan` looks now); each settled file goes through **the same
-  pipeline** as `POST /payments` and then moves to `processed/`, or to `failed/`
-  when the bank could not put it through, with the answer written beside it as
-  `<name>.findings.txt` in the same prose `POST /_mock/validate` prints.
-  `--pickup-dir` receives every released message as
-  `<type>-<account>-<id>.xml`, written to a temporary name and renamed so a
-  poller never reads half a file - including the `camt.054` and `camt.053` the
-  clock releases days later, and messages from files posted over HTTP. A file
-  still being written is left alone for `--drop-settle-ms`; a file is claimed by
-  renaming before it is read, so a scan and the poller cannot both take it; and
-  one that could not be moved out of the way is remembered and left until it
-  changes rather than read again on every pass. `GET /_mock/drop` reports all of
-  it, and `/_mock/state` names both directories. The database gains a
-  `written_at` column on `message` (schema version 6); a 0.1.0 or 0.2 `--db`
-  file is upgraded in place. One directory for both, or either inside the other,
-  is refused at startup - the bank would read every message it wrote back in as
-  a payment file - and a file the mock cannot write is reported on stderr and in
-  `GET /_mock/drop` rather than failing silently. The folder door is outside
-  `--auth`, as a real SFTP drop is, and the README says so.
-
-### Changed
-
-- **The pipeline moved from the request handler onto `server.State.receive`**,
-  so that the folder transport and `POST /payments` are two doors onto one
-  pipeline rather than two copies of it. No behaviour change: the answer, the
-  statuses and the mailbox are what they were.
+Entries for the next release are one file each in
+[`changelog.d/`](changelog.d/), so that two pull requests adding an entry do not
+conflict on the same lines of this file. `tools/check_changelog.py --assemble`
+writes them into this section at release time. Nothing is added here by hand.
 
 ## [0.1.0] - 2026-09-26
 
