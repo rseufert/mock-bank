@@ -109,17 +109,12 @@ class DropBox:
         # Files read once that could not be moved out of the way, keyed by name,
         # with the size and modification time they had and why.
         self.stuck: Dict[str, Tuple[int, float, str]] = {}
+        # Files a previous run left mid-read, renamed back at startup.
+        self.reclaimed: List[str] = []
         # Names already taken in the pickup directory, and what was written
         # instead: a reset empties the message table, so an id can recur while
         # the file from before is still waiting to be collected.
         self.renamed: List[Dict[str, str]] = []
-        # The message ids already written out. Kept so that `write_released` can
-        # be called after *any* release and write only what is new: the first
-        # version hooked one release path and not the other, so everything the
-        # clock released - every camt.054 and camt.053 - never reached the
-        # directory at all. Idempotent beats remembering to call it, for the
-        # same reason release_due is.
-        self.written_ids: set = set()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
@@ -130,13 +125,48 @@ class DropBox:
     # -- lifecycle --------------------------------------------------------
 
     def prepare(self) -> None:
-        """Create the directories, so a misspelled path fails loudly now."""
+        """Create the directories, and reclaim anything a previous run left."""
         for path in (self.drop_dir, self.pickup_dir):
             if path:
                 os.makedirs(path, exist_ok=True)
         if self.drop_dir:
             for name in (PROCESSED, FAILED):
                 os.makedirs(os.path.join(self.drop_dir, name), exist_ok=True)
+            self.reclaim()
+
+    def reclaim(self) -> List[str]:
+        """Give back the name of any file still claimed from a previous run.
+
+        A mock killed between claiming a file and filing it away leaves
+        `<name>.processing` behind. `ready()` skips that suffix, so the file was
+        invisible for ever after - not read, not filed, and not reported
+        anywhere. It is renamed back on startup instead, and read again: the
+        bank may have decided it already, in which case the second read is a
+        DUPL and lands in `failed/` where somebody will see it, which is a far
+        better outcome than a file that silently never existed.
+        """
+        reclaimed = []
+        for name in sorted(os.listdir(self.drop_dir)):
+            if not name.endswith(CLAIMED):
+                continue
+            path = os.path.join(self.drop_dir, name)
+            if not os.path.isfile(path):
+                continue
+            original = path[:-len(CLAIMED)]
+            try:
+                os.replace(path, _free_name(original))
+            except OSError as error:     # pragma: no cover - permissions
+                sys.stderr.write("mock-bank: %s was left claimed by an earlier "
+                                 "run and could not be renamed back: %s\n"
+                                 % (name, error))
+                continue
+            reclaimed.append(os.path.basename(original))
+        if reclaimed:
+            sys.stderr.write("mock-bank: reclaimed %d file(s) an earlier run "
+                             "left mid-read: %s\n"
+                             % (len(reclaimed), ", ".join(reclaimed)))
+        self.reclaimed = reclaimed
+        return reclaimed
 
     def start(self) -> None:
         if self._thread is not None or not self.drop_dir:
@@ -327,17 +357,23 @@ class DropBox:
         """Write every released message that has not been written yet.
 
         Called after anything that might have released something. Asking the
-        database what is released, rather than being handed the rows by whoever
-        released them, is what makes a new release path impossible to forget:
-        the worst it can do is write the files on the next release instead of
-        this one.
+        database what is released and not yet written, rather than being handed
+        the rows by whoever released them, is what makes a new release path
+        impossible to forget: the worst it can do is write the files on the next
+        release instead of this one.
+
+        `written_at` is on the row rather than in a set in memory. The first
+        version kept a set, and a restart on `--db` then wrote every message
+        ever released into the directory again - including ones the client had
+        collected long before. Seeding the set at startup would have fixed that
+        one case and not a crash between releasing and writing.
         """
         if not self.pickup_dir:
             return []
         waiting = [row["id"] for row in db.rows(
             self.state.conn,
-            "SELECT id FROM message WHERE released_at IS NOT NULL ORDER BY id")
-            if row["id"] not in self.written_ids]
+            "SELECT id FROM message WHERE released_at IS NOT NULL"
+            " AND written_at IS NULL ORDER BY id")]
         return self.write(waiting)
 
     def write(self, message_ids: List[int]) -> List[str]:
@@ -378,7 +414,10 @@ class DropBox:
             written_as = os.path.basename(target)
             if written_as != name:
                 self.renamed.append({"name": name, "writtenAs": written_as})
-            self.written_ids.add(row["id"])
+            self.state.conn.execute(
+                "UPDATE message SET written_at = ? WHERE id = ?",
+                (db.now(), row["id"]))
+            self.state.conn.commit()
             written.append(written_as)
         self.written.extend(written)
         return written
@@ -410,9 +449,6 @@ class DropBox:
         self.refused = []
         self.renamed = []
         self.stuck = {}
-        # A reset empties the message table and its ids start again, so holding
-        # the old ids would make the new message 1 look already written.
-        self.written_ids = set()
 
     # -- reporting --------------------------------------------------------
 
@@ -427,6 +463,7 @@ class DropBox:
             "waiting": self.ready(),
             "written": list(self.written[-20:]),
             "refused": list(self.refused[-20:]),
+            "reclaimed": list(self.reclaimed),
             "stuck": [{"name": name, "reason": reason}
                       for name, (_size, _mtime, reason)
                       in sorted(self.stuck.items())],

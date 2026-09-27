@@ -11,8 +11,10 @@ is not something a scan endpoint can tell you.
 """
 import os
 import shutil
+import sys
 import tempfile
 import time
+import unittest
 
 from test_payments import sample
 
@@ -282,11 +284,59 @@ class WhatTheBankWritesBack(DropCase):
         written = self.listing(self.pickup)
         self.assertTrue(any(n.startswith("pacs.004") for n in written), written)
 
+    def test_a_message_is_not_written_twice_even_across_a_restart(self):
+        # written_at is on the row, not in a set in memory. With the set, a
+        # restart on --db wrote every message ever released into the directory
+        # again - including ones the client had collected long before. There is
+        # a --db version of this in test_upgrade.py; this is the in-process
+        # half: releasing repeatedly must not rewrite what is already written.
+        self.drop_file("payments.xml")
+        self.scan()
+        first = self.listing(self.pickup)
+        self.assertTrue(first)
+        for _ in range(3):
+            self.get("/_mock/mailbox?leave")      # each call releases first
+        self.assertEqual(self.listing(self.pickup), first)
+
     def test_posting_over_http_also_writes_to_the_pickup_directory(self):
         # The pickup directory is the bank's outbound side, not the drop
         # directory's reply: a message released by an HTTP post goes there too.
         self.post("/payments", body=sample("pain001_four_payments.xml"))
         self.assertTrue(self.listing(self.pickup))
+
+
+class AFileLeftClaimedByAnEarlierRun(MockServerCase):
+    """`<name>.processing` from a mock that was killed mid-read.
+
+    `ready()` skips that suffix, so such a file was invisible for ever after -
+    not read, not filed, not reported. The senior found it; it is reclaimed at
+    startup now.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp(prefix="mock-bank-claim-")
+        cls.drop = os.path.join(cls.directory, "in")
+        os.makedirs(cls.drop, exist_ok=True)
+        with open(os.path.join(cls.drop, "orphan.xml" + ".processing"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(sample("pain001_four_payments.xml"))
+        cls.config_kwargs = dict(cls.config_kwargs, drop_dir=cls.drop,
+                                 drop_settle_ms=0)
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def test_it_is_renamed_back_and_read(self):
+        drop = self.get("/_mock/drop").json()
+        self.assertEqual(drop["reclaimed"], ["orphan.xml"])
+        # And it is a file again, so the next scan sees it.
+        found = self.post("/_mock/drop/scan").json()
+        self.assertEqual([f["name"] for f in found["files"]], ["orphan.xml"])
+        self.assertEqual(len(self.get("/_mock/payments").json()), 4)
 
 
 class WhatItReportsAboutItself(DropCase):
@@ -375,28 +425,45 @@ class ThePollerActuallyRuns(MockServerCase):
 
 
 class AStartupThatCannotHappen(MockServerCase):
-    """Two failures at startup that used to read as bugs in the mock.
+    """A bind that fails used to read as a bug in the mock.
 
-    Both are here rather than in `test_auth.py` because both were found while
-    building the transport: the drop directory made the mock start and stop far
-    more often than anything else had.
+    `socketserver.TCPServer.__init__` calls `server_close()` on the failed-bind
+    path, before `make_server` has assigned the state - so the real error was
+    replaced by `AttributeError: '_Server' object has no attribute 'state'`,
+    which says nothing about an address. Found while building the transport,
+    because a drop directory had the mock starting and stopping far more often
+    than anything else had.
     """
 
-    def test_a_port_already_in_use_is_named_rather_than_tracebacked(self):
+    def run_mock(self, *extra):
         import subprocess
         import sys as _sys
-        port = self.base.rsplit(":", 1)[1]
-        result = subprocess.run(
-            [_sys.executable, "-m", "mockbank", "--port", port],
+        return subprocess.run(
+            [_sys.executable, "-m", "mockbank"] + list(extra),
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=120)
+
+    def test_an_address_this_host_does_not_have_is_named(self):
+        # 203.0.113.0/24 is TEST-NET-3, reserved for documentation, so no host
+        # has it. Used instead of a port already in use because that is not an
+        # error on Windows: `allow_reuse_address` is set, and two sockets may
+        # bind one port there, so the second mock starts happily and the test
+        # would wait for it forever - which is exactly how this failed on the
+        # Windows runner first time round.
+        result = self.run_mock("--host", "203.0.113.1", "--port", "8099")
         self.assertEqual(result.returncode, 2, result.stderr)
-        # The real cause, not `AttributeError: '_Server' object has no
-        # attribute 'state'` - which is what came out before, because
-        # socketserver calls server_close() on the failed-bind path before
-        # make_server has assigned the state.
         self.assertNotIn("AttributeError", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("cannot listen on 203.0.113.1:8099", result.stderr)
+
+    @unittest.skipIf(sys.platform.startswith("win"),
+                     "two sockets may bind one port on Windows, so this is not "
+                     "an error there")
+    def test_a_port_already_in_use_is_named_rather_than_tracebacked(self):
+        port = self.base.rsplit(":", 1)[1]
+        result = self.run_mock("--port", port)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("AttributeError", result.stderr)
         self.assertIn("cannot listen on", result.stderr)
         self.assertIn(port, result.stderr)

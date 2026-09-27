@@ -36,7 +36,9 @@ says so where it does.
   renaming before it is read, so a scan and the poller cannot both take it; and
   one that could not be moved out of the way is remembered and left until it
   changes rather than read again on every pass. `GET /_mock/drop` reports all of
-  it, and `/_mock/state` names both directories.
+  it, and `/_mock/state` names both directories. The database gains a
+  `written_at` column on `message` (schema version 6); a 0.1.0 or 0.2 `--db`
+  file is upgraded in place.
 
 ### Changed
 
