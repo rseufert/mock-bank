@@ -151,7 +151,7 @@ class State:
     def _on_advance(self, before, after):
         # Book first, so a day's statement sees that day's bookings.
         now = after.replace(microsecond=0)
-        outbox.release_due(self.conn, now, after.date())
+        outbox.release_due(self.conn, now, after.date(), self.clock)
         outbox.issue_statements(
             self.conn, self.clock, outbox.ended_business_days(self.clock, before, after), now)
 
@@ -187,7 +187,7 @@ class State:
 
     def release(self):
         """Book what is due and release what is due; see outbox.release_due."""
-        return outbox.release_due(self.conn, self.now(), self.today())
+        return outbox.release_due(self.conn, self.now(), self.today(), self.clock)
 
     def close(self) -> None:
         """Close the database, under the lock every request takes.

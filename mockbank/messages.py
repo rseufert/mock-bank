@@ -268,16 +268,26 @@ def write_pain002(decision, msg_id, created_at) -> bytes:
 
 
 def _entry(p, day):
-    """One booked debit as an ``Ntry``: what a ``camt.054`` and a ``camt.053``
-    both carry for a payment row (with its original ``msg_id`` joined in)."""
-    domain, family, sub = schema.BOOKED_DEBIT
+    """One booked movement as an ``Ntry``: what a ``camt.054`` and a
+    ``camt.053`` both carry for a payment row (with its original ``msg_id``
+    joined in).
+
+    A row with ``credit`` set is the payment coming back: a ``CRDT`` under
+    ``schema.RETURNED_CREDIT``, with ``RtrInf`` giving the reason and the code
+    the original debit was booked under. Everything else about it - the
+    ``EndToEndId`` above all - is the original payment's, because that is how a
+    client finds the invoice a return reopens.
+    """
+    credit = bool(p.get("credit"))
+    domain, family, sub = schema.RETURNED_CREDIT if credit else schema.BOOKED_DEBIT
+    side = "CRDT" if credit else "DBIT"
     amount = schema.Amount(p["amount"], p["currency"])
     refs = {"MsgId": p["msg_id"], "EndToEndId": p["end_to_end_id"]}
     if p["pmt_inf_id"]:
         refs["PmtInfId"] = p["pmt_inf_id"]
     if p["instruction_id"]:
         refs["InstrId"] = p["instruction_id"]
-    tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": "DBIT"}
+    tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": side}
     parties = {}
     if p["creditor_name"]:
         parties["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
@@ -289,10 +299,16 @@ def _entry(p, day):
         tx["RltdPties"] = parties
     if p["creditor_bic"]:
         tx["RltdAgts"] = {"CdtrAgt": {"FinInstnId": {"BICFI": p["creditor_bic"]}}}
+    if credit:
+        original = schema.BOOKED_DEBIT
+        tx["RtrInf"] = {
+            "OrgnlBkTxCd": {"Domn": {"Cd": original[0], "Fmly": {
+                "Cd": original[1], "SubFmlyCd": original[2]}}},
+            "Rsn": {"Cd": p["return_reason"]}}
     return {
-        "Amt": amount, "CdtDbtInd": "DBIT", "Sts": {"Cd": "BOOK"},
+        "Amt": amount, "CdtDbtInd": side, "Sts": {"Cd": "BOOK"},
         "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
-        "AcctSvcrRef": "MB-PMT-%d" % p["id"],
+        "AcctSvcrRef": ("MB-RTR-%d" if credit else "MB-PMT-%d") % p["id"],
         "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
         "NtryDtls": [{"TxDtls": [tx]}]}
 
@@ -341,20 +357,28 @@ def write_camt053(account, day, number, opening, closing, payments, msg_id,
 
     ``opening`` and ``closing`` are the booked balances (``OPBD``, ``CLBD``)
     in minor units, signed; ``payments`` are the payment rows whose entries
-    the statement shows; ``number`` is the account's statement number, used
+    the statement shows, debits and - with ``credit`` set - returns; ``number`` is the account's statement number, used
     for both ``ElctrncSeqNb`` and ``LglSeqNb``. ``TxsSummry`` totals the
     entries shown. The writer does not check that the balances reconcile:
     under ``statement-gap`` they are meant not to.
     """
     ccy = account["currency"]
     entries = [_entry(p, day) for p in payments]
-    total = sum(p["amount"] for p in payments)
+    credits = [p["amount"] for p in payments if p.get("credit")]
+    debits = [p["amount"] for p in payments if not p.get("credit")]
     summary = {"TtlNtries": {"NbOfNtries": len(entries)}}
     if entries:
-        spent = format_decimal(total, ccy)
-        summary = {"TtlNtries": {"NbOfNtries": len(entries), "Sum": spent,
-                                 "TtlNetNtry": {"Amt": spent, "CdtDbtInd": "DBIT"}},
-                   "TtlDbtNtries": {"NbOfNtries": len(entries), "Sum": spent}}
+        net = sum(credits) - sum(debits)
+        summary["TtlNtries"].update({
+            "Sum": format_decimal(sum(credits) + sum(debits), ccy),
+            "TtlNetNtry": {"Amt": format_decimal(abs(net), ccy),
+                           "CdtDbtInd": "CRDT" if net >= 0 else "DBIT"}})
+        if credits:
+            summary["TtlCdtNtries"] = {"NbOfNtries": len(credits),
+                                       "Sum": format_decimal(sum(credits), ccy)}
+        if debits:
+            summary["TtlDbtNtries"] = {"NbOfNtries": len(debits),
+                                       "Sum": format_decimal(sum(debits), ccy)}
     start = datetime.datetime.combine(day, datetime.time(0, 0), tzinfo=zone)
     end = datetime.datetime.combine(day, datetime.time(23, 59, 59), tzinfo=zone)
     statement = {
@@ -374,3 +398,51 @@ def write_camt053(account, day, number, opening, closing, payments, msg_id,
 def format_decimal(minor, ccy) -> str:
     """Minor units as a DecimalNumber string, for sums that carry no Ccy."""
     return schema.format_amount(minor, ccy)
+
+
+PACS004 = schema.MESSAGES["pacs.004.001.09"]
+
+
+def write_pacs004(account, payments, day, msg_id, created_at) -> bytes:
+    """The return of one or more payments from one original file:
+    ``pacs.004.001.09``.
+
+    ``payments`` are the returned rows, with the original file's ``msg_id``
+    and ``message`` joined in; they all came from that one file, so
+    ``OrgnlGrpInf`` can name it. Each ``TxInf`` carries the payment's own
+    ``OrgnlEndToEndId``, what settled and when, what comes back and when, and
+    ``RtrRsnInf`` with the reason. ``SttlmMtd`` is ``INDA``: the bank settles
+    the return on its own books (see ``schema.CHOICES``).
+    """
+    ccy = account["currency"]
+    first = payments[0]
+    total = sum(p["amount"] for p in payments)
+    party = {"Pty": {"Nm": account["name"][:140]}}
+    transactions = []
+    for p in payments:
+        amount = schema.Amount(p["amount"], p["currency"])
+        tx = {"RtrId": "MB-RTR-%d" % p["id"],
+              "OrgnlEndToEndId": p["end_to_end_id"],
+              "OrgnlIntrBkSttlmAmt": amount,
+              "OrgnlIntrBkSttlmDt": datetime.date.fromisoformat(p["settlement_date"]),
+              "RtrdIntrBkSttlmAmt": amount, "IntrBkSttlmDt": day,
+              "RtrRsnInf": [{"Rsn": {"Cd": p["return_reason"]}}]}
+        if p["instruction_id"]:
+            tx["OrgnlInstrId"] = p["instruction_id"]
+        original = {"Amt": {"InstdAmt": amount}, "Dbtr": party,
+                    "DbtrAcct": {"Id": {"IBAN": account["iban"]}}}
+        if p["creditor_name"]:
+            original["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
+        if p["creditor_iban"]:
+            original["CdtrAcct"] = {"Id": (
+                {"IBAN": p["creditor_iban"]} if schema.iban_is_valid(p["creditor_iban"])
+                else {"Othr": {"Id": p["creditor_iban"]}})}
+        tx["OrgnlTxRef"] = original
+        transactions.append(tx)
+    return schema.serialize(PACS004, {"PmtRtr": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at, "NbOfTxs": len(payments),
+                   "CtrlSum": format_decimal(total, ccy),
+                   "TtlRtrdIntrBkSttlmAmt": schema.Amount(total, ccy),
+                   "IntrBkSttlmDt": day, "SttlmInf": {"SttlmMtd": "INDA"}},
+        "OrgnlGrpInf": {"OrgnlMsgId": first["msg_id"], "OrgnlMsgNmId": first["message"]},
+        "TxInf": transactions}})

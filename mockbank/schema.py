@@ -26,9 +26,14 @@ Where the standard leaves a choice, the mock picks one and says so here, in
 * **Versions.** ``pain.001.001.09`` is read, and ``pain.001.001.03`` is
   accepted as well and read into the same mapping (its ``BIC`` and
   ``BICOrBEI`` are keyed as the ``.09`` ``BICFI`` and ``AnyBIC``). The mock
-  writes ``pain.002.001.10``, ``camt.054.001.08`` and ``camt.053.001.08``, the
-  versions that go with ``pain.001.001.09`` in the 2019 message set most banks
-  accept today.
+  writes ``pain.002.001.10``, ``camt.054.001.08``, ``camt.053.001.08`` and
+  ``pacs.004.001.09``, the versions that go with ``pain.001.001.09`` in the
+  2019 message set most banks accept today.
+* **Returns.** A return reaches the client as a ``pacs.004`` whose
+  ``OrgnlGrpInf`` names the client's own ``pain.001``, standing in for the
+  interbank message a real bank would relay, and whose ``SttlmMtd`` is
+  ``INDA``: the bank settles it on its own books. The credit it books carries
+  ``PMNT`` / ``ICDT`` / ``RRTN`` (reversal due to a payment return).
 * **Bank transaction code.** Every debit the mock books carries
   ``PMNT`` / ``ICDT`` / ``ESCT`` (payments, issued credit transfer, SEPA credit
   transfer): 0.1 speaks euro credit transfers. Received files may carry any
@@ -70,8 +75,11 @@ STRUCTURAL = "FF01"
 
 CHOICES = {
     "read": "pain.001.001.09, and pain.001.001.03 read into the same mapping",
-    "written": "pain.002.001.10, camt.054.001.08, camt.053.001.08",
-    "bank_transaction_code": "PMNT/ICDT/ESCT on every debit the mock books",
+    "written": "pain.002.001.10, camt.054.001.08, camt.053.001.08, pacs.004.001.09",
+    "bank_transaction_code": "PMNT/ICDT/ESCT on every debit the mock books, "
+                             "PMNT/ICDT/RRTN on the credit a return books",
+    "returns": "a pacs.004 to the client, OrgnlGrpInf naming its pain.001, "
+               "SttlmMtd INDA",
     "coverage": "elements the standard allows but the dictionary does not "
                 "declare are reported as warnings, read past and not understood",
     "minor_units": "ISO 4217 exponents from CURRENCY_EXPONENTS; any other "
@@ -197,14 +205,37 @@ CODE_SETS = {
         "RPIN": "RelatedPaymentInstruction",
         "SCOR": "StructuredCommunicationReference: a creditor reference such as an RF reference",
     },
+    "ExternalReturnReason1Code": {
+        "AC01": "IncorrectAccountNumber: the account number is invalid or missing",
+        "AC04": "ClosedAccountNumber: the creditor's account has been closed",
+        "AC06": "BlockedAccount: the creditor's account is blocked",
+        "AG01": "TransactionForbidden: the transaction is forbidden on this type of account",
+        "AM05": "Duplication: the payment was a duplicate",
+        "BE04": "MissingCreditorAddress: the creditor's address is missing or incorrect",
+        "CUST": "RequestedByCustomer: the creditor asked for the payment to be returned",
+        "MD07": "EndCustomerDeceased: the end customer is deceased",
+        "MS02": "NotSpecifiedReasonCustomerGenerated: reason not specified, customer generated",
+        "MS03": "NotSpecifiedReasonAgentGenerated: reason not specified, agent generated",
+        "RC01": "BankIdentifierIncorrect: the bank identifier is invalid or missing",
+        "RR04": "RegulatoryReason: regulatory reason",
+    },
+    "SettlementMethod1Code": {
+        "CLRG": "ClearingSystem: settled through a clearing system",
+        "COVE": "CoverMethod: settled through a cover payment",
+        "INDA": "InstructedAgent: settled on the instructed agent's own books",
+        "INGA": "InstructingAgent: settled on the instructing agent's own books",
+    },
 }
 
 # Bank transaction codes (domain, family, subfamily) the mock writes.
 BANK_TRANSACTION_CODES = {
     ("PMNT", "ICDT", "ESCT"): "Payments / Issued Credit Transfers / SEPA Credit "
                               "Transfer: every debit the mock books",
+    ("PMNT", "ICDT", "RRTN"): "Payments / Issued Credit Transfers / Reversal due "
+                              "to Payment Return: the credit a return books",
 }
 BOOKED_DEBIT = ("PMNT", "ICDT", "ESCT")
+RETURNED_CREDIT = ("PMNT", "ICDT", "RRTN")
 
 # Code sets checked by pattern rather than list, and identifier shapes.
 PATTERNS = {
@@ -566,12 +597,36 @@ def group_header_statement():
                  Text("AddtlInf", 500).opt, iso="GroupHeader81")
 
 
-def bank_transaction_code():
+def bank_transaction_code(name="BkTxCd"):
     family = Group("Fmly", Code("Cd", pattern="External4Code"),
                    Code("SubFmlyCd", pattern="External4Code"))
     domain = Group("Domn", Code("Cd", pattern="External4Code"), family)
     proprietary = Group("Prtry", Text("Cd", 35), Text("Issr", 35).opt)
-    return Group("BkTxCd", domain.opt, proprietary.opt, iso="BankTransactionCodeStructure4")
+    return Group(name, domain.opt, proprietary.opt, iso="BankTransactionCodeStructure4")
+
+
+def return_reason(v, version):
+    """Why a payment came back: ``PaymentReturnReason5`` in a statement's
+    ``RtrInf``, ``PaymentReturnReason6`` in a ``pacs.004``'s ``RtrRsnInf``.
+    The ``.5`` form can also name the original bank transaction code."""
+    reason = Choice("Rsn", Code("Cd", codes="ExternalReturnReason1Code"), Text("Prtry", 35),
+                    iso="ReturnReason5Choice")
+    children = [bank_transaction_code("OrgnlBkTxCd").opt] if version == 5 else []
+    children += [party(v, "Orgtr").opt, reason.opt, Text("AddtlInf", 105).many()]
+    name = "RtrInf" if version == 5 else "RtrRsnInf"
+    return Group(name, *children, iso="PaymentReturnReason%d" % version)
+
+
+def original_transaction(v):
+    """``OrgnlTxRef``: what the original payment said, echoed back in a status
+    report or a return. A subset of ``OriginalTransactionReference28``."""
+    return Group(
+        "OrgnlTxRef", Choice("Amt", Amt("InstdAmt"), iso="AmountType4Choice").opt,
+        date_or_datetime("ReqdExctnDt").opt,
+        Code("PmtMtd", codes="PaymentMethod3Code").opt, remittance(v).opt,
+        party_or_agent(v, "Dbtr").opt, account(v, "DbtrAcct").opt, agent(v, "DbtrAgt").opt,
+        agent(v, "CdtrAgt").opt, party_or_agent(v, "Cdtr").opt, account(v, "CdtrAcct").opt,
+        iso="OriginalTransactionReference28")
 
 
 def entry():
@@ -593,7 +648,7 @@ def entry():
     tx = Group("TxDtls", refs.opt, Amt("Amt").opt,
                Code("CdtDbtInd", codes="CreditDebitCode").opt, amount_details.opt,
                bank_transaction_code().opt, parties.opt, agents.opt,
-               code_or_proprietary("Purp").opt, remittance(v).opt,
+               code_or_proprietary("Purp").opt, remittance(v).opt, return_reason(v, 5).opt,
                Text("AddtlTxInf", 500).opt, iso="EntryTransaction10")
     batch = Group("Btch", Ident("MsgId").opt, Ident("PmtInfId").opt, Count("NbOfTxs").opt,
                   Amt("TtlAmt").opt, Code("CdtDbtInd", codes="CreditDebitCode").opt)
@@ -670,13 +725,7 @@ def pain002():
         DateTime("OrgnlCreDtTm").opt, Count("OrgnlNbOfTxs").opt, Dec("OrgnlCtrlSum").opt,
         Code("GrpSts", codes="ExternalPaymentGroupStatus1Code").opt,
         status_reason(v).many(), per_status.many(), iso="OriginalGroupHeader17")
-    original_tx = Group(
-        "OrgnlTxRef", Choice("Amt", Amt("InstdAmt"), iso="AmountType4Choice").opt,
-        date_or_datetime("ReqdExctnDt").opt,
-        Code("PmtMtd", codes="PaymentMethod3Code").opt, remittance(v).opt,
-        party_or_agent(v, "Dbtr").opt, account(v, "DbtrAcct").opt, agent(v, "DbtrAgt").opt,
-        agent(v, "CdtrAgt").opt, party_or_agent(v, "Cdtr").opt, account(v, "CdtrAcct").opt,
-        iso="OriginalTransactionReference28")
+    original_tx = original_transaction(v)
     transaction = Group(
         "TxInfAndSts", Ident("StsId").opt, Ident("OrgnlInstrId").opt,
         Ident("OrgnlEndToEndId").opt, Ident("OrgnlUETR", 36, pattern="UUIDv4Identifier").opt,
@@ -691,6 +740,25 @@ def pain002():
         status_reason(v).many(), per_status.many(), transaction.many(),
         iso="OriginalPaymentInstruction32")
     return Group("Document", Group("CstmrPmtStsRpt", header, original_group, batch.many()))
+
+
+def pacs004():
+    v = 9
+    settlement = Group("SttlmInf", Code("SttlmMtd", codes="SettlementMethod1Code"),
+                       iso="SettlementInstruction7")
+    header = Group("GrpHdr", Ident("MsgId"), DateTime("CreDtTm"), Count("NbOfTxs"),
+                   Dec("CtrlSum").opt, Amt("TtlRtrdIntrBkSttlmAmt").opt,
+                   Date("IntrBkSttlmDt").opt, settlement, iso="GroupHeader90")
+    original_group = Group("OrgnlGrpInf", Ident("OrgnlMsgId"), Ident("OrgnlMsgNmId"),
+                           DateTime("OrgnlCreDtTm").opt, iso="OriginalGroupHeader18")
+    transaction = Group(
+        "TxInf", Ident("RtrId").opt, Ident("OrgnlInstrId").opt,
+        Ident("OrgnlEndToEndId").opt, Ident("OrgnlUETR", 36, pattern="UUIDv4Identifier").opt,
+        Amt("OrgnlIntrBkSttlmAmt").opt, Date("OrgnlIntrBkSttlmDt").opt,
+        Amt("RtrdIntrBkSttlmAmt"), Date("IntrBkSttlmDt").opt,
+        return_reason(v, 6).many(), original_transaction(v).opt, iso="PaymentTransaction112")
+    return Group("Document", Group("PmtRtr", header, original_group.opt, transaction.many(),
+                                   iso="PaymentReturnV09"))
 
 
 def camt054():
@@ -747,6 +815,8 @@ MESSAGES = {m.name: m for m in (
             "Bank-to-customer debit/credit notification: a payment has settled"),
     Message("camt.053.001.08", "out", camt053(),
             "Bank-to-customer statement: the end-of-day account statement"),
+    Message("pacs.004.001.09", "out", pacs004(),
+            "Payment return: a payment that had settled comes back, with its reason"),
 )}
 
 

@@ -118,7 +118,8 @@ class TheSampleFile(PipelineCase):
         self.assertEqual(resp.json()["payments"], [])
         self.assertEqual(self.balance("ACME"), after_first)
         self.assertEqual(self.get("/_mock/state").json()["payments"],
-                         {"files": 2, "accepted": 2, "rejected": 2, "booked": 2})
+                         {"files": 2, "accepted": 2, "rejected": 2, "returned": 0,
+                          "booked": 2})
 
     def test_the_2009_twin_is_decided_the_same(self):
         new = self.send(sample("pain001_four_payments.xml")).json()

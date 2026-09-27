@@ -13,6 +13,7 @@ about what a valid account *is* are here.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import sqlite3
@@ -242,6 +243,8 @@ def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
         raise Invalid("an account needs an iban: it is what an arriving "
                       "payment names, and one without it can never be matched")
     checked = check(fields)
+    check_parameters(checked.get("behaviour", DEFAULT_BEHAVIOUR),
+                     json.loads(checked.get("parameters", "{}")))
 
     columns = dict(FIELDS)
     columns["parameters"] = json.dumps({})
@@ -274,6 +277,9 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     if not fields:
         return existing
     changes = check(fields)
+    check_parameters(changes.get("behaviour", existing["behaviour"]),
+                     json.loads(changes["parameters"]) if "parameters" in changes
+                     else existing["parameters"])
     try:
         conn.execute("UPDATE account SET %s WHERE id = ?"
                      % ", ".join("%s = ?" % key for key in changes),
@@ -284,6 +290,35 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
                       % changes.get("iban")) from None
     conn.commit()
     return require(conn, identifier)
+
+
+# What each behaviour reads from `parameters`, with its default. Only
+# `return-later` takes any; a parameter it does not know is refused by name,
+# so a misspelt `dyas` cannot silently mean three days.
+RETURN_LATER = {"days": 3, "reason": "AC04", "end_to_end_id": None}
+
+
+def check_parameters(behaviour: str, parameters: Dict[str, Any]) -> None:
+    """Refuse parameters the behaviour could not act on, naming what it takes."""
+    if behaviour != "return-later":
+        return
+    unknown = sorted(set(parameters) - set(RETURN_LATER))
+    if unknown:
+        raise Invalid("return-later takes %s in parameters, not %s"
+                      % (", ".join(sorted(RETURN_LATER)), ", ".join(unknown)))
+    days = parameters.get("days", RETURN_LATER["days"])
+    if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 60:
+        raise Invalid("return-later's days is a whole number of business days from "
+                      "0 to 60, not %r" % (days,))
+    reason = parameters.get("reason", RETURN_LATER["reason"])
+    codes = schema.CODE_SETS["ExternalReturnReason1Code"]
+    if reason not in codes:
+        raise Invalid("return-later's reason is an ISO 20022 return reason code, one "
+                      "of %s; %r is not" % (", ".join(sorted(codes)), reason))
+    e2e = parameters.get("end_to_end_id")
+    if e2e is not None and (not isinstance(e2e, str) or not e2e):
+        raise Invalid("return-later's end_to_end_id is the EndToEndId of the one "
+                      "payment to return, or left out to return every payment")
 
 
 def _check_id(identifier: str) -> None:
@@ -565,6 +600,48 @@ def book_due(conn, today, commit=True):
     return due
 
 
+RETURNED = "returned"
+
+
+def schedule_returns(conn, booked, clock):
+    """Set the day each just-booked payment from a `return-later` account comes
+    back: `days` business days after it settled, with `reason`. Only the payment
+    named by `end_to_end_id`, if the account names one; otherwise every one."""
+    scheduled = []
+    for row_ in booked:
+        account = get(conn, row_["account_id"])
+        if account is None or account["behaviour"] != "return-later":
+            continue
+        wanted = dict(RETURN_LATER, **account["parameters"])
+        if wanted["end_to_end_id"] and wanted["end_to_end_id"] != row_["end_to_end_id"]:
+            continue
+        due = clock.business_days_after(
+            datetime.date.fromisoformat(row_["settlement_date"]), wanted["days"])
+        conn.execute("UPDATE payment SET return_due = ?, return_reason = ? WHERE id = ?",
+                     (due.isoformat(), wanted["reason"], row_["id"]))
+        scheduled.append(row_["id"])
+    return scheduled
+
+
+def book_returns(conn, today):
+    """Credit back every payment whose return day has come, and mark it
+    returned. Returns those payments, oldest first, with their file's MsgId."""
+    due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message FROM payment"
+                        " JOIN file ON file.id = payment.file_id"
+                        " WHERE payment.status = ? AND booked_at IS NOT NULL"
+                        " AND return_due IS NOT NULL AND return_due <= ?"
+                        " AND returned_at IS NULL ORDER BY payment.id",
+                  (ACCEPTED, today.isoformat()))
+    now = db.now()
+    for row_ in due:
+        conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",
+                     (row_["amount"], row_["account_id"]))
+        conn.execute("UPDATE payment SET status = ?, returned_at = ? WHERE id = ?",
+                     (RETURNED, now, row_["id"]))
+        row_["status"], row_["returned_at"] = RETURNED, now
+    return due
+
+
 def payments(conn, end_to_end_id=None):
     """Every payment the bank decided on, newest first, or those with one
     EndToEndId (which is unique within a file, not across files)."""
@@ -578,7 +655,7 @@ def payments(conn, end_to_end_id=None):
 def payment_counts(conn):
     """What /_mock/state reports about payments."""
     out = {"files": db.count(conn, "file")}
-    for status in (ACCEPTED, REJECTED):
+    for status in (ACCEPTED, REJECTED, RETURNED):
         out[status] = db.count(conn, "payment", "status = '%s'" % status)
     out["booked"] = db.count(conn, "payment", "booked_at IS NOT NULL")
     return out

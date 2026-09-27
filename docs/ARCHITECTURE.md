@@ -44,8 +44,11 @@ happens when a date arrives belongs to the hooks the pipeline registers in
 and closes a statement for every business day whose end it passed. The clock
 holds an offset from real time rather than a stored instant, so it keeps ticking
 between advances; and it does not go backwards, because whatever was queued for
-a date it had passed would come due a second time. The return window that makes
-a three-day return a test line is 0.2.
+a date it had passed would come due a second time. A return is the same idea
+with a longer fuse: when a payment from a `return-later` account books, its
+return is set for `business_days_after(settlement, days)`, and the advance that
+reaches that day credits it back and writes the `pacs.004`. A three-day return
+is a test line.
 
 ## Refusing, and saying who is asking
 
@@ -67,8 +70,9 @@ what a bank does.
 ## What is deliberately absent
 
 No transport that needs cryptography (EBICS, SWIFT), no signed or encrypted
-files, no screening, no ledger beyond balances, no direct debits, no credit side
-to a booking, and no returns yet. Each is refused by name rather than ignored:
+files, no screening, no ledger beyond balances, no direct debits, and no credit
+to a creditor the bank holds - the only credit it books is a return, which puts
+money back on the account it left. Each is refused by name rather than ignored:
 an encrypted body, an unknown message type and a payment from an account the
 bank does not hold all produce an answer that says what *is* supported. The
 README's out-of-scope table is the authority.

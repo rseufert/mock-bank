@@ -108,16 +108,22 @@ sends them.
 | `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
-| `pacs.004` | Out | Days later, on a return behaviour | A payment that had settled, coming back with a return reason **(not yet — 0.2)** |
+| `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
 | NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(not yet — 0.3)** |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
-`pain.002.001.10`, `camt.054.001.08` and `camt.053.001.08`, the versions that go
-with `pain.001.001.09` and that most banks accept today. That is a choice, not
+`pain.002.001.10`, `camt.054.001.08`, `camt.053.001.08` and `pacs.004.001.09`,
+the versions that go with `pain.001.001.09` and that most banks accept today. That is a choice, not
 the only right answer; so are the others the standard leaves open, and the
 mock says which it made:
 
+- **Returns.** A return reaches the client as a `pacs.004`, whose
+  `OrgnlGrpInf` names the client's own `pain.001` - standing in for the
+  interbank message a real bank would pass on - with `SttlmMtd` `INDA`, settled
+  on the bank's own books. The credit it books carries `PMNT`/`ICDT`/`RRTN`.
+  One `pacs.004` per account, day and original file; one `camt.054` credit per
+  account and day.
 - **Bank transaction code.** Every debit the mock books carries
   `PMNT`/`ICDT`/`ESCT` (payments, issued credit transfer, SEPA credit
   transfer). Euro credit transfers are what this release speaks; other
@@ -201,7 +207,7 @@ reason codes are the ISO 20022 external codes a real bank uses.
 | `closed-account` | Rejects payments to one creditor account in `pain.002` | `AC04` |
 | `insufficient-funds` | Rejects payments once the debtor's balance would go negative | `AM04` |
 | `bad-bank-id` | Rejects a payment whose creditor bank identifier does not resolve | `RC01` |
-| `return-later` | Accepts and settles, then returns the payment N business days later | `pacs.004`, `AC04` or `MD07` **(not yet — 0.2)** |
+| `return-later` | Accepts and settles, then returns the payment N business days later: `parameters` `days` (default 3), `reason` (default `AC04`), and `end_to_end_id` to return only that payment | `pacs.004`, `AC04`, `MD07` or another return reason |
 | `reject-file` | Rejects the whole file at group level | `RJCT`, `FF01` |
 | `duplicate-file` | Rejects a file whose `MsgId` it has already seen | `DUPL` |
 | `silent` | Sends no `pain.002` at all | none |
@@ -262,7 +268,9 @@ a bank can check at acceptance, so a payment to it settles.
 An accepted payment debits its account on its settlement date, not on
 receipt. The mock books the **debit side only**: a payment into an
 account it holds does not credit that account, so every balance change has a
-statement entry to explain it. That is a choice, and it is stated here.
+statement entry to explain it. That is a choice, and it is stated here. The one
+credit it books is a return, which puts the money back where it came from, with
+a `CRDT` entry on that day's statement to explain it.
 
 Two rules hold whatever the behaviour, because real banks apply them:
 
