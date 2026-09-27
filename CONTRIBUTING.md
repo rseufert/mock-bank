@@ -116,11 +116,13 @@ that from tangling:
   green and a review. Never force-push over a review; push follow-up commits
   instead. Do not tag releases or edit `pyproject.toml`'s version; that is part
   of the release.
-- **Squash is the only merge method here.** A squash lands one commit whose
-  parent is the tip of `main`, and `git branch --merged` can then tell a merged
-  branch from an unmerged one. After a rebase or a merge commit it cannot: the
-  branch's commits are either rewritten or still sitting off to the side, and
-  every later question about whether a branch is in becomes guesswork.
+- **Squash is the only merge method here.** One commit per pull request on
+  `main`, so a change is reverted with one revert and a bisect lands on a whole
+  change rather than on half of one. The cost is worth knowing rather than
+  discovering: a squash writes a *new* commit, so the branch's own commits never
+  become ancestors of `main` and `git branch --merged` does not list a squashed
+  branch. Whether a branch is merged is answered by its pull request, not by
+  git.
 - **The junior developer's pull requests get the senior developer's review
   first**, as a comment on the pull request, before the maintainer looks. The
   senior developer's pull requests go straight to the maintainer. A review asks
