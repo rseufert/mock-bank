@@ -81,9 +81,17 @@ without `--auth` says so on stderr at startup, and `-q` does not silence it.
 ## Findings, not exceptions
 
 Validation produces findings: an element path, a code, a sentence. The same
-finding renders as a `pain.002` reason and as prose from `/_mock/validate`. A
-file the mock cannot read still gets a `pain.002` saying why, because that is
-what a bank does.
+finding renders as a `pain.002` reason and as prose from `/_mock/validate`.
+
+A file the mock cannot read is answered rather than dropped, but the two doors
+answer differently, and the difference is worth knowing before you build
+against one. Over HTTP the refusal comes back as a `pain.002` in the response
+itself. Through the drop directory there is nobody to answer, so the file is
+filed under `failed/` with a `<name>.findings.txt` beside it; no message row is
+written, so nothing about it reaches the mailbox or `--pickup-dir`. A real SFTP
+drop returns a status file, so this is a difference to close rather than a
+design, and it needs a decision about the pipeline rather than about the
+directory.
 
 ## What is deliberately absent
 
