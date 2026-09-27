@@ -158,6 +158,129 @@ class WhatRetentionDaysRemoves(unittest.TestCase):
         self.assertEqual(db.count(self.conn, "request_log"), 1)
 
 
+class AgeIsMeasuredOnTheRightClock(MockServerCase):
+    """Bank time for messages, real time for the request log.
+
+    `message.taken_at` is written from the bank clock, which a test moves;
+    `request_log.at` is when an HTTP request arrived, in real UTC. Measuring a
+    message's age against real time deleted messages a client had collected
+    seconds earlier - the senior reproduced it with `--clock 2025-01-01` and
+    `--retention-days 30`, and four just-collected messages went.
+    """
+
+    config_kwargs = {"clock": "2025-01-01T09:00", "retention_days": 30}
+
+    def test_a_message_collected_seconds_ago_is_not_pruned(self):
+        self.post("/_mock/reset")
+        self.post("/payments", body=sample("pain001_four_payments.xml"))
+        collected = self.get("/_mock/mailbox").json()
+        self.assertTrue(collected, "nothing to collect, so nothing is proved")
+        self.post("/_mock/advance?days=1")
+        state = self.get("/_mock/state").json()
+        self.assertEqual(state["retention"]["pruned"].get("message", 0), 0,
+                         "a message collected moments ago was pruned")
+        self.assertGreater(state["messages"]["taken"], 0)
+
+    def test_a_message_collected_long_ago_in_bank_time_does_go(self):
+        # The flip side: once bank time has moved past the window, it goes.
+        self.post("/_mock/reset")
+        self.post("/payments", body=sample("pain001_four_payments.xml"))
+        self.get("/_mock/mailbox")
+        self.post("/_mock/advance?days=90")
+        self.assertGreater(
+            self.get("/_mock/state").json()["retention"]["pruned"].get("message", 0),
+            0, "bank time moved three months and nothing aged out")
+
+
+class APrunedStatementMessage(unittest.TestCase):
+    """A statement points at the camt.053 it was sent as.
+
+    Pruning the message left `statement.message_id` naming a row that was gone,
+    so `GET /_mock/accounts/<id>/statements` handed out an id that answered 404.
+    The statement row is the record and it still reconciles; the reference is
+    cleared instead.
+    """
+
+    def setUp(self):
+        self.conn = db.connect(":memory:")
+        db.seed(self.conn)
+        self.addCleanup(self.conn.close)
+
+    def test_the_reference_is_cleared_rather_than_left_dangling(self):
+        old = db.stamp(db.utcnow() - datetime.timedelta(days=40))
+        cursor = self.conn.execute(
+            "INSERT INTO message (type, account, due_at, released_at, taken_at,"
+            " body) VALUES ('camt.053.001.08', 'ACME', ?, ?, ?, '<Document/>')",
+            (old, old, old))
+        message_id = cursor.lastrowid
+        self.conn.execute(
+            "INSERT INTO statement (account, day, number, opening, closing,"
+            " entries, message_id) VALUES ('ACME', '2026-01-01', 1, 0, 0, 0, ?)",
+            (message_id,))
+        self.conn.commit()
+
+        db.prune(self.conn, retention_days=7)
+        self.assertEqual(db.count(self.conn, "message"), 0)
+        # The statement survives, and no longer points at nothing.
+        statement = db.one(self.conn, "SELECT * FROM statement WHERE account = 'ACME'")
+        self.assertIsNotNone(statement)
+        self.assertIsNone(statement["message_id"])
+
+
+class RetentionSettingsTheMockCannotActOn(unittest.TestCase):
+    """Every one of these got through before.
+
+    `inf` and `1e9` reached `timedelta` and came back as an OverflowError at
+    startup. `nan` and `-3` were silently treated as "off", which is the worst
+    of the three: the operator believes the mock is bounded and it is not.
+    """
+
+    def setUp(self):
+        self.conn = db.connect(":memory:")
+        self.addCleanup(self.conn.close)
+
+    def refusal(self, **kwargs):
+        with self.assertRaises(db.Unusable) as caught:
+            db.prune(self.conn, **kwargs)
+        return str(caught.exception)
+
+    def test_a_window_that_is_not_a_number_is_refused(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(days=value):
+                self.assertIn("is not one", self.refusal(retention_days=value))
+
+    def test_a_negative_window_is_refused_rather_than_ignored(self):
+        self.assertIn("cannot be negative", self.refusal(retention_days=-3))
+
+    def test_an_absurd_window_is_refused_rather_than_overflowing(self):
+        self.assertIn("at most", self.refusal(retention_days=1e9))
+
+    def test_a_fraction_of_a_day_is_fine(self):
+        # Twelve hours is a reasonable thing to ask for.
+        db.prune(self.conn, retention_days=0.5)
+
+    def test_the_century_bound_itself_is_fine(self):
+        db.prune(self.conn, retention_days=db.MAX_RETENTION_DAYS)
+
+    def test_a_negative_row_count_is_refused(self):
+        self.assertIn("cannot be negative", self.refusal(keep_requests=-5))
+
+    def test_a_row_count_that_is_not_whole_is_refused(self):
+        self.assertIn("whole number", self.refusal(keep_requests=2.5))
+
+    def test_the_mock_refuses_to_start_rather_than_pruning_wrongly(self):
+        import subprocess
+        import sys as _sys
+        result = subprocess.run(
+            [_sys.executable, "-m", "mockbank", "--host", "203.0.113.1",
+             "--port", "8099", "--retention-days", "nan"],
+            cwd=os.path.dirname(HERE), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("retention_days", result.stderr)
+        self.assertNotIn("OverflowError", result.stderr)
+
+
 class TheLookupsThePipelineDoesAreIndexed(unittest.TestCase):
     """The query plans, by index name.
 

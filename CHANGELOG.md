@@ -24,7 +24,13 @@ says so where it does.
   message is the one thing a mailbox exists to hold, and the rest are what the
   mock is rather than a record of what it did. The indexes the issue also asked
   for turned out to be there already, so the tests now hold them in place by
-  name against the query plans.
+  name against the query plans. A message's age is measured on the *bank* clock,
+  because that is what wrote its `taken_at`; the request log's age is real
+  elapsed time, because that is when the request arrived. Pruning a `camt.053`
+  clears the statement's reference to it rather than leaving one that answers
+  `404`, and a `--retention-days` the mock cannot act on - `nan`, `inf`, a
+  negative, or a century and a half - is refused at startup instead of crashing
+  or being silently off.
 
 - **Returns** (#14). Under `return-later` a payment settles as usual and then
   comes back `days` business days later (3 by default) with `reason` (`AC04`

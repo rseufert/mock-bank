@@ -340,7 +340,8 @@ def one(conn: sqlite3.Connection, sql: str,
 
 
 def prune(conn: sqlite3.Connection, keep_requests: int = 0,
-          retention_days: float = 0) -> Dict[str, int]:
+          retention_days: float = 0,
+          bank_now: Optional[datetime.datetime] = None) -> Dict[str, int]:
     """Bound what a long-running mock keeps, and say how much went.
 
     A mock left up as a shared staging bank for a few weeks has a request log
@@ -351,6 +352,14 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
     all). ``retention_days`` removes what is older than that many days (0 keeps
     everything): request-log rows, and messages a client has already taken.
 
+    **Two clocks, and they are not interchangeable.** ``request_log.at`` is when
+    an HTTP request arrived, in real UTC, so its age is real elapsed time.
+    ``message.taken_at`` is written from the *bank* clock, which a test moves -
+    so a mock started with ``--clock 2025-01-01`` writes messages dated last
+    year, and measuring their age against real time deleted messages a client
+    had collected seconds earlier. ``bank_now`` is the bank's now; without it
+    both fall back to real time, which is right for a caller that has no clock.
+
     What is *not* pruned is deliberate. ``payment`` and ``file`` are what the
     bank did, and they are the evidence somebody reads when a test fails - a
     mock that eats them is no use at the moment you need it. A message still
@@ -358,6 +367,8 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
     it yet, and so are the accounts, the holidays and the counters: they are
     what the mock *is*, not a record of what it did.
     """
+    keep_requests = _whole(keep_requests, "keep_requests")
+    retention_days = _window(retention_days)
     removed: Dict[str, int] = {}
 
     def gone(table: str, cursor: sqlite3.Cursor) -> None:
@@ -371,16 +382,77 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
             "DELETE FROM request_log WHERE id <= (SELECT id FROM request_log"
             " ORDER BY id DESC LIMIT 1 OFFSET ?)", (keep_requests,)))
     if retention_days > 0:
-        cutoff = stamp(utcnow() - datetime.timedelta(days=retention_days))
+        window = datetime.timedelta(days=retention_days)
         gone("request_log", conn.execute(
-            "DELETE FROM request_log WHERE at < ?", (cutoff,)))
-        # Taken, and taken a while ago. A message nobody has collected stays,
-        # whatever its age: the whole point of the mailbox is that it waits.
+            "DELETE FROM request_log WHERE at < ?",
+            (stamp(utcnow() - window),)))
+        # Taken, and taken a while ago in *bank* time. A message nobody has
+        # collected stays whatever its age: the whole point of the mailbox is
+        # that it waits.
+        #
+        # A statement points at the camt.053 it was sent as, so the reference is
+        # cleared for anything about to go. Leaving it would make
+        # GET /_mock/accounts/<id>/statements hand out a message id that answers
+        # 404, which is worse than saying the message is gone: the statement row
+        # is the record, and it still reconciles.
+        message_cutoff = stamp((bank_now or utcnow()) - window)
+        conn.execute(
+            "UPDATE statement SET message_id = NULL WHERE message_id IN"
+            " (SELECT id FROM message WHERE taken_at IS NOT NULL AND taken_at < ?)",
+            (message_cutoff,))
         gone("message", conn.execute(
             "DELETE FROM message WHERE taken_at IS NOT NULL AND taken_at < ?",
-            (cutoff,)))
+            (message_cutoff,)))
     conn.commit()
     return removed
+
+
+# The longest retention window the mock will accept, in days: a century.
+# `timedelta` refuses much more than this with an OverflowError rather than an
+# answer, and a mock asked to keep a thousand years of request log has been
+# asked by mistake.
+MAX_RETENTION_DAYS = 36500
+
+
+class Unusable(ValueError):
+    """A retention setting the mock cannot act on, and why."""
+
+
+def _whole(value, name: str) -> int:
+    """A count of rows to keep: a whole number, not negative."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise Unusable("%s is a whole number of rows, not %r" % (name, value))
+    if value < 0:
+        raise Unusable("%s is a whole number of rows and cannot be negative; "
+                       "0 keeps every row" % name)
+    return value
+
+
+def _window(days) -> float:
+    """A retention window in days: finite, not negative, and not absurd.
+
+    Every one of `inf`, `1e9`, `nan` and `-3` got through before. The first two
+    reached `timedelta` and came back as an OverflowError at startup; the last
+    two were silently treated as "off", so an operator who asked for retention
+    and mistyped it got a mock that kept everything and said nothing.
+    """
+    if isinstance(days, bool) or not isinstance(days, (int, float)):
+        raise Unusable("retention_days is a number of days, not %r" % (days,))
+    days = float(days)
+    if days != days:                     # nan, which compares false with all
+        raise Unusable("retention_days is a number of days, and nan is not one. "
+                       "0 turns retention off.")
+    if days in (float("inf"), float("-inf")):
+        raise Unusable("retention_days is a number of days, and %s is not one. "
+                       "0 turns retention off." % days)
+    if days < 0:
+        raise Unusable("retention_days cannot be negative (%s); 0 turns "
+                       "retention off." % days)
+    if days > MAX_RETENTION_DAYS:
+        raise Unusable("retention_days is at most %d (a century); %s is further "
+                       "than a mock is ever asked to remember on purpose."
+                       % (MAX_RETENTION_DAYS, days))
+    return days
 
 
 def count(conn: sqlite3.Connection, table: str, where: str = "") -> int:

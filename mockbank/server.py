@@ -174,7 +174,7 @@ class State:
         """Apply --keep-requests and --retention-days, keeping a running total."""
         with self.lock:
             removed = db.prune(self.conn, self.config.keep_requests,
-                               self.config.retention_days)
+                               self.config.retention_days, self.now())
             for table, count in removed.items():
                 self.pruned[table] = self.pruned.get(table, 0) + count
             self.requests_since_prune = 0

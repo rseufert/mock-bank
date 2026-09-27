@@ -8,6 +8,7 @@ import sys
 from . import __version__
 from .accounts import BEHAVIOURS
 from .clock import DEFAULT_CUTOFF, Invalid
+from .db import Unusable
 from .server import Config, make_server
 
 
@@ -142,9 +143,12 @@ def main(argv=None) -> int:
         print(warning, file=sys.stderr, flush=True)
     try:
         httpd = make_server(config)
-    except Invalid as error:
-        # A clock the mock cannot keep is refused at startup rather than at the
-        # first payment: every settlement date in the run depends on it.
+    except (Invalid, Unusable) as error:
+        # A clock the mock cannot keep, or a retention setting it cannot act
+        # on, is refused at startup rather than at the first payment or the
+        # first prune. A mistyped --retention-days used to be silently "off",
+        # which is the worst of the three outcomes: the operator believes the
+        # mock is bounded and it is not.
         print("mock-bank: %s" % error, file=sys.stderr, flush=True)
         return 2
     if not args.quiet:
