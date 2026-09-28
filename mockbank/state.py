@@ -107,7 +107,7 @@ class State:
         the old one, which is what keeps its numbers (see ``db.next_value``).
         """
         with self.lock:
-            for table in ("statement", "counter", "message", "payment", "file",
+            for table in ("statement", "counter", "message", "payment", "credit", "file",
                           "request_log", "holiday", "account"):
                 self.conn.execute("DELETE FROM %s" % table)
             self.conn.commit()
