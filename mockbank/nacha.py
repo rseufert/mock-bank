@@ -142,7 +142,18 @@ CREDITS = {"22", "32", "42", "52"}
 # Each credit's automated return, which is what a return file carries (#54):
 # a returned checking credit is 21, a savings one 31, and so on.
 RETURN_OF = {"22": "21", "32": "31", "42": "41", "52": "51"}
-RETURNS = set(RETURN_OF.values())
+# Returns the reader takes: of credits, which this bank writes, and of debits
+# (26, 36, 46), which it never sends but which a return file from anywhere
+# else may carry - moov-io/ach's `return-WEB.ach` has one of each (#55).
+RETURNS = set(RETURN_OF.values()) | {"26", "36", "46"}
+
+
+def side(code: str) -> str:
+    """Which control total an entry counts in: by its code's second digit,
+    1 to 4 a credit and 6 to 9 a debit - returns included. A return of a debit
+    (26) is a debit, however the money moves; moov-io/ach's file, which the
+    reader is held to, counts it that way (#55)."""
+    return "credit" if code[1:2] in "1234" else "debit"
 
 # The return codes the bank answers with, from what it decided (#54): the
 # same behaviours a pain.002 answers with ISO 20022 reasons.
@@ -336,14 +347,16 @@ def inspect(data: bytes, today: Optional[datetime.date] = None):
                                           "a NACHA file starts with a file header (1)")]
     header, batches, control = records[0], [], None
     index = 1
-    entry_hash, credits, count = 0, 0, 0
+    entry_hash, count = 0, 0
+    totals = {"credit": 0, "debit": 0}
     while index < len(records):
         record = records[index]
         if record.type == "5":
             batch, index, sums = _batch(records, index, findings)
             batches.append(batch)
             entry_hash += sums[0]
-            credits += sums[1]
+            for key in totals:
+                totals[key] += sums[1][key]
             count += sums[2]
             continue
         if record.type == "9":
@@ -370,8 +383,10 @@ def inspect(data: bytes, today: Optional[datetime.date] = None):
         findings += _compare(control, "entry hash", entry_hash % 10 ** 10, "FF01",
                              "the receiving DFI identifications of its entries sum to "
                              "%d, to ten digits")
-        findings += _compare(control, "total credit entry dollar amount", credits, "AM10",
-                             "its credit entries sum to %d cents")
+        findings += _compare(control, "total credit entry dollar amount",
+                             totals["credit"], "AM10", "its credit entries sum to %d cents")
+        findings += _compare(control, "total debit entry dollar amount",
+                             totals["debit"], "AM10", "its debit entries sum to %d cents")
     payment_file = PaymentFile(header, batches)
     findings += _as_a_pain001_would(payment_file, today)
     return payment_file, findings
@@ -408,11 +423,13 @@ def _as_a_pain001_would(payment_file, today) -> List[Finding]:
 
 def _batch(records, index, findings):
     """One batch from its header at ``index``: the Batch, where the next record
-    is, and (entry hash, credit total, entries and addenda) as computed."""
+    is, and (entry hash, {"credit", "debit"} totals, entries and addenda) as
+    computed."""
     header = records[index]
     index += 1
     entry_class = header.text("standard entry class code")
-    payments, returns, entry_hash, credits, count = [], [], 0, 0, 0
+    payments, returns, entry_hash, count = [], [], 0, 0
+    totals = {"credit": 0, "debit": 0}
     control = None
     while index < len(records):
         record = records[index]
@@ -433,16 +450,15 @@ def _batch(records, index, findings):
                         "routing number %s%d fails its check digit; it would be %d"
                         % (routing, digit, check_digit(routing))))
             code = record.text("transaction code")
+            # Every entry counts in its control total by its code, whatever the
+            # mock makes of it: a debit it refuses to read is still a debit.
+            totals[side(code)] += record.number_of("amount") or 0
             if code in CREDITS:
-                payment = Payment(record, addenda, entry_class)
-                payments.append(payment)
-                credits += payment.amount or 0
+                payments.append(Payment(record, addenda, entry_class))
             elif code in RETURNS:
                 why = [a for a in addenda if a.label == RETURN_ADDENDA[0]]
                 if why:
-                    returned = Return(record, why[0])
-                    returns.append(returned)
-                    credits += returned.amount or 0
+                    returns.append(Return(record, why[0]))
                 else:
                     findings.append(_finding(
                         record.field_path("transaction code"), "FF01",
@@ -471,9 +487,13 @@ def _batch(records, index, findings):
         findings += _compare(control, "entry hash", entry_hash % 10 ** 10, "FF01",
                              "the batch's receiving DFI identifications sum to %d, "
                              "to ten digits")
-        findings += _compare(control, "total credit entry dollar amount", credits, "AM10",
+        findings += _compare(control, "total credit entry dollar amount",
+                             totals["credit"], "AM10",
                              "the batch's credit entries sum to %d cents")
-    return Batch(header, payments, returns), index, (entry_hash, credits, count)
+        findings += _compare(control, "total debit entry dollar amount",
+                             totals["debit"], "AM10",
+                             "the batch's debit entries sum to %d cents")
+    return Batch(header, payments, returns), index, (entry_hash, totals, count)
 
 
 def _compare(record: Record, name: str, actual: int, code: str, why: str) -> List[Finding]:
@@ -575,6 +595,12 @@ def line(layout, **values) -> str:
 def return_file(routing: str, originator: dict, returns: List[dict], day, created_at,
                 modifier: str = "A") -> str:
     """The return file a NACHA account is sent for payments that came back (#54).
+
+    Two kinds of payment come back in it, not one: a payment that settled and
+    then returned under `return-later`, and - the ordinary case - a payment the
+    bank rejected for one of the three behaviours, which comes back the next
+    business day as a return entry as well as being marked rejected in the
+    acknowledgement. Both are written into one file per account per day.
 
     From the bank - ``routing``, its own - to ``originator``, the account that
     sent them (``account_number``, ``name``). Each of ``returns`` is a payment
