@@ -1,4 +1,4 @@
--- The schema at SCHEMA_VERSION 7, as 0.3 ships it: before money could arrive
+-- The schema at SCHEMA_VERSION 7, as v0.3.0 shipped it: before money could arrive
 -- from somebody else, the credit table (#91).
 --
 -- Kept so the upgrade path is tested from every version that existed,
