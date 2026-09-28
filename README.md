@@ -110,7 +110,7 @@ sends them.
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
 | `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
-| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(not yet — 0.3)** |
+| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(0.3; so far a NACHA file is read and checked by `POST /_mock/validate`)** |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
@@ -173,6 +173,36 @@ currency that is not the debtor account's (or a request to convert one),
 and DTDs are refused by name. A requested execution date in the past is a
 `DT01` *warning*, not a rejection: banks differ, and the mock follows the
 common SEPA profile of executing on the next business day.
+
+**A NACHA file** is read by the same endpoint. The mock recognises one by its
+first line, a file header starting `101`, and reads it into the same payments
+a `pain.001` becomes:
+
+```
+$ curl -s --data-binary @tests/samples/nacha_broken_entry_hash.ach http://127.0.0.1:8080/_mock/validate
+NACHA 1234567890-2610010900A: 1 batch, 4 payments, 1 finding
+error FF01 at /line 8 (batch control)/entry hash (columns 11-20): the entry hash says 265100431, but the batch's receiving DFI identifications sum to 26400041, to ten digits
+```
+
+A finding names the line, the record and the field with its columns. The file
+checks are a line that is not 94 characters, a routing number that fails its
+check digit (`RC01`), and an entry hash, block count, count (`AM18`) or credit
+total (`AM10`) that disagrees with the entries. Where NACHA has no ISO 20022
+equivalent, the mock makes these choices:
+
+- **`EndToEndId` is the individual identification number**, the originator's
+  own reference for the payment (an invoice number, say), which the receiver
+  also sees. `NOTPROVIDED` when it is blank. The trace number is assigned by
+  the originating bank, so it becomes the `InstrId` instead.
+- **The debtor account is the company identification.** A NACHA file carries
+  no originator account: the originating bank knows its customer by that id.
+- **The file's identity**, where a `pain.001` has a `MsgId`, is the immediate
+  origin with the creation date, time and file ID modifier. Those are the
+  fields a bank tells two files apart by.
+- **Only credit entries are payments.** A debit, a prenote or a return entry
+  is an `FF01` finding, because this bank sends money and does not collect it.
+
+`POST /payments` does not take a NACHA file yet (0.3): it refuses one by name.
 
 A `camt.053` closes each business day for every open account the bank holds,
 in order, as the clock passes the day's end - a day with no entries still gets
@@ -320,7 +350,7 @@ like mock-edi's so the two feel the same.
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
-| Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
+| Validate only | `POST /_mock/validate` | A `pain.001` or a NACHA file. Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
 | Folder in and out | `--drop-dir`, `--pickup-dir`, `GET /_mock/drop`, `POST /_mock/drop/scan` | Most bank connections are still SFTP folders, so the bank reads one directory and writes another |
 
 `GET /_mock/mailbox?raw` returns the message bodies one after another, each
@@ -512,6 +542,7 @@ mockbank/drop.py               the second door: a directory watched, and one wri
 mockbank/db.py                 the schema, the upgrade, and the seeded accounts
 mockbank/handler.py            the request handler: authentication, the body, the request log, and the lookup in the route table
 mockbank/messages.py           reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
+mockbank/nacha.py              NACHA: the record declarations, and a reader into the same payments as a pain.001
 mockbank/outbox.py             what the bank sends and when: the message queue, release as the clock moves, the mailbox
 mockbank/routes/__init__.py    the route table: each surface registers method, path pattern and function
 mockbank/routes/control.py     health, state, reset, behaviours, the dictionary and the index page

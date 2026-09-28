@@ -26,10 +26,25 @@ invalid ones do not.
 | `camt.053.001.08-sepa-statement.xml` | `camt.053.001.08` | same | `apiome-ui/examples/sepa/06-typical-camt053-statement.xml` | A day's statement: balances, entries, related parties |
 | `camt.054.001.08-notification.xml` | `camt.054.001.08` | same | `apiome-ui/examples/iso20022/05-camt.054-notification.xml` | A notification with charges and supplementary data |
 
-These three projects publish under the **Apache License 2.0**, a copy of which
+The three ISO 20022 projects publish under the **Apache License 2.0**, a copy of which
 is `LICENSE-Apache-2.0.txt`. None of them has a `NOTICE` file. The
 `pain.001` samples are copyright (C) 2023-2026 Pain001; the others carry the
 copyright of their projects' authors.
+
+## NACHA: written by another reader's authors
+
+NACHA has no XSD, so these hold `mockbank/nacha.py`'s field positions to a
+reader that is not this one. They are `.ach` files, so `tools/check_xsd.py`
+does not see them; `tests/test_nacha.py` reads them.
+
+| File | Source | Path at that commit | What it exercises |
+| --- | --- | --- | --- |
+| `nacha-loan-credit.ach` | [moov-io/ach](https://github.com/moov-io/ach) @ `7ee7ad03d7342e1f651c32db22fc8168c2b97cce` | `test/testdata/loan-credit.ach` | A one-entry credit batch that must read with no finding: its entry hash, counts, totals and block count all agree |
+| `nacha-ppd-mixedDebitCredit.ach` | same | `test/testdata/ppd-mixedDebitCredit.ach` | A batch with a debit and two credits: the debit is the one finding, the credits are read |
+
+moov-io/ach is **Apache License 2.0** (`LICENSE-Apache-2.0.txt`), copyright
+2018-2020 The Moov Authors, and it has a `NOTICE` file, kept beside the samples
+as `NOTICE-moov-ach.txt`.
 
 ## Invalid: the XSD rejects them, and so must the mock
 

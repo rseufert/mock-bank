@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The pain.001 twin of nacha_four_payments.ach: the same four dollar payments
+     from ACME, written by hand as ISO 20022, so the NACHA reader can be held to
+     reading the same payments. Where NACHA has no equivalent the twin carries
+     what nacha.py maps to (see its docstring): the company identification as
+     the debtor account, and the trace number as the InstrId. The last payment fills its
+     account number, identification and name fields to the last column, so a
+     field boundary off by one cannot hide in the padding. The routing
+     numbers are real, public ABA numbers; the accounts belong to nobody. -->
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">
+  <CstmrCdtTrfInitn>
+    <GrpHdr>
+      <MsgId>1234567890-2610010900A</MsgId>
+      <CreDtTm>2026-10-01T09:00:00</CreDtTm>
+      <NbOfTxs>4</NbOfTxs>
+      <CtrlSum>1754.99</CtrlSum>
+      <InitgPty>
+        <Nm>ACME CORPORATION</Nm>
+      </InitgPty>
+    </GrpHdr>
+    <PmtInf>
+      <PmtInfId>1234567890-1</PmtInfId>
+      <PmtMtd>TRF</PmtMtd>
+      <NbOfTxs>4</NbOfTxs>
+      <CtrlSum>1754.99</CtrlSum>
+      <ReqdExctnDt>
+        <Dt>2026-10-01</Dt>
+      </ReqdExctnDt>
+      <Dbtr>
+        <Nm>ACME CORPORATION</Nm>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <Othr>
+            <Id>1234567890</Id>
+          </Othr>
+        </Id>
+        <Ccy>USD</Ccy>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <ClrSysMmbId>
+            <ClrSysId>
+              <Cd>USABA</Cd>
+            </ClrSysId>
+            <MmbId>091000019</MmbId>
+          </ClrSysMmbId>
+        </FinInstnId>
+      </DbtrAgt>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>091000010000001</InstrId>
+          <EndToEndId>INV-2026-001</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="USD">1250.00</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <ClrSysMmbId>
+              <ClrSysId>
+                <Cd>USABA</Cd>
+              </ClrSysId>
+              <MmbId>021000021</MmbId>
+            </ClrSysMmbId>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Globex Inc</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <Othr>
+              <Id>4401237788</Id>
+            </Othr>
+          </Id>
+        </CdtrAcct>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>091000010000002</InstrId>
+          <EndToEndId>INV-2026-002</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="USD">89.99</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <ClrSysMmbId>
+              <ClrSysId>
+                <Cd>USABA</Cd>
+              </ClrSysId>
+              <MmbId>121000248</MmbId>
+            </ClrSysMmbId>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Initech LLC</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <Othr>
+              <Id>9900012345</Id>
+            </Othr>
+          </Id>
+        </CdtrAcct>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>091000010000003</InstrId>
+          <EndToEndId>INV-2026-003</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="USD">400.00</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <ClrSysMmbId>
+              <ClrSysId>
+                <Cd>USABA</Cd>
+              </ClrSysId>
+              <MmbId>011000138</MmbId>
+            </ClrSysMmbId>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Umbrella Corp</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <Othr>
+              <Id>5551234567</Id>
+            </Othr>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>Invoice 2026-003, April services</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>091000010000004</InstrId>
+          <EndToEndId>INV-2026-000004</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="USD">15.00</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <ClrSysMmbId>
+              <ClrSysId>
+                <Cd>USABA</Cd>
+              </ClrSysId>
+              <MmbId>111000025</MmbId>
+            </ClrSysMmbId>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>Hooli Savings Accounts</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <Othr>
+              <Id>77009988110000123</Id>
+            </Othr>
+          </Id>
+        </CdtrAcct>
+      </CdtTrfTxInf>
+    </PmtInf>
+  </CstmrCdtTrfInitn>
+</Document>
