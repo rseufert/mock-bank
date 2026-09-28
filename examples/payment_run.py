@@ -85,6 +85,13 @@ OPEN_SUPPLIER_ITEMS = ("AccountingDocumentItemType eq 'K' and "
 # which is what an inbound INVOIC posts with.
 TRANSFER = {"", "T"}
 
+# The mailbox types a statement arrives as, and the NACHA return file an ACH
+# payment's reason comes back in; and what each is called in a problem.
+STATEMENT_KINDS = ("camt.053", "bai2")
+NACHA_RETURN = "nacha.return"
+WHAT = {"camt.053": "statement", "bai2": "BAI2 statement",
+        NACHA_RETURN: "return file"}
+
 # NACHA mode: the run identifications a file header can tell apart (see
 # `nacha_time_and_modifier`), the 36 file ID modifiers, and the first amount an
 # entry's ten digits of cents cannot hold.
@@ -148,6 +155,10 @@ class Run:
     # exception half way through a reconciliation.
     problems: List[str] = field(default_factory=list)
     nacha_origin: str = ""      # the company identification, in NACHA mode
+    # NACHA mode: each returned entry's R code, by its identification number,
+    # from the bank's return files. Kept on the run because the return file and
+    # the statement that credits the money back need not arrive together.
+    return_reasons: Dict[str, str] = field(default_factory=dict)
 
     @property
     def msg_id(self) -> str:
@@ -514,31 +525,53 @@ class PaymentRun:
     # -- 4. reconcile: post the statements to SAP ------------------------------
 
     def reconcile(self, run: Run) -> None:
-        """Post every `camt.053` the bank has sent for the paying account.
+        """Post every statement the bank has sent for the paying account.
 
-        Only `camt.053` is collected; a statement is the bank's record, a
+        Only statements are collected; a statement is the bank's record, a
         `camt.054` is news. Oldest first, because SAP chains each statement to
         the one before it.
+
+        In NACHA mode the statement may be a `camt.053` or a BAI2 file, which
+        is what a US bank sends an ACH account (#57), and both are read into
+        the same statement. The reason an ACH payment came back is in the
+        bank's NACHA return file rather than on either statement, so that is
+        collected too, and a returned item is given its `R` code. The first
+        mailbox that does not answer is the one problem recorded; what was
+        already collected is still posted.
         """
-        status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=camt.053")
-        if status != 200:
-            run.problems.append("the bank's mailbox %s, so no statement was read"
-                                % said(status, raw))
-            return
-        statements = [s for d in bank_documents(raw.decode("utf-8"))
-                      if tag(d[0]) == "BkToCstmrStmt"
-                      for s in d[0] if tag(s) == "Stmt"
-                      and child_text(s, "Acct", "Id", "IBAN") == self.company["iban"]]
-        statements.sort(key=lambda s: (child_text(s, "FrToDt", "FrDtTm"),
-                                       int(child_text(s, "ElctrncSeqNb") or 0)))
+        kinds = ((STATEMENT_KINDS + (NACHA_RETURN,)) if self.nacha
+                 else STATEMENT_KINDS[:1])
+        statements = []
+        for kind in kinds:
+            status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=" + kind)
+            if status != 200:
+                run.problems.append("the bank's mailbox %s, so no %s was read"
+                                    % (said(status, raw), WHAT[kind]))
+                break
+            text = raw.decode("utf-8")
+            if kind == NACHA_RETURN:
+                run.return_reasons.update(nacha_return_reasons(text))
+                continue
+            try:
+                found = camt_statements(text) if kind == "camt.053" else bai2_statements(text)
+            except ValueError as error:
+                run.problems.append("a %s from the bank could not be read: %s"
+                                    % (WHAT[kind], error))
+                continue
+            statements += [s for s in found if s["account"] in self.own_account()]
+        statements.sort(key=lambda s: (s["day"], int(s["number"] or 0)))
         for statement in statements:
             self.post_statement(run, statement)
 
-    def post_statement(self, run: Run, statement) -> Dict:
-        number = child_text(statement, "ElctrncSeqNb")
-        day = child_text(statement, "FrToDt", "FrDtTm")[:10]
-        opening, closing = balance(statement, "OPBD"), balance(statement, "CLBD")
-        lines = entries(statement)
+    def own_account(self) -> set:
+        """What a statement may name the paying account by: its IBAN, or in a
+        BAI2 file its domestic account number."""
+        return {self.company["iban"], self.company.get("company_id", "")} - {""}
+
+    def post_statement(self, run: Run, statement: Dict) -> Dict:
+        number, day = statement["number"], statement["day"]
+        opening, closing = statement["opening"], statement["closing"]
+        lines = statement["lines"]
         moved = sum((signed(e["amount"], e["side"]) for e in lines), Decimal("0"))
         record = {"number": number, "date": day,
                   "adds_up": opening + moved == closing,
@@ -572,6 +605,7 @@ class PaymentRun:
         # EndToEndId; SAP has reversed the clearing and the invoice is owed
         # again. The reason code is the bank's, from the entry's RtrInf.
         why = {e["end_to_end_id"]: e["returned_for"] for e in lines if e["side"] == "CRDT"}
+        why.update(run.return_reasons)
         for line in record["reopened"]:
             item = by_reference.get(line["REFERENCE"])
             if item is not None and item.status == "cleared":
@@ -645,6 +679,98 @@ class PaymentRun:
                 "</E1IDKU1></IDOC></FINSTA01>"
                 % (escape(number), day.replace("-", ""), escape(self.company["bic"]),
                    escape(iban), iban[:2], "".join(body)))
+
+
+def camt_statements(text: str) -> List[Dict]:
+    """Every `Stmt` in a run of `camt.053` documents, as a plain statement."""
+    return [{"account": child_text(s, "Acct", "Id", "IBAN"),
+             "number": child_text(s, "ElctrncSeqNb"),
+             "day": child_text(s, "FrToDt", "FrDtTm")[:10],
+             "opening": balance(s, "OPBD"), "closing": balance(s, "CLBD"),
+             "lines": entries(s)}
+            for d in bank_documents(text) if tag(d[0]) == "BkToCstmrStmt"
+            for s in d[0] if tag(s) == "Stmt"]
+
+
+def bai2_statements(text: str) -> List[Dict]:
+    """Every account in a run of BAI2 files, as the same plain statement.
+
+    Read by hand, as the `camt.053` is, because the example imports neither
+    mock. A record ends at `/`, and an `88` continues the one before it. The
+    `01` gives the file number, the `02` the as-of date, the `03` the account
+    and its `010` opening and `015` closing ledger balances, and each `16` a
+    movement: amounts are in cents, and the direction is the type code's range,
+    100 to 399 a credit and 400 to 699 a debit, so no particular code need be
+    known. The `EndToEndId` is the bank reference number. Only funds type `Z`,
+    `0` and `1` are read, which carry no availability fields; any other raises.
+    """
+    records: List[List[str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line[:-1].split(",") if line.endswith("/") else line.split(",")
+        if fields[0] == "88" and records:
+            records[-1] += fields[1:]
+        else:
+            records.append(fields)
+    out: List[Dict] = []
+    number = day = ""
+    current: Optional[Dict] = None
+    for fields in records:
+        code = fields[0]
+        if code == "01":
+            number = fields[5]
+        elif code == "02":
+            day = "20%s-%s-%s" % (fields[4][:2], fields[4][2:4], fields[4][4:6])
+        elif code == "03":
+            summary = fields[3:]
+            balances = {summary[i]: cents(summary[i + 1])
+                        for i in range(0, len(summary) - 1, 4)}
+            if "010" not in balances or "015" not in balances:
+                raise ValueError("account %s has no 010 and 015 balances" % fields[1])
+            current = {"account": fields[1], "number": number, "day": day,
+                       "opening": balances["010"], "closing": balances["015"],
+                       "lines": []}
+        elif code == "16" and current is not None:
+            if fields[3] not in ("Z", "0", "1"):
+                raise ValueError("funds type %r on %s is not read here"
+                                 % (fields[3], fields[4]))
+            kind = int(fields[1])
+            if not (100 <= kind <= 699):
+                raise ValueError("type code %s is neither a credit nor a debit" % fields[1])
+            current["lines"].append({
+                "amount": str(cents(fields[2])),
+                "side": "CRDT" if kind < 400 else "DBIT",
+                "booked_on": day, "end_to_end_id": fields[4],
+                "msg_id": fields[5] if len(fields) > 5 else "", "returned_for": ""})
+        elif code == "49" and current is not None:
+            out.append(current)
+            current = None
+    return out
+
+
+def cents(text: str) -> Decimal:
+    """A BAI2 amount, which is in cents with no point: `-1250` is -12.50."""
+    return Decimal(int(text or "0")).scaleb(-2)
+
+
+def nacha_return_reasons(text: str) -> Dict[str, str]:
+    """Each returned entry's `R` code, by its identification number.
+
+    Read by hand from the bank's NACHA return files: an entry detail (`6`)
+    names the original entry by its individual identification number,
+    columns 40 to 54, and the addenda after it (`7`, type `99`) gives the
+    return reason code in columns 4 to 6.
+    """
+    reasons, last = {}, ""
+    for line in text.splitlines():
+        if line.startswith("6"):
+            last = line[39:54].strip()
+        elif line.startswith("799") and last:
+            reasons[last] = line[3:6]
+            last = ""
+    return reasons
 
 
 def nacha_time_and_modifier(identification: str) -> Tuple[str, str]:
