@@ -2,10 +2,14 @@
 
     pip install mock-sap
     mock-sap --port 8000 &
-    python3 -m mockbank --port 8090 &
+    python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
     cd examples && python3 -m unittest -v test_payment_run
 
 SAP_URL and BANK_URL point the tests elsewhere.
+
+mock-bank starts at 16:00 on a Friday, after its 15:00 cutoff, and a reset
+returns it there. Test 6 needs exactly that moment, and the others advance to
+Monday morning first, so each test knows which statement its payments are on.
 
 mock-sap's seed has no supplier invoices, and no supplier banks at the IBANs
 mock-bank holds (rseufert/mock-sap#62). So each test posts its invoices as
@@ -14,15 +18,14 @@ suppliers mock-bank's accounts through `A_BusinessPartnerBank`, the API a real
 vendor master is maintained with.
 """
 import datetime
-import http.cookiejar
 import json
 import os
 import unittest
 import urllib.parse
 import urllib.request
 
-from pay_invoices import call
-from payment_run import ODATA, OPEN_SUPPLIER_ITEMS, PaymentRun
+from bank_messages import call
+from payment_run import ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, PaymentRun, SapSession, odata
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
@@ -48,23 +51,12 @@ def control(base, method, path, body=None):
         return json.loads(response.read() or "null")
 
 
-class Sap:
-    """Writes to mock-sap, with the CSRF token and session a real client keeps."""
+class Sap(SapSession):
+    """The test's own writes to mock-sap: vendor master and inbound invoices."""
 
-    def __init__(self):
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-        fetch = urllib.request.Request(SAP + ODATA + "/API_BUSINESS_PARTNER_SRV/",
-                                       headers={"X-CSRF-Token": "Fetch"})
-        with self.opener.open(fetch) as response:
-            self.token = response.headers["X-CSRF-Token"]
-
-    def write(self, method, path, body, content_type):
-        req = urllib.request.Request(
-            SAP + path, method=method, data=body.encode("utf-8"),
-            headers={"Content-Type": content_type, "X-CSRF-Token": self.token})
-        with self.opener.open(req) as response:
-            return response.read()
+    def __init__(self, today):
+        super().__init__(SAP)
+        self.today = today
 
     def bank_account(self, supplier, iban):
         self.write("PATCH", ODATA + "/API_BUSINESS_PARTNER_SRV/A_BusinessPartnerBank"
@@ -74,7 +66,9 @@ class Sap:
 
     def invoice(self, supplier, reference, gross, terms="0001", dated=None):
         """An inbound INVOIC: the supplier bills us, and SAP posts a payable."""
-        dated = (dated or datetime.date.today()).strftime("%Y%m%d")
+        # The bank's date, not the host's: the run compares the due date with
+        # the bank's today, and the two differ whenever bank time is pinned.
+        dated = (dated or self.today).strftime("%Y%m%d")
         self.write("POST", "/sap/bc/idoc/idoc_xml", """<?xml version="1.0"?>
 <INVOIC02><IDOC BEGIN="1">
 <EDI_DC40 SEGMENT="1"><IDOCTYP>INVOIC02</IDOCTYP><MESTYP>INVOIC</MESTYP></EDI_DC40>
@@ -86,17 +80,21 @@ class Sap:
 </IDOC></INVOIC02>""" % (terms, supplier, reference, dated, gross), "application/xml")
 
 
-class PayingOpenItems(unittest.TestCase):
+class MocksCase(unittest.TestCase):
+    """Both mocks reset, three suppliers pointed at mock-bank's accounts."""
 
     def setUp(self):
         control(SAP, "POST", "/_mock/reset")
         control(BANK, "POST", "/_mock/reset")
-        self.sap = Sap()
+        self.today = self.bank_today()
+        self.sap = Sap(self.today)
         for supplier, iban in ACCOUNTS.items():
             self.sap.bank_account(supplier, iban)
-        self.today = datetime.date.fromisoformat(
-            control(BANK, "GET", "/_mock/state")["clock"]["date"])
         self.payments = PaymentRun(SAP, BANK, ACME)
+
+    def bank_today(self):
+        return datetime.date.fromisoformat(
+            control(BANK, "GET", "/_mock/state")["clock"]["date"])
 
     def post_three(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
@@ -105,6 +103,9 @@ class PayingOpenItems(unittest.TestCase):
 
     def by_reference(self, run):
         return {item.reference: item for item in run.items}
+
+
+class PayingOpenItems(MocksCase):
 
     def test_a_closed_account_is_rejected_ac04_and_the_rest_accepted(self):
         self.post_three()
@@ -158,6 +159,97 @@ class PayingOpenItems(unittest.TestCase):
         # afterwards does not reach its open item; see rseufert/mock-sap#62.
         self.skipTest("mock-sap cannot post a blocked supplier invoice yet "
                       "(rseufert/mock-sap#62)")
+
+
+class ReconcilingTheStatement(MocksCase):
+    """#47: each camt.053 posted to SAP as a FINSTA01, clearing what it paid."""
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.today.weekday(), 4, "start mock-bank with "
+                         "--clock 2026-10-02T16:00, a Friday after the cutoff")
+        self.monday = self.today + datetime.timedelta(days=3)
+
+    def advance(self, to):
+        control(BANK, "POST", "/_mock/advance?to=%s" % to.isoformat())
+
+    def post_two(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.sap.invoice(ELSEWHERE, "ELS-0815", "238.00")
+
+    def clearing(self, reference):
+        """The clearing document on the open item for a supplier invoice number."""
+        invoice = odata(SAP, ODATA + "/API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice",
+                        **{"$filter": "SupplierInvoiceIDByInvcgParty eq '%s'" % reference})[0]
+        items = odata(SAP, ITEMS, **{"$filter": (
+            "AccountingDocument eq '%s' and AccountingDocumentItemType eq 'K'"
+            % invoice["AccountingDocument"])})
+        return items[0]["ClearingAccountingDocument"]
+
+    def pay_on_monday(self):
+        """A run on Monday morning, before the cutoff: it settles that day."""
+        self.advance(self.monday)
+        run = self.payments.run(self.monday, "RUN1")
+        self.advance(self.monday + datetime.timedelta(days=1))
+        return run
+
+    def test_1_a_clean_run_is_paid_matched_and_cleared(self):
+        self.post_two()
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        monday = [s for s in run.statements if s["date"] == self.monday.isoformat()]
+        self.assertEqual(len(monday), 1, run.statements)
+        self.assertTrue(monday[0]["adds_up"])
+        self.assertEqual(monday[0]["findings"], [])
+        self.assertEqual({i.reference: i.status for i in run.items},
+                         {"GLX-4711": "cleared", "ELS-0815": "cleared"})
+        for reference in ("GLX-4711", "ELS-0815"):
+            self.assertNotEqual(self.clearing(reference), "", reference)
+        # Cleared in SAP, so the next run has nothing left to pay.
+        self.assertEqual(self.payments.select(self.monday), [])
+
+    def test_5_a_statement_gap_leaves_the_missing_payment_unreconciled_and_open(self):
+        control(BANK, "PATCH", "/_mock/accounts/ACME", {"behaviour": "statement-gap"})
+        self.post_two()
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        monday = [s for s in run.statements if s["date"] == self.monday.isoformat()][0]
+        self.assertFalse(monday["adds_up"])
+        # SAP's own arithmetic check says so too, in its own words.
+        self.assertTrue(any("does not add up" in f for f in monday["findings"]),
+                        monday["findings"])
+        statuses = sorted(i.status for i in run.items)
+        self.assertEqual(statuses, ["cleared", "unreconciled"])
+        missing = [i for i in run.items if i.status == "unreconciled"][0]
+        self.assertIn("short", missing.reason)
+        self.assertEqual(self.clearing(missing.reference), "")
+
+    def test_6_after_the_cutoff_it_waits_for_mondays_statement(self):
+        self.post_two()
+        run = self.payments.run(self.today, "RUN1")        # Friday, 16:00
+        self.advance(self.today + datetime.timedelta(days=1))
+        self.payments.reconcile(run)
+        friday = [s for s in run.statements if s["date"] == self.today.isoformat()]
+        self.assertEqual(len(friday), 1, run.statements)
+        # An empty day's statement posts harmlessly: nothing cleared, nothing
+        # it could not place, nothing wrong with it.
+        self.assertEqual((friday[0]["cleared"], friday[0]["unprocessed"],
+                          friday[0]["findings"]), ([], [], []))
+        self.assertEqual({i.status for i in run.items}, {"accepted"})
+        self.advance(self.monday + datetime.timedelta(days=1))
+        self.payments.reconcile(run)
+        self.assertEqual({i.status for i in run.items}, {"cleared"})
+
+    def test_posting_the_same_statement_twice_clears_nothing_twice(self):
+        self.post_two()
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        monday = [s for s in run.statements if s["date"] == self.monday.isoformat()][0]
+        before = {r: self.clearing(r) for r in ("GLX-4711", "ELS-0815")}
+        again = self.payments.session.post_idoc(monday["finsta"])
+        self.assertEqual(again.get("CLEARED"), [])
+        self.assertEqual(again.get("REOPENED"), [])
+        self.assertEqual({r: self.clearing(r) for r in before}, before)
 
 
 if __name__ == "__main__":
