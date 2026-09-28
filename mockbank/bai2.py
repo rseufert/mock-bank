@@ -29,10 +29,11 @@ Type codes
 ``015``         closing ledger balance
 ``495``         the debit for a payment that left the account (**placeholder**)
 ``165``         the credit for a payment that came back (**placeholder**)
+``195``         money arriving from somebody else, #91 (**placeholder**)
 ==============  ==============================================================
 
 ``010`` and ``015`` are the two status codes this mock needs and are not in
-doubt. **The two transaction codes are still placeholders.** They are listed in
+doubt. **The transaction codes are still placeholders.** They are listed in
 ``PLACEHOLDER_CODES`` so that nothing else in the package has to know which is
 which.
 
@@ -40,12 +41,12 @@ which.
 file it found could not. ``bai2-sample1.txt`` carries ``100`` and ``400`` (a
 credit and a debit summary total), ``108`` and ``409`` (a detail credit and
 debit), and ``040``/``045`` (available balances). None of those is an outgoing
-customer transfer or one coming back, which are the only two movements this mock
-books, so the sample settles a great deal about the *file* and nothing about
-these two codes. The one public repository holding the full BAI code list carries
+customer transfer, one coming back, or a transfer received, which are the three
+movements this mock books, so the sample settles a great deal about the *file*
+and nothing about these codes. The one public repository holding the full BAI code list carries
 **no licence at all**, so it is neither vendored here nor cited as authority.
 
-Two unverified codes plainly marked is the honest state. They are not quietly
+Unverified codes plainly marked is the honest state. They are not quietly
 promoted to settled because #57 closed.
 
 The first draft used ``455`` for the debit and kept ``165`` for the return,
@@ -123,13 +124,16 @@ OPENING_LEDGER = "010"
 CLOSING_LEDGER = "015"
 
 # **Still placeholders after #57.** See the module docstring: the balance codes
-# are certain and these two are not, so they are named here and nowhere else. The
+# are certain and these are not, so they are named here and nowhere else. The
 # outside sample #57 vendored settled the record layout, the counts, the control
 # totals and the 02's parties, and could not settle these: it books nothing that
-# is an outgoing customer transfer or a return of one.
+# is an outgoing customer transfer, a return of one, or a transfer received.
 DEBIT = "495"
 RETURNED_CREDIT = "165"
-PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT)
+# Money arriving (#91): Incoming Money Transfer, by the reasoning that gives the
+# debit 495 - a transfer, not a "preauthorized" movement the other party pulled.
+RECEIVED_CREDIT = "195"
+PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT, RECEIVED_CREDIT)
 
 # `Z` means the amount is immediately available; BAI2's other funds types say
 # when it becomes so. Everything this mock books is already booked, so there is
@@ -588,20 +592,24 @@ def _transaction(payment: Dict) -> str:
     comma in either would end the field early, so it is replaced rather than
     escaped: BAI2 has no escape, and a name with a comma in it is common.
     """
+    if payment.get("incoming"):
+        # Money arriving from somebody else (#91): the payer's name is the
+        # text, and their structured reference the customer reference number.
+        return _record("16", RECEIVED_CREDIT, _movement(payment["amount"]),
+                       AVAILABLE_NOW, _safe(payment["end_to_end_id"]),
+                       _safe(payment.get("reference") or ""),
+                       _safe(payment.get("debtor_name") or ""))
     if payment.get("credit"):
-        # Every credit this mock books today is a payment of its own coming
-        # back, and carries the reason it came back. #96 adds money *arriving*,
-        # whose rows are credits too - and coding a customer's payment as a
-        # return would be a wrong statement, not a cosmetic one. So the
-        # distinction is the return reason rather than the credit flag, and an
-        # unexplained credit stops here instead of being mislabelled. Whichever
-        # of #56 and #96 lands second adds the received-credit code.
+        # Any other credit is a payment of this bank's own coming back, and
+        # carries the reason it came back. Coding a customer's payment as a
+        # return would be a wrong statement, not a cosmetic one, so a credit
+        # that is neither money arriving nor explained stops here instead of
+        # being mislabelled.
         if not payment.get("return_reason"):
             raise Unwritable(
-                "a credit with no return reason is not a return, and BAI2 has "
-                "no code here for one yet: %r would be written as %s, which "
-                "says the payment came back. A received credit needs its own "
-                "type code (see #57)."
+                "a credit with no return reason is not a return, and it is not "
+                "money arriving either: %r would be written as %s, which says "
+                "the payment came back."
                 % (payment.get("end_to_end_id"), RETURNED_CREDIT))
         code = RETURNED_CREDIT
     else:

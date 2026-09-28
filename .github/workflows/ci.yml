@@ -131,6 +131,28 @@ jobs:
             sleep 0.25
           done
           cd examples && python -m unittest -v test_pay_invoices
+      - name: Run the procure_to_pay example against all three mocks from PyPI
+        run: |
+          set -euo pipefail
+          python -m pip install "mock-sap>=0.13.2" mock-edi
+          mock-sap --port 8000 -q &
+          SAP_PID=$!
+          mock-edi --port 8080 -q &
+          EDI_PID=$!
+          # The same Friday-after-cutoff start as payment_run's, though this
+          # example reads each invoice's own due date and advances to it: the
+          # supplier dates its 810 today and bills net 30, so the payable falls
+          # due about a month out and a fixed date here would rot.
+          python -m mockbank --port 8090 -q --clock 2026-10-02T16:00 &
+          BANK_PID=$!
+          trap 'kill $SAP_PID $EDI_PID $BANK_PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8000/_mock/health >/dev/null \
+              && curl -sf http://127.0.0.1:8080/_mock/health >/dev/null \
+              && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
+            sleep 0.25
+          done
+          cd examples && python -m unittest -v test_procure_to_pay
       - name: Run the payment_run example against mock-sap from PyPI
         run: |
           set -euo pipefail
