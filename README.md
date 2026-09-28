@@ -728,6 +728,7 @@ mockbank/drop.py               the second door: a directory watched, and one wri
 mockbank/db.py                 the schema, the upgrade, and the seeded accounts
 mockbank/handler.py            the request handler: authentication, the body, the request log, and the lookup in the route table
 mockbank/messages.py           reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
+mockbank/bai2.py               BAI2: the record declarations, and a writer for the statement a camt.053 reports
 mockbank/nacha.py              NACHA: the record declarations, and a reader into the same payments as a pain.001
 mockbank/outbox.py             what the bank sends and when: the message queue, release as the clock moves, the mailbox
 mockbank/routes/__init__.py    the route table: each surface registers method, path pattern and function
