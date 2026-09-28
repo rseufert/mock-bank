@@ -13,6 +13,161 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.2.0] - 2026-09-28
+
+### Added
+
+- **Returns** (#14). Under `return-later` a payment settles as usual and then
+  comes back `days` business days later (3 by default) with `reason` (`AC04`
+  by default), every payment or only the `end_to_end_id` named in the
+  account's `parameters`. The bank credits the debtor account back and sends
+  a `pacs.004.001.09` - declared in the dictionary and checked against its
+  published XSD like the rest - with a `camt.054` credit beside it; the day's
+  `camt.053` carries a `CRDT` entry under `PMNT`/`ICDT`/`RRTN` whose
+  `RtrInf` names the reason, and still reconciles.
+  `GET /_mock/payments/<EndToEndId>` shows `returned` with the reason and
+  when it was due. The database gains three return columns on `payment`
+  (schema version 5); a 0.1.0 `--db` file is upgraded in place.
+
+- **Folder transport** (#15). Most bank connections are two directories on an
+  SFTP host rather than an HTTP endpoint, so the bank has a second door.
+  `--drop-dir` is watched (every `--drop-interval-ms`, and `POST
+  /_mock/drop/scan` looks now); each settled file goes through **the same
+  pipeline** as `POST /payments` and then moves to `processed/`, or to `failed/`
+  when the bank could not put it through, with the answer written beside it as
+  `<name>.findings.txt` in the same prose `POST /_mock/validate` prints.
+  `--pickup-dir` receives every released message as
+  `<type>-<account>-<id>.xml`, written to a temporary name and renamed so a
+  poller never reads half a file - including the `camt.054` and `camt.053` the
+  clock releases days later, and messages from files posted over HTTP. A file
+  still being written is left alone for `--drop-settle-ms`; a file is claimed by
+  renaming before it is read, so a scan and the poller cannot both take it; and
+  one that could not be moved out of the way is remembered and left until it
+  changes rather than read again on every pass. `GET /_mock/drop` reports all of
+  it, and `/_mock/state` names both directories. The database gains a
+  `written_at` column on `message` (schema version 6); a 0.1.0 or 0.2 `--db`
+  file is upgraded in place. One directory for both, or either inside the other,
+  is refused at startup - the bank would read every message it wrote back in as
+  a payment file - and a file the mock cannot write is reported on stderr and in
+  `GET /_mock/drop` rather than failing silently. The folder door is outside
+  `--auth`, as a real SFTP drop is, and the README says so.
+
+- **A payment run against SAP** (#16). `examples/payment_run.py` is what an
+  `F110` run does, end to end and against two mocks rather than one: it asks
+  mock-sap for the supplier items that are due, pays them in one `pain.001`,
+  and posts each `camt.053` back as a `FINSTA01` so SAP clears what was paid
+  and reopens what came back. The `EndToEndId` is the supplier's own invoice
+  number and the `MsgId` is the run date and identification, as `F110`'s are,
+  so the bank's answers and SAP's clearing meet on the same reference and the
+  same run sent twice is `DUPL`. Thirteen tests cover the six from the plan -
+  a clean run cleared in SAP, a closed account rejected `AC04` with the rest
+  accepted, a return reopening an invoice so that it is distinguishable from
+  one never paid, the same run twice paying nothing twice, a statement gap
+  leaving exactly one payment unreconciled, and a run after the cutoff waiting
+  for Monday's statement - plus what the suite adds around them: a statement
+  posted twice clearing nothing twice, an item not yet due left alone, a
+  blocked invoice never selected, and what goes into `run.problems` when the
+  bank or SAP answers badly. They need mock-sap 0.13.1 or newer, and CI runs
+  them against it from PyPI. Standard library only, and it imports neither mock.
+
+- **Retention for a long-running mock** (#17). A mock left up as a shared
+  staging bank had a request log and a message table that grew without end, and
+  the only remedy was `POST /_mock/reset`, which throws the accounts away with
+  them. `--keep-requests N` (default 5000) keeps the newest N request-log rows
+  and `--retention-days D` (default off) removes request rows and
+  already-collected messages older than D days, trimmed at startup, after each
+  advance and every few hundred requests - so the default in-memory bank is
+  untouched. `GET /_mock/state` reports what has been removed, so a tester who
+  wonders where their rows went can look rather than guess. Payments, files,
+  *uncollected* messages, accounts, holidays and counters are never pruned: the
+  first two are the evidence a failing test is read against, an uncollected
+  message is the one thing a mailbox exists to hold, and the rest are what the
+  mock is rather than a record of what it did. The indexes the issue also asked
+  for turned out to be there already, so the tests now hold them in place by
+  name against the query plans. A message's age is measured on the *bank* clock,
+  because that is what wrote its `taken_at`; the request log's age is real
+  elapsed time, because that is when the request arrived. Pruning a `camt.053`
+  clears the statement's reference to it rather than leaving one that answers
+  `404`, and a `--retention-days` the mock cannot act on - `nan`, `inf`, a
+  negative, or a century and a half - is refused at startup instead of crashing
+  or being silently off. With a `--pickup-dir` configured, retention only
+  removes a message the folder has actually been given: aging out one the
+  directory never received would lose it silently, because a client that polls a
+  directory has no other way to see it.
+
+- **A worked example with mock-edi** (#35). `examples/pay_invoices.py` pays
+  the supplier invoices mock-edi sends as EDIFACT `INVOIC`s: one `pain.001`,
+  each payment on its invoice's due date, then the `pain.002`, `camt.054` and
+  `camt.053` matched back by `EndToEndId` and `MsgId`. Seven tests in
+  `examples/test_pay_invoices.py` cover a clean run, `AC04`, a duplicate
+  invoice, a run retried after a crash (`DUPL`), `AM04`, a return and a
+  statement gap. CI's smoke job runs them against mock-edi from PyPI.
+
+- **NACHA files are read and checked** (#52), the first step of the US formats.
+  `POST /_mock/validate` recognises a NACHA file by its `101` file header and
+  reads it into the same payments a `pain.001` becomes, from a declaration of
+  record types 1, 5, 6, 7, 8 and 9 by field position and width
+  (`mockbank/nacha.py`). The `EndToEndId` is the individual identification
+  number, the originator's own reference, and the debtor account is the company
+  identification, since a NACHA file carries none. Findings name the line, the
+  record and the field with its columns: a line that is not 94 characters, a
+  routing number that fails its check digit (`RC01`), an entry hash or block
+  count that is wrong (`FF01`), counts (`AM18`) and credit totals (`AM10`) that
+  disagree with the entries, and any entry that is not a credit.
+  `POST /payments` refuses a NACHA file by name until #53.
+
+### Changed
+
+- **The pipeline moved from the request handler onto `State.receive`**,
+  so that the folder transport and `POST /payments` are two doors onto one
+  pipeline rather than two copies of it. No behaviour change: the answer, the
+  statuses and the mailbox are what they were.
+
+- **The list of endpoints is read from the route table** (#45), in the 404
+  body, the index page and `/_mock/state`'s `supported`, so it cannot drift
+  from what the mock serves. The same 25 endpoints and notes as before; the
+  order is now the order they are registered in, so `GET /_mock/behaviours`
+  comes before the dictionary and `POST /_mock/validate` after the request
+  log. The README gains the row for `GET /` it never had, which the new check
+  in `tools/check_docs.py` found on its first run: it now fails the build when
+  the README's endpoint table and the route table disagree either way.
+
+- **A NACHA file is checked as a `pain.001` is** (#53, carried from #71). A past
+  effective entry date is a `DT01` warning and an individual identification
+  number used twice is `AM05`, the two checks a `pain.001` gets that NACHA has no
+  rule of its own for. A blank file creation time is no longer a finding, since
+  NACHA allows it. The reading of either format now keeps the creditor's bank by
+  clearing member id, `creditor_clearing_id`: the receiving DFI's routing number
+  in a NACHA entry, `CdtrAgt/FinInstnId/ClrSysMmbId/MmbId` in a `pain.001`.
+
+### Fixed
+
+- **Three answers from the old router, which the route table (#44) no longer
+  gives.** `server.py` is split into `handler.py`, `state.py` and one module
+  per surface under `routes/`, with every endpoint in one table. Moving the
+  endpoints into the table changed three answers a client could see, and each
+  old answer was a bug:
+  - `GET /_mockxyz/health` answered as health, because any path starting with
+    `/_mock` had its first segment dropped. It is now a 404.
+  - `POST /_mock/dictionary/<message>/<more>` was a 405, as if the path
+    existed. It is now a 404.
+  - The same for `POST /_mock/payments/<EndToEndId>/<more>`: now a 404.
+
+  Nothing else changed: 99 requests sent to both routers, with and without
+  `--auth`, got the same answers.
+
+- **A file the bank cannot read now gets a `pain.002` through either door**
+  (#64). A body with no `MsgId` used to be answered only in the HTTP response
+  (#26), so a client banking through `--drop-dir` got prose in `failed/` and
+  nothing in `--pickup-dir`. Now the refusal is queued as a message like any
+  other `pain.002`: `RJCT` with its reason, `OrgnlMsgId` (and `OrgnlMsgNmId`,
+  when the message type could not be read either) `NOTPROVIDED` rather than an
+  identifier the bank made up, and a dropped file's name in
+  `StsRsnInf/AddtlInf`. It reaches the mailbox and the pickup directory, and
+  `POST /payments` lists it in `queued`. It is filed under the debtor's account
+  when one could be read, and as `bank` when none could. A `silent` debtor still
+  hears nothing, and a `DUPL` refusal, which has a `MsgId`, is unchanged.
+
 ## [0.1.0] - 2026-09-26
 
 ### Fixed
@@ -201,5 +356,6 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rseufert/mock-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rseufert/mock-bank/releases/tag/v0.1.0

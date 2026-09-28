@@ -42,6 +42,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHANGELOG = "CHANGELOG.md"
@@ -58,6 +59,9 @@ CI_WORKFLOW = ".github/workflows/ci.yml"
 CONCLUDED_WELL = ("success",)
 
 HEADING = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$", re.M)
+# `[0.1.0]: https://...` at the foot of the file. It follows the oldest section
+# directly, so it is an edge of a section body as much as the next heading is.
+LINK_REFERENCE = re.compile(r"^\[[^\]]+\]:\s*\S+\s*$")
 
 
 class Refused(Exception):
@@ -81,6 +85,41 @@ def out(*args) -> str:
 def read(path: str) -> str:
     with open(os.path.join(ROOT, path), encoding="utf-8") as handle:
         return handle.read()
+
+
+def notes_for(text: str, version: str) -> str:
+    """The body of this version's section, to publish as the Release notes.
+
+    Pure, and the awkward part is knowing where the section stops. Two things
+    can follow it and both have to end it:
+
+    - the next `## [` heading, when this is not the oldest section;
+    - the link references at the foot of the file, which for the oldest section
+      are the only thing after it, and which read as a stray `[0.1.0]: https://`
+      in the middle of release notes if they are left in.
+
+    Stopping only at the next heading passes every test where the version sits
+    in the middle of the file, which is why the tests do both.
+
+    Generated notes are what this replaces. On a squash-merged repository they
+    restate the commit titles, which the changelog already says better and which
+    somebody has actually reviewed.
+    """
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        found = HEADING.match(line)
+        if found and found.group(1) == version:
+            start = index + 1
+            break
+    if start is None:
+        return ""
+    body = []
+    for line in lines[start:]:
+        if line.startswith("## ") or LINK_REFERENCE.match(line):
+            break
+        body.append(line)
+    return "\n".join(body).strip() + "\n"
 
 
 def check_tree_is_releasable(version: str):
@@ -164,10 +203,11 @@ def ci_verdict(answer, workflow: str = CI_WORKFLOW):
     ever cut. It asked the combined-status API, which reports `pending` with
     zero statuses on a repository whose checks are all Actions - not "" or
     null, which is what the fallback to check runs was waiting for. So the
-    fallback never fired and every commit read as pending. `main` at 2d1d812
-    answers `{"state": "pending", "total_count": 0}` with thirteen successful
-    check runs; that payload is a fixture beside this, and the test named for
-    it is the one I should have had first.
+    fallback never fired and every commit read as pending.
+    `tests/fixtures/commit-status-pending-zero.json` is that real answer, kept
+    so the shape cannot be misremembered; `actions-runs-green.json` beside it is
+    what this function is asked instead, and `actions-runs-skipped.json` is a
+    run that completed having done nothing.
 
     Two further things this has to get right, both of which the earlier version
     did not:
@@ -274,7 +314,7 @@ def remote_tag_commit(tag: str) -> str:
 
 
 def release_state(tag: str) -> str:
-    """"published", "draft" or "absent" for the GitHub Release on this tag.
+    """"published", "draft", "absent", or "unknown" when `gh` cannot say.
 
     A draft is neither of the other two, and calling it published was a bug: a
     draft does not trigger the publish workflow, so PyPI keeps serving the
@@ -283,6 +323,17 @@ def release_state(tag: str) -> str:
     tells the reader nothing about what to do. `check_release.py` already drew
     this distinction; this asks the same question the same way.
     """
+    if subprocess.call(["gh", "repo", "view", "--json", "name"], cwd=ROOT,
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL) != 0:
+        # Not a refusal from in here, and not `absent` either. `absent` was the
+        # conflation this script refuses elsewhere - it would go on to tag and
+        # publish without knowing what is already there. But raising here would
+        # put a GitHub problem in front of a dirty working tree, which is both
+        # cheaper to discover and more likely to be what is actually wrong. So
+        # it is reported to the caller, which refuses once the local checks have
+        # had their say.
+        return "unknown"
     result = subprocess.run(
         ["gh", "release", "view", tag, "--json", "isDraft,publishedAt"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -330,7 +381,16 @@ def main() -> int:
                   "published; there is nothing to do." % tag)
             return 0
 
+        # The local checks first: they are cheaper, they need no network, and a
+        # dirty tree is both more likely and more useful to hear about than a
+        # GitHub problem.
         commit, date = check_tree_is_releasable(version)
+
+        if state == "unknown":
+            raise Refused(
+                "`gh` cannot work out which GitHub repository this is, so whether "
+                "%s already has a Release could not be asked - and this will not "
+                "tag and publish without knowing what is already there." % tag)
 
         # A tag already on the remote must name the commit being released. If it
         # names another, something has gone wrong that this script must not paper
@@ -374,9 +434,30 @@ def main() -> int:
         if released:
             print("  the GitHub Release for %s already exists; leaving it." % tag)
         else:
-            run("publish the GitHub Release, which uploads to PyPI",
-                ["gh", "release", "create", tag, "--verify-tag",
-                 "--title", version, "--generate-notes"], args.dry_run)
+            notes = notes_for(read(CHANGELOG), version)
+            if not notes.strip():
+                raise Refused(
+                    "%s's [%s] section is empty, so the Release would have no "
+                    "notes. Assemble the fragments into it first."
+                    % (CHANGELOG, version))
+            print("  the Release notes are %s's [%s] section, %d line(s):"
+                  % (CHANGELOG, version, len(notes.strip().splitlines())))
+            for line in notes.strip().splitlines():
+                print("      | %s" % line)
+            # A real file, because `gh` reads the body from one. Written next to
+            # nothing and removed afterwards even when the publish fails, so a
+            # refused release leaves no litter in the tree being released.
+            handle, notes_path = tempfile.mkstemp(prefix="release-notes-",
+                                                  suffix=".md")
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as out_file:
+                    out_file.write(notes)
+                run("publish the GitHub Release, which uploads to PyPI",
+                    ["gh", "release", "create", tag, "--verify-tag",
+                     "--title", version, "--notes-file", notes_path],
+                    args.dry_run)
+            finally:
+                os.unlink(notes_path)
     except Refused as refusal:
         print("not releasing %s:\n\n  - %s" % (version, refusal))
         return 1
