@@ -532,14 +532,19 @@ class OneIssueInTwoPullRequests(ToolCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("changed without an entry", out)
 
-    def test_the_maintainer_may_allow_a_rewrite(self):
-        # Both halves, or this passes on a tool that never reports a rewrite at
-        # all - which is the tool this change replaces.
+    def rewrite_over_part_a(self):
+        """A pull request that replaces part a's entry, as #57 part b did."""
         self.fragment("57.added.md", self.PART_A)
         base = self.base_commit()
         self.fragment("57.added.md", self.PART_B)
         self.write("mockbank/thing.py", "# changed\n")
         self.commit_all("change the package")
+        return base
+
+    def test_the_maintainer_may_allow_a_rewrite(self):
+        # Both halves, or this passes on a tool that never reports a rewrite at
+        # all - which is the tool this change replaces.
+        base = self.rewrite_over_part_a()
         refused, out = self.run_tool("--base", base)
         self.assertEqual(refused, 1, out)
         # *Why* it refused, not only that it did. On the tool this replaces the
@@ -547,8 +552,37 @@ class OneIssueInTwoPullRequests(ToolCase):
         # filename was new - so an exit code alone let this pass for free.
         self.assertIn("already had", out)
         self.assertIn("drops", out)
-        allowed, out = self.run_tool("--base", base, "--labels", "no changelog")
+        allowed, out = self.run_tool("--base", base,
+                                     "--labels", "changelog rewrite")
         self.assertEqual(allowed, 0, out)
+
+    def test_no_changelog_alone_does_not_allow_a_rewrite(self):
+        """The two labels are separate, and this is why.
+
+        `no changelog` says a change needs no entry - a comment, a rename, a pure
+        refactor. A refactor is also the pull request where a stray edit to
+        somebody else's waiting entry is least expected, so the label that covers
+        refactors must not be the one that waves a rewrite through. Sharing one
+        label was my first draft and the senior was right to refuse it.
+        """
+        base = self.rewrite_over_part_a()
+        code, out = self.run_tool("--base", base, "--labels", "no changelog")
+        self.assertEqual(code, 1, out)
+        self.assertIn("57.added.md", out)
+        self.assertIn("drops", out)
+        # And it says which label does apply, rather than only that this one does
+        # not - a refusal that names no way forward is a wall.
+        self.assertIn("changelog rewrite", out)
+
+    def test_the_rewrite_label_does_not_lift_the_entry_rule(self):
+        # The other direction: `changelog rewrite` is not a licence to touch the
+        # package with no entry at all.
+        base = self.base_commit()
+        self.write("mockbank/thing.py", "# changed\n")
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base, "--labels", "changelog rewrite")
+        self.assertEqual(code, 1, out)
+        self.assertIn("changed without an entry", out)
 
     def test_reordering_and_re_indenting_are_not_losses(self):
         # A loss is counted as a multiset of stripped lines, so moving a

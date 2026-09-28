@@ -54,10 +54,13 @@ What is checked:
    the filenames had not changed. The step in (4) is what part b should have
    used, and (6) is what would have said so.
 
-Both (5) and (6) are lifted by the `no changelog` label, which only the
-maintainer applies: for (5) when a change genuinely needs no entry - a comment,
-a rename, a pure refactor - and for (6) when rewriting somebody else's waiting
-entry is the intention rather than the accident.
+Each has its own label, and only the maintainer applies either. `no changelog`
+lifts (5), for a change that genuinely needs no entry - a comment, a rename, a
+pure refactor. `changelog rewrite` lifts (6), for a deliberate rewrite of an
+entry already waiting for a release. They are deliberately not one label: a
+rewrite *is* a changelog change, and a refactor is the pull request where a
+stray fragment edit would be least expected, so the label that covers refactors
+is the last one that should also wave a rewrite through.
 
 (2) and (5) need something to compare against, so they run only when `--base`
 names a revision this checkout has; CI passes the pull request's base. Run it
@@ -82,6 +85,14 @@ CHANGELOG = "CHANGELOG.md"
 PYPROJECT = "pyproject.toml"
 PACKAGE = "mockbank/"
 ESCAPE_HATCH = "no changelog"
+
+# A second label, for the other rule. `no changelog` says a change needs no
+# entry - a comment, a rename, a pure refactor - and a rewrite of an entry that
+# is already waiting for a release is not that: it is a changelog change. Sharing
+# one label would also have put the escape on exactly the pull requests where a
+# stray fragment edit is least expected, since a refactor is what carries
+# `no changelog`. So the loss rule has its own.
+REWRITE_HATCH = "changelog rewrite"
 FRAGMENTS = "changelog.d"
 
 # What `## [Unreleased]` holds, exactly. Kept here rather than inferred, so the
@@ -397,7 +408,7 @@ def check_against_base(text: str, before: str, base: str, labels=()):
     # twenty lines of part a's entry. Appending is allowed and is not reported,
     # because nothing is lost by it; what is reported is text that went.
     before, after = _bodies_at(base), _bodies_now()
-    if ESCAPE_HATCH not in labels:
+    if REWRITE_HATCH not in labels:
         for name in sorted(set(before) & set(after)):
             lost = _lines_lost(before[name], after[name])
             if not lost:
@@ -409,9 +420,9 @@ def check_against_base(text: str, before: str, base: str, labels=()):
                 "`<issue>.<kind>.<step>.md`, and leave that one alone. If you do "
                 "mean to rewrite an entry that is already waiting for a release, "
                 "that is somebody else's paragraph and the `%s` label is what "
-                "allows it."
+                "allows it - not `%s`, which says a change needs no entry at all."
                 % (FRAGMENTS, name, _named(base), len(lost), _short(lost[0]),
-                   ESCAPE_HATCH))
+                   REWRITE_HATCH, ESCAPE_HATCH))
 
     package = _changed_in_package(base)
     if package and ESCAPE_HATCH not in labels:
