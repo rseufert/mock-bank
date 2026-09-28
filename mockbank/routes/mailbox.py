@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from .. import db, outbox
+from .. import db, nacha, outbox
 from . import first, flag, route
 
 # How many request-log rows `GET /_mock/requests` hands back. The issue asks
@@ -24,13 +24,29 @@ REQUEST_LOG_PAGE = 100
 def mailbox(h) -> None:
     """What the bank has sent and the client has not taken."""
     h.state.release()
+    kind = first(h.query, "type")
+    if flag(h.query, "raw"):
+        # `?raw` is a sequence of XML documents, and a client splits it on
+        # their declarations. A NACHA acknowledgement is plain text, and in
+        # among them it would be read as the tail of the XML before it. So a
+        # mix is refused, before anything is taken, and says how to ask.
+        waiting = {row["type"] for row in outbox.collect(
+            h.state.conn, h.state.now(), leave=True, kind=kind)}
+        if nacha.ACK in waiting and waiting - {nacha.ACK}:
+            return h.json(409, {
+                "error": "?raw is a sequence of XML documents, and NACHA "
+                         "acknowledgements are plain text; collect them apart, "
+                         "with ?raw&type=%s and ?raw&type=pain. or ?raw&type=camt."
+                         % nacha.ACK,
+                "waiting": sorted(waiting)})
     rows = outbox.collect(h.state.conn, h.state.now(),
-                          leave=flag(h.query, "leave"),
-                          kind=first(h.query, "type"))
+                          leave=flag(h.query, "leave"), kind=kind)
     if flag(h.query, "raw"):
         # The bodies and nothing else. See outbox.RAW_SEPARATOR on why
         # this is a sequence of documents rather than one document.
-        return h.text(200, outbox.raw(rows), "application/xml; charset=utf-8")
+        text = rows and all(row["type"] == nacha.ACK for row in rows)
+        return h.text(200, outbox.raw(rows), "text/plain; charset=utf-8" if text
+                      else "application/xml; charset=utf-8")
     h.json(200, outbox.as_json(rows))
 
 
@@ -40,7 +56,9 @@ def message(h, identifier: str) -> None:
     row = outbox.message(h.state.conn, identifier)
     if row is None:
         return unknown_message(h, identifier)
-    h.text(200, row["body"].strip() + "\n", "application/xml; charset=utf-8")
+    h.text(200, row["body"].strip() + "\n",
+           "text/plain; charset=utf-8" if row["type"] == nacha.ACK
+           else "application/xml; charset=utf-8")
 
 
 @route("POST", "/_mock/mailbox/<id>/unread")

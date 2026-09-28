@@ -31,7 +31,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List
 
-from . import accounts, db, messages
+from . import accounts, db, messages, nacha
 
 
 def queue_status(conn, decision, file_id, now, delay_ms=0,
@@ -46,30 +46,38 @@ def queue_status(conn, decision, file_id, now, delay_ms=0,
     """
     if not decision.reported:
         return []
-    if file_id is not None:
-        msg_id = "MB-P002-%06d" % file_id
-    elif decision.msg_id is None and decision.rejected_outright:
-        if _silent(conn, decision):
-            return []
-        msg_id = "MB-P002-N%06d" % db.next_value(conn, "pain002-unread")
-    else:
+    if file_id is None and not (decision.msg_id is None and decision.rejected_outright):
         return []
-    body = messages.write_pain002(decision, msg_id, now, source)
-    due = now + datetime.timedelta(milliseconds=delay_ms)
-    # A file with batches from several debtor accounts gets one pain.002, and
+    if file_id is None and _silent(conn, decision):
+        return []
+    # A file with batches from several debtor accounts gets one status, and
     # it is attributed to the first debtor account the bank holds; the
     # report itself covers every batch.
-    debtor = next((d.account["id"] for d in decision.payments if d.account), None)
+    debtor = next((d.account for d in decision.payments if d.account), None)
     if debtor is None and decision.payment_file is not None:
-        for batch in decision.payment_file.batches:
-            held = accounts.by_iban(conn, batch.debtor_account or "")
-            if held:
-                debtor = held["id"]
-                break
+        debtor = next((held for held in (accounts.by_iban(conn, b.debtor_account or "")
+                                         for b in decision.payment_file.batches) if held),
+                      None)
+    # That account's format decides what the status is: a pain.002, or for a
+    # NACHA account the plain acknowledgement (#53).
+    if debtor is not None and debtor.get("format") == "nacha":
+        kind, prefix = nacha.ACK, "MB-ACK-"
+    else:
+        kind, prefix = messages.PAIN002.name, "MB-P002-"
+    if file_id is not None:
+        msg_id = "%s%06d" % (prefix, file_id)
+    else:
+        msg_id = "%sN%06d" % (prefix, db.next_value(conn, "pain002-unread"))
+    if kind == nacha.ACK:
+        body = nacha.acknowledgement(decision, msg_id, now, source)
+    else:
+        body = messages.write_pain002(decision, msg_id, now, source).decode("utf-8")
+    due = now + datetime.timedelta(milliseconds=delay_ms)
+    account = debtor["id"] if debtor else None
     cursor = conn.execute(
         "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
-        (messages.PAIN002.name, debtor, file_id, db.stamp(due), body.decode("utf-8")))
-    return [{"id": cursor.lastrowid, "type": messages.PAIN002.name, "account": debtor,
+        (kind, account, file_id, db.stamp(due), body))
+    return [{"id": cursor.lastrowid, "type": kind, "account": account,
              "due_at": db.stamp(due)}]
 
 

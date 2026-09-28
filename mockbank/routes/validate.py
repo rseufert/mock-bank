@@ -15,7 +15,7 @@ def validate_file(h) -> None:
     first line (the JSON's `file.message`).
     """
     payment_file, findings = validate.inspect(
-        h.body, h.headers.get("Content-Type"), h.state.clock.today(), nacha_too=True)
+        h.body, h.headers.get("Content-Type"), h.state.clock.today())
     status = 422 if validate.errors(findings) else 200
     if "application/json" in (h.headers.get("Accept") or ""):
         return h.json(status, {

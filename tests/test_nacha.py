@@ -184,15 +184,3 @@ class AsAPain001Would(NachaCase):
         self.assertEqual(routing, ["021000021", "121000248", "011000138", "111000025"])
         self.assertEqual(routing, [p["creditor_clearing_id"]
                                    for p in twin["file"]["batches"][0]["payments"]])
-
-
-class ThePaymentsDoor(NachaCase):
-    """POST /payments takes NACHA with #53; until then it says so by name."""
-
-    def test_a_nacha_file_is_refused_by_name_and_nothing_is_stored(self):
-        resp = self.post("/payments", body=sample("nacha_four_payments.ach"))
-        self.assertEqual(resp.status, 422)
-        answer = resp.json()
-        self.assertEqual((answer["status"], answer["reason"]), ("RJCT", "FF01"))
-        self.assertIn("NACHA", answer["reason_text"])
-        self.assertEqual(self.get("/_mock/payments").json(), [])

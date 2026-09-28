@@ -439,3 +439,42 @@ def _numeric(record: Record) -> List[Finding]:
 
 def _finding(path: str, code: str, text: str) -> Finding:
     return Finding("error", path, code, text)
+
+
+# -- writing: the acknowledgement ------------------------------------------------
+
+ACK = "nacha.ack"
+
+
+def acknowledgement(decision, ack_id: str, created_at, source: str = "") -> str:
+    """What a NACHA account is sent where another gets a ``pain.002`` (#53).
+
+    Real ODFIs acknowledge a file in shapes that differ bank to bank - a
+    report, a return file, a line in an online banking screen - and NACHA
+    specifies none. This is the mock's own, and plain on purpose: one fact to
+    a line, each line starting with what it is, so a client reads it with
+    ``split()`` and nothing else. An entry line carries the trace number, the
+    identification number, the amount in dollars and what became of it. A
+    rejection carries the reason code the bank decided, the same code a
+    ``pain.002`` would, until #54 answers those as NACHA returns.
+    """
+    lines = ["ACKNOWLEDGEMENT %s" % ack_id,
+             "CREATED %s" % created_at.isoformat(),
+             "FILE %s" % (decision.msg_id or NOT_PROVIDED)]
+    if source:
+        lines.append("NAME %s" % source)
+    status = "STATUS %s" % decision.status
+    if decision.rejected_outright:
+        status += " %s %s" % (decision.reason, " ".join((decision.reason_text or "").split()))
+    lines.append(status.rstrip())
+    for d in decision.payments:
+        amount = d.payment.amount or 0
+        head = "ENTRY %s %s %d.%02d" % (d.payment.instruction_id or NOT_PROVIDED,
+                                        d.payment.end_to_end_id or NOT_PROVIDED,
+                                        amount // 100, amount % 100)
+        if d.outcome == "accepted":
+            lines.append("%s ACCEPTED %s" % (head, d.settlement_date.isoformat()))
+        else:
+            lines.append("%s REJECTED %s %s" % (head, d.reason,
+                                                " ".join((d.reason_text or "").split())))
+    return "\n".join(lines) + "\n"
