@@ -32,10 +32,21 @@ Type codes
 ==============  ==============================================================
 
 ``010`` and ``015`` are the two status codes this mock needs and are not in
-doubt. **The two transaction codes are placeholders, and are wrong until #57
-settles them against a file from outside the project.** They are listed in
+doubt. **The two transaction codes are still placeholders.** They are listed in
 ``PLACEHOLDER_CODES`` so that nothing else in the package has to know which is
 which.
+
+#57 was meant to settle them against a file from outside the project, and the
+file it found could not. ``bai2-sample1.txt`` carries ``100`` and ``400`` (a
+credit and a debit summary total), ``108`` and ``409`` (a detail credit and
+debit), and ``040``/``045`` (available balances). None of those is an outgoing
+customer transfer or one coming back, which are the only two movements this mock
+books, so the sample settles a great deal about the *file* and nothing about
+these two codes. The one public repository holding the full BAI code list carries
+**no licence at all**, so it is neither vendored here nor cited as authority.
+
+Two unverified codes plainly marked is the honest state. They are not quietly
+promoted to settled because #57 closed.
 
 The first draft used ``455`` for the debit and kept ``165`` for the return,
 both reasoned from "these are ACH movements". That was shown to be the wrong
@@ -54,21 +65,35 @@ Swapping one unverified code for another is not progress on its own, which is
 why both are marked rather than quietly corrected: the honest state is that the
 reasoning improved and the evidence did not.
 
-What is *not* certain, and is asked on #56 rather than assumed quietly: this
-module has been written against the BAI2 record layout as it is commonly
+This module was written against the BAI2 record layout as it is commonly
 reproduced, not against the published BAI specification, which the project does
-not hold. Two readings are made explicitly and may be wrong:
+not hold. Two readings were made explicitly and flagged as possibly wrong:
 
 1. **Control totals sum signed amounts**, so a negative closing ledger
    subtracts from the account's total. ``CONTROL_TOTALS_ARE_SIGNED`` names it.
 2. **Record counts include the trailer that carries them.** A ``49`` counts the
    ``03``, every ``16``, and itself. ``COUNTS_INCLUDE_THE_TRAILER`` names it.
 
-Both are computed from the records rather than tracked alongside them, and
-``tests/test_bai2.py`` recomputes them from the parsed file, so a wrong reading
-shows up as the writer and the reader agreeing on something the spec does not
-say rather than as a number nobody checks. #57 holds the file to a sample from
-outside the project, which is where either reading gets settled.
+**Both are settled, and both were right.** #57 vendored
+``tests/samples/external/bai2-sample1.txt``, a file from moov-io/bai2, and
+computed them from it: its first ``49`` states 14 and covers 14 records counting
+itself, its ``98`` states 25 for the ``02`` through the ``98``, its ``99`` states
+27 for a 27-line file, and every control total in it carries a sign. The flags
+stay, because what they name is still a reading rather than something the project
+can point at a specification for, and a test asserts each one so that changing a
+reading breaks a test rather than a bank's parser.
+
+The same file corrected three things this got wrong, all recorded where they
+were wrong rather than only here: the ``02``'s two parties (see ``_parties``),
+the notation for a positive amount (see ``_signed``), and the reason given for
+keeping movement totals out of the ``03`` (see ``_account``).
+
+What it could **not** settle is the two transaction codes above, and what it
+exposed is that ``read`` cannot parse a real BAI2 file at all - it does not
+declare the ``88`` continuation record, and it assumes a funds type occupies one
+field where a value-dated one occupies three. That is #114, and
+``tests/test_bai2_external.py`` pins each way it fails so that none of them can
+be fixed silently or quietly rot.
 """
 from __future__ import annotations
 
@@ -97,9 +122,11 @@ COUNTS_INCLUDE_THE_TRAILER = True
 OPENING_LEDGER = "010"
 CLOSING_LEDGER = "015"
 
-# **Placeholders pending #57.** See the module docstring: the balance codes are
-# certain and these two are not, so they are named here and nowhere else, and
-# #57 replaces them against a file from outside the project.
+# **Still placeholders after #57.** See the module docstring: the balance codes
+# are certain and these two are not, so they are named here and nowhere else. The
+# outside sample #57 vendored settled the record layout, the counts, the control
+# totals and the 02's parties, and could not settle these: it books nothing that
+# is an outgoing customer transfer or a return of one.
 DEBIT = "495"
 RETURNED_CREDIT = "165"
 PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT)
@@ -112,9 +139,14 @@ AVAILABLE_NOW = "Z"
 Field = namedtuple("Field", "name kind")
 
 # An integer in minor units or a count; text; a date as yymmdd; a time as hhmm;
-# and GROUP, which is the 03 record's repeating summary of (code, amount, item
-# count, funds type).
-N, A, DATE, TIME, GROUP = "N", "A", "D", "T", "G"
+# SIGNED, an amount that carries an explicit `+` or `-`; and GROUP, which is the
+# 03 record's repeating summary of (code, amount, item count, funds type).
+#
+# SIGNED is a kind rather than something the callers format, for the reason the
+# comment in `_record` gives about `_safe`: the three control totals are written
+# from three places, and doing it at the call sites is how the 01 and the 02 got
+# missed last time.
+N, A, DATE, TIME, SIGNED, GROUP = "N", "A", "D", "T", "S", "G"
 
 
 def _fields(*spec) -> tuple:
@@ -141,13 +173,13 @@ RECORDS = {
         ("funds type", A), ("bank reference number", A),
         ("customer reference number", A), ("text", A))),
     "49": ("account trailer", _fields(
-        ("record code", A), ("account control total", N),
+        ("record code", A), ("account control total", SIGNED),
         ("number of records", N))),
     "98": ("group trailer", _fields(
-        ("record code", A), ("group control total", N),
+        ("record code", A), ("group control total", SIGNED),
         ("number of accounts", N), ("number of records", N))),
     "99": ("file trailer", _fields(
-        ("record code", A), ("file control total", N),
+        ("record code", A), ("file control total", SIGNED),
         ("number of groups", N), ("number of records", N))),
 }
 
@@ -220,9 +252,34 @@ def _hhmm(at: datetime.datetime) -> str:
     return at.strftime("%H%M")
 
 
+def _signed(minor: int) -> str:
+    """An amount that states its sign: a balance, or a control total.
+
+    `moov-io/bai2`'s `sample1.txt` writes every one of these with an explicit
+    sign - `49,+00000000000834000,14/`, and `+000000000000` for a zero balance in
+    the 03 - and writes movement amounts on the 16 with no sign at all. That is
+    the same line this module already draws between `_amount` and `_movement`, so
+    the sample settles the notation rather than the design: whatever states a
+    position states its sign, and whatever states the size of a movement does
+    not, because its direction is in its type code.
+
+    Writing `-` for a negative and nothing for a positive, which this did
+    before #57, was the asymmetry: a reader that requires the sign refuses the
+    positive case, and the file is inconsistent with itself.
+
+    Not adopted: that sample zero-pads these to a fixed width - 17 digits for a
+    control total, 12 for a summary amount, 15 for an unsigned 16 amount. BAI2 is
+    comma-delimited, so a width carries no meaning a reader needs, and three
+    different widths in one file read as that producer's habit rather than as the
+    format asking. Unpadded is what this writes, and if a real reader ever
+    refuses it, that is a fact and this comment is where to put it.
+    """
+    return "%+d" % minor
+
+
 def _amount(minor: int) -> str:
-    """A balance in minor units. Negative carries its minus, for an overdraft."""
-    return str(minor)
+    """A balance in minor units, signed. Negative is an overdraft."""
+    return _signed(minor)
 
 
 def _movement(minor: int) -> str:
@@ -269,6 +326,8 @@ def _record(code: str, *values) -> str:
             parts.extend(_safe(item) for item in value)
         elif field.kind is A:
             parts.append(_safe(value))
+        elif field.kind is SIGNED:
+            parts.append(_signed(value))
         else:
             parts.append("" if value is None else str(value))
     return SEPARATOR.join(parts) + TERMINATOR
@@ -297,21 +356,57 @@ def write_statement(account: Dict, day: datetime.date, number: int,
     Under `statement-gap` they are meant not to, and a writer that refused would
     make that behaviour impossible to render.
     """
-    # Physical record length and block size are left blank. BAI2 allows that for
-    # a variable-length delimited file, and it is the honest answer here: an
-    # earlier draft wrote 80, which the 03 record already exceeds, so the file
-    # would have described itself wrongly in its first line.
+    # Physical record length and block size are left blank. An earlier draft
+    # wrote 80, which the 03 record already exceeds, so the file would have
+    # described itself wrongly in its first line.
+    #
+    # #95 gave the reason as "BAI2 allows blank for a variable-length delimited
+    # file", which was a guess about the field rather than an observation. The
+    # sample vendored in #57 *populates* it - `01,0004,12345,060321,0829,001,80,1,2/`
+    # - and its longest record is 75 characters, so the field is a real bound that
+    # a producer keeps to rather than an optional note. Blank is still right here,
+    # for the other reason: this writer's records exceed 80 and it does not wrap
+    # them, so any number it could state would be one it breaks. Stating nothing
+    # is honest; stating 80 was not.
+    bank, customer = _parties(account, sender, receiver)
     lines = [_record(
-        "01", sender, receiver or account["id"], _yymmdd(created_at.date()),
+        "01", bank, customer, _yymmdd(created_at.date()),
         _hhmm(created_at), number, "", "", VERSION)]
     lines.extend(_group(account, day, number, opening, closing, payments,
-                        created_at))
+                        created_at, bank, customer))
     lines.append(_record("99", _control_total(lines), 1,
                          _count(lines, trailers=1)))
     return "\n".join(lines) + "\n"
 
 
-def _group(account, day, number, opening, closing, payments, created_at) -> List[str]:
+def _parties(account: Dict, sender: str, receiver: str):
+    """(the bank, the customer) - the two names every header in the file uses.
+
+    Derived once because the 01 and the 02 name the same two parties in opposite
+    order, and #57 found this module had them fighting: the 01 said
+    `sender=MOCKBANK, receiver=<account>` and the 02 said
+    `ultimate receiver=<the account's name>, originator=<the account's id>`, so
+    the bank appeared nowhere in the 02 and the customer originated its own
+    statement.
+
+    `moov-io/bai2`'s `sample1.txt` settles the direction. Its 01 is
+    `sender=0004, receiver=12345` and its 02 is
+    `ultimate receiver=12345, originator=0004`: `0004` is the bank in both
+    records, `12345` the customer in both. **The originator of a group is the
+    bank that produced the statement**, which reads oddly beside ISO 20022,
+    where an originator is whoever started a payment - in BAI2 it is whoever
+    originated the *file*.
+
+    Returning a pair, rather than each record reaching for what it needs, is the
+    fix for the class of bug and not only for this instance: there is now no way
+    to change one record's idea of who the customer is without changing the
+    other's.
+    """
+    return sender, (receiver or account["id"])
+
+
+def _group(account, day, number, opening, closing, payments, created_at,
+           bank, customer) -> List[str]:
     """A group header, one account, and the group trailer.
 
     One group and one account per file: a group is a set of accounts sharing an
@@ -319,16 +414,12 @@ def _group(account, day, number, opening, closing, payments, created_at) -> List
     a time, as it does a `camt.053`. Group status 1 says the data is complete
     as of the date given.
     """
-    lines = [_record("02", receiver_or_blank(account), account["id"], 1,
+    lines = [_record("02", customer, bank, 1,
                      _yymmdd(day), _hhmm(created_at), account["currency"], "")]
     lines.extend(_account(account, opening, closing, payments))
     lines.append(_record("98", _control_total(lines), 1,
                          _count(lines, trailers=1)))
     return lines
-
-
-def receiver_or_blank(account: Dict) -> str:
-    return account.get("name", "")[:35]
 
 
 def _identifier(account: Dict) -> str:
@@ -353,14 +444,23 @@ def _identifier(account: Dict) -> str:
 def _account(account: Dict, opening: int, closing: int,
              payments: Sequence[Dict]) -> List[str]:
     """The 03, its 16s, and the 49 that counts them."""
-    # The two balances, and nothing else. BAI2 allows an account to summarise
-    # its movements here as well, and an earlier draft did: it put a 455 total
-    # and a 165 total beside the balances. That is legal and it is a bad idea in
-    # this file, because the control total sums *every* amount field, so each
-    # movement would be counted twice - once in its summary and once in its own
-    # 16 - and a reader reconciling the total against the entries would have to
-    # know to halve it. The issue reads the same way: 010 and 015 here, the
-    # movement codes on the transactions.
+    # The two balances, and nothing else. BAI2 allows an account to summarise its
+    # movements here as well, and an earlier draft did: it put a 455 total and a
+    # 165 total beside the balances. That draft was dropped on the reasoning that
+    # the control total sums every amount field, so each movement would be
+    # counted twice and a reader reconciling the total against the entries would
+    # have to know to halve it.
+    #
+    # #57's sample from outside the project shows the double-counting is real and
+    # the objection to it was not. Each 49 in `bai2-sample1.txt` is exactly twice
+    # the sum of its own 16s, because the 88's credit and debit totals are counted
+    # as well: 417000 + 417000 = 834000. A BAI2 reader does know to expect that,
+    # because it is what BAI2 does.
+    #
+    # Balances only is still what this writes, for the reason the issue gives -
+    # the 03 states the account's position and the 16s state its movements - but
+    # it is a choice now rather than an avoidance of a problem that was not
+    # there.
     summary = [OPENING_LEDGER, _amount(opening), "", AVAILABLE_NOW,
                CLOSING_LEDGER, _amount(closing), "", AVAILABLE_NOW]
     lines = [_record("03", _identifier(account), account["currency"], summary)]

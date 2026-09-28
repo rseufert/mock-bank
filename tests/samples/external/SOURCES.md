@@ -47,6 +47,61 @@ moov-io/ach is **Apache License 2.0** (`LICENSE-Apache-2.0.txt`), copyright
 2018-2020 The Moov Authors, and it has a `NOTICE` file, kept beside the samples
 as `NOTICE-moov-ach.txt`.
 
+## BAI2: the first real file this format's reader was shown
+
+BAI2 has no XSD either, so this holds `mockbank/bai2.py` to a file its authors
+did not write. `tests/test_bai2_external.py` reads it.
+
+| File | Source | Path at that commit | What it exercises |
+| --- | --- | --- | --- |
+| `bai2-sample1.txt` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `d3e11b628d3d59fd6911836b9ca328cb8b7621f2` | `test/testdata/sample1.txt` | Two account sections in one group, each with an `88` continuation carrying credit and debit summaries, eleven and six `16` details, and every amount on a `V` (value-dated) funds type. It settles what the writer's record counts and control totals mean, and it is the file that showed the reader cannot read real BAI2 at all |
+
+moov-io/bai2 is **Apache License 2.0**. Its `LICENSE` at that commit is
+byte-for-byte the copy already here as `LICENSE-Apache-2.0.txt`, so no second
+copy is kept. It has **no `NOTICE` file** - `NOTICE-moov-ach.txt` is
+moov-io/ach's and does not cover it. Copyright The Moov Authors.
+
+SHA-256 of the file as fetched, so a re-pin is a visible change:
+`0150331e6118e9fc6a1a10871f739b2d317c5cca5159c007622cffbbb64fe00c`.
+
+### What it found
+
+Every number below was computed from the file, not read off it.
+
+**Settled, and the writer was already right:**
+
+- **A record count includes the trailer carrying it.** The first `49` states 14
+  and covers 14 records counting itself; `98` states 25 for `02` through `98`;
+  `99` states 27 for a 27-line file. `COUNTS_INCLUDE_THE_TRAILER` was right.
+  Counts include `88` continuations as records in their own right.
+- **Control totals are signed**, and a `98` sums its `49`s while a `99` sums its
+  `98`s: 834000 + 446000 = 1280000, twice over.
+- **The `03` names an account number**, `10200123456`, not an IBAN.
+
+**Settled, and the writer was wrong:**
+
+- **The `02`'s originator is the bank and its ultimate receiver the customer.**
+  The `01` is `sender=0004, receiver=12345`; the `02` is
+  `ultimate receiver=12345, originator=0004`. `0004` is the bank in both. The
+  writer had the customer originating its own statement.
+- **A positive control total carries an explicit `+`**: `49,+00000000000834000,14/`.
+  The writer wrote a bare number.
+- **A control total sums the summary amounts as well as the details.** Each
+  `49` here is exactly twice the sum of its `16`s, because the `88`'s credit and
+  debit totals are counted too: 417000 + 417000 = 834000, and 223000 + 223000 =
+  446000. The writer's own arithmetic does this correctly. What was wrong was
+  the reason recorded in `_account` for keeping movement totals out of the `03`:
+  it said a reader reconciling the total against the entries would have to know
+  to halve it. A BAI2 reader does know that, because this is what BAI2 does.
+
+**Found here, not asked about:** the reader cannot read this file, in three
+ways. `88` is not declared; a `16` on a `V` funds type carries eight fields
+where the declaration allows six, because `V` is followed by a date and a time;
+and a summary group on a `V` funds type is six fields rather than four, which
+makes `_amounts_in` raise a bare `ValueError` instead of a refusal. See #114.
+`tests/test_bai2_external.py` pins all three, so they cannot be fixed silently
+or left to rot.
+
 ## Invalid: the XSD rejects them, and so must the mock
 
 | File | Message | Source | Path at that commit | Why the XSD rejects it |
