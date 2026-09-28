@@ -407,10 +407,14 @@ def check_against_base(text: str, before: str, base: str, labels=()):
     # entry at all - which is how #57 part b passed this check while deleting
     # twenty lines of part a's entry. Appending is allowed and is not reported,
     # because nothing is lost by it; what is reported is text that went.
-    before, after = _bodies_at(base), _bodies_now()
+    # Not `before`/`after`: `before` is this function's parameter, the changelog
+    # text at the base, read above. Rebinding it here was correct only because
+    # that read happens first, which is a property of the line order rather than
+    # of the code - the PM caught it on review of #123.
+    bodies_before, bodies_after = _bodies_at(base), _bodies_now()
     if REWRITE_HATCH not in labels:
-        for name in sorted(set(before) & set(after)):
-            lost = _lines_lost(before[name], after[name])
+        for name in sorted(set(bodies_before) & set(bodies_after)):
+            lost = _lines_lost(bodies_before[name], bodies_after[name])
             if not lost:
                 continue
             problems.append(
@@ -432,8 +436,8 @@ def check_against_base(text: str, before: str, base: str, labels=()):
         # and the advice it printed - "add a file named `<issue>.<kind>.md`" -
         # named a file that already existed.
         added = (_fragments_now() - _fragments_at(base)
-                 | {name for name in set(before) & set(after)
-                    if before[name] != after[name]})
+                 | {name for name in set(bodies_before) & set(bodies_after)
+                    if bodies_before[name] != bodies_after[name]})
         if not added and not cut:
             problems.append(
                 "%s changed without an entry in %s/:\n%s\n    Add a file named "
@@ -621,7 +625,11 @@ def assemble(version: str, date: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base", default="", help="revision to compare against, e.g. origin/main")
-    parser.add_argument("--labels", default="", help="comma-separated pull request labels; `%s` lifts the entry rule" % ESCAPE_HATCH)
+    parser.add_argument(
+        "--labels", default="",
+        help="comma-separated pull request labels; `%s` lifts the entry rule and "
+             "`%s` lifts the one about losing an entry's text"
+             % (ESCAPE_HATCH, REWRITE_HATCH))
     parser.add_argument("--assemble", metavar="VERSION", default="",
                         help="write %s/ into %s as this release and delete the "
                              "fragments" % (FRAGMENTS, CHANGELOG))
