@@ -331,6 +331,25 @@ def receiver_or_blank(account: Dict) -> str:
     return account.get("name", "")[:35]
 
 
+def _identifier(account: Dict) -> str:
+    """What the 03's customer account number carries.
+
+    The **account number** for an account that banks in NACHA, and the IBAN
+    otherwise. The field's own name is the first argument, and the second is that
+    a NACHA account is named by its routing number and account number everywhere
+    else in this mock (#53) - its payment files carry that and no IBAN, and a US
+    treasury system reading this statement has no use for one. The seed happens
+    to give every account both, which is what made writing the IBAN unnoticeable
+    rather than right.
+
+    It is the same principle that made this statement BAI2 at all: an account is
+    described the way its own format describes it.
+    """
+    if account.get("format") == "nacha" and account.get("account_number"):
+        return account["account_number"]
+    return account["iban"]
+
+
 def _account(account: Dict, opening: int, closing: int,
              payments: Sequence[Dict]) -> List[str]:
     """The 03, its 16s, and the 49 that counts them."""
@@ -344,7 +363,7 @@ def _account(account: Dict, opening: int, closing: int,
     # movement codes on the transactions.
     summary = [OPENING_LEDGER, _amount(opening), "", AVAILABLE_NOW,
                CLOSING_LEDGER, _amount(closing), "", AVAILABLE_NOW]
-    lines = [_record("03", account["iban"], account["currency"], summary)]
+    lines = [_record("03", _identifier(account), account["currency"], summary)]
     for payment in payments:
         lines.append(_transaction(payment))
     lines.append(_record("49", _control_total(lines), _count(lines, trailers=1)))

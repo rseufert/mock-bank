@@ -111,6 +111,59 @@ class ANachaAccountIsSentBai2(StatementCase):
         self.assertEqual(rows[0]["entries"], 2)
 
 
+class WhichIdentifierThe03Carries(StatementCase):
+    """Named by a test, because #113's reader accepts either and a reader that
+    accepts either cannot tell anyone which one it got.
+
+    The account number for an account that banks in NACHA, the IBAN otherwise.
+    The field is the 03's "customer account number"; a NACHA account is named by
+    its routing and account number everywhere else in this mock, its payment
+    files carry that and no IBAN, and a US treasury system reading this has no
+    use for one. The seed gives every account both, which is what made writing
+    the IBAN unnoticeable rather than right.
+    """
+
+    def account_record(self, body):
+        return [l for l in body.splitlines() if l.startswith("03,")][0]
+
+    def test_a_nacha_account_is_named_by_its_account_number(self):
+        body = self.bai2_for(self.run_a_day())["body"]
+        account = self.get("/_mock/accounts/ACME").json()
+        self.assertTrue(account["account_number"])
+        self.assertEqual(self.account_record(body).split(",")[1],
+                         account["account_number"])
+
+    def test_it_is_not_the_iban(self):
+        # The assertion that would have failed before this was decided.
+        body = self.bai2_for(self.run_a_day())["body"]
+        account = self.get("/_mock/accounts/ACME").json()
+        self.assertNotIn(account["iban"], self.account_record(body))
+
+    def test_an_iso20022_account_written_as_bai2_is_named_by_its_iban(self):
+        # bai2.write_statement is not restricted to NACHA accounts, and an
+        # account with no NACHA format has an IBAN as its identifier.
+        from mockbank import bai2 as writer
+        import datetime
+        account = self.get("/_mock/accounts/GLOBEX").json()
+        self.assertEqual(account["format"], "iso20022")
+        body = writer.write_statement(
+            account, datetime.date(2026, 10, 1), 1, 1000, 900, [],
+            created_at=datetime.datetime(2026, 10, 2, tzinfo=datetime.timezone.utc))
+        self.assertEqual(self.account_record(body).split(",")[1], account["iban"])
+
+    def test_a_nacha_account_with_no_number_falls_back_to_the_iban(self):
+        # Rather than writing an empty field, which would shift nothing but
+        # would name the account as nothing.
+        from mockbank import bai2 as writer
+        import datetime
+        account = dict(self.get("/_mock/accounts/GLOBEX").json(),
+                       format="nacha", account_number="")
+        body = writer.write_statement(
+            account, datetime.date(2026, 10, 1), 1, 1000, 900, [],
+            created_at=datetime.datetime(2026, 10, 2, tzinfo=datetime.timezone.utc))
+        self.assertEqual(self.account_record(body).split(",")[1], account["iban"])
+
+
 class NumberedFromTheSameCounter(StatementCase):
     """An account that changes format keeps counting.
 
