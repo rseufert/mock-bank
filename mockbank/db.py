@@ -150,6 +150,29 @@ SCHEMA = [
         returned_at      TEXT
     )
     """,
+    # Money arriving from somebody else (#91): a credit to an account the bank
+    # holds, from a payer the test describes. Books on `booking_date`, the
+    # first day the bank could book it on or after its value date.
+    """
+    CREATE TABLE IF NOT EXISTS credit (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id      TEXT NOT NULL REFERENCES account (id),
+        amount          INTEGER NOT NULL,
+        currency        TEXT NOT NULL,
+        value_date      TEXT NOT NULL,
+        booking_date    TEXT NOT NULL,
+        end_to_end_id   TEXT NOT NULL DEFAULT 'NOTPROVIDED',
+        debtor_name     TEXT NOT NULL DEFAULT '',
+        debtor_iban     TEXT NOT NULL DEFAULT '',
+        debtor_bic      TEXT NOT NULL DEFAULT '',
+        -- the payer's structured creditor reference, or '' for none
+        reference       TEXT NOT NULL DEFAULT '',
+        -- the note to payee as the bank will show it: a JSON list of lines
+        note            TEXT NOT NULL DEFAULT '[]',
+        received_at     TEXT NOT NULL,
+        booked_at       TEXT
+    )
+    """,
     # What the bank sends back, queued for when it is due. The writers (#7)
     # put rows here; the mailbox (#8) reads the released ones and marks them
     # taken. Timestamps are `stamp()`s, UTC with a trailing Z, so they compare
@@ -231,6 +254,8 @@ INDEXES = [
     # One statement per account per day; the unique index is what makes
     # issuing twice impossible rather than merely avoided.
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_statement_day ON statement (account, day)",
+    # What is waiting to book, as the clock asks on every advance.
+    "CREATE INDEX IF NOT EXISTS ix_credit_due ON credit (booked_at, booking_date)",
 ]
 
 # The schema's version, kept in the file as `PRAGMA user_version`. Bump it

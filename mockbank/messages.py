@@ -316,6 +316,8 @@ def _entry(p, day):
     ``EndToEndId`` above all - is the original payment's, because that is how a
     client finds the invoice a return reopens.
     """
+    if p.get("incoming"):
+        return _incoming(p, day)
     credit = bool(p.get("credit"))
     domain, family, sub = schema.RETURNED_CREDIT if credit else schema.BOOKED_DEBIT
     side = "CRDT" if credit else "DBIT"
@@ -347,6 +349,46 @@ def _entry(p, day):
         "Amt": amount, "CdtDbtInd": side, "Sts": {"Cd": "BOOK"},
         "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
         "AcctSvcrRef": ("MB-RTR-%d" if credit else "MB-PMT-%d") % p["id"],
+        "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
+        "NtryDtls": [{"TxDtls": [tx]}]}
+
+
+def _incoming(c, day):
+    """Money arriving from somebody else (#91), as an ``Ntry``.
+
+    A ``CRDT`` under ``schema.RECEIVED_CREDIT`` - a transfer received, not a
+    return of one sent. The payer is the ``Dbtr`` and their bank the
+    ``DbtrAgt``; the note to payee is ``RmtInf/Ustrd``, one element per line as
+    the bank wraps it; and a structured reference the payer gave is
+    ``RmtInf/Strd/CdtrRefInf/Ref``, apart from the prose, so a receiving
+    system that reads the structured field can be tested against one that has
+    to parse the text. ``ValDt`` is the payer's value date, which a weekend or
+    a missed cutoff puts before the booking date.
+    """
+    amount = schema.Amount(c["amount"], c["currency"])
+    tx = {"Refs": {"EndToEndId": c["end_to_end_id"] or NOT_PROVIDED},
+          "Amt": amount, "CdtDbtInd": "CRDT"}
+    parties = {}
+    if c["debtor_name"]:
+        parties["Dbtr"] = {"Pty": {"Nm": c["debtor_name"][:140]}}
+    if c["debtor_iban"]:
+        parties["DbtrAcct"] = {"Id": {"IBAN": c["debtor_iban"]}}
+    if parties:
+        tx["RltdPties"] = parties
+    if c["debtor_bic"]:
+        tx["RltdAgts"] = {"DbtrAgt": {"FinInstnId": {"BICFI": c["debtor_bic"]}}}
+    remittance = {}
+    if c["note"]:
+        remittance["Ustrd"] = list(c["note"])
+    if c["reference"]:
+        remittance["Strd"] = [{"CdtrRefInf": {"Ref": c["reference"]}}]
+    if remittance:
+        tx["RmtInf"] = remittance
+    domain, family, sub = schema.RECEIVED_CREDIT
+    return {
+        "Amt": amount, "CdtDbtInd": "CRDT", "Sts": {"Cd": "BOOK"},
+        "BookgDt": {"Dt": day}, "ValDt": {"Dt": datetime.date.fromisoformat(c["value_date"])},
+        "AcctSvcrRef": "MB-RCV-%d" % c["id"],
         "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
         "NtryDtls": [{"TxDtls": [tx]}]}
 
