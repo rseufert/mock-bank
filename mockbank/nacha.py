@@ -596,6 +596,12 @@ def return_file(routing: str, originator: dict, returns: List[dict], day, create
                 modifier: str = "A") -> str:
     """The return file a NACHA account is sent for payments that came back (#54).
 
+    Two kinds of payment come back in it, not one: a payment that settled and
+    then returned under `return-later`, and - the ordinary case - a payment the
+    bank rejected for one of the three behaviours, which comes back the next
+    business day as a return entry as well as being marked rejected in the
+    acknowledgement. Both are written into one file per account per day.
+
     From the bank - ``routing``, its own - to ``originator``, the account that
     sent them (``account_number``, ``name``). Each of ``returns`` is a payment
     row with what the return has to echo - ``transaction_code``,
