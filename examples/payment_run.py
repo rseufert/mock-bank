@@ -39,6 +39,11 @@ What it gets right that is easy to get wrong:
 - **Accepted is not paid.** An item is paid when a statement shows the debit
   and SAP clears it. A payment made after the cutoff is on the next business
   day's statement, not today's, and until then it is simply still accepted.
+- **Paid is not final.** A payment the receiving bank sends back arrives days
+  later as a credit on a statement, under the same `EndToEndId`. Posted to
+  SAP, it reverses the clearing and the invoice is owed again: `returned`,
+  with the bank's reason, and open to the next run. SAP keeps it
+  distinguishable from an invoice that was never paid.
 
 Standard library only, and it imports neither mock: it talks to both over
 HTTP as it would to a real S/4HANA system and a real bank. What it shares
@@ -112,7 +117,7 @@ class Item:
     iban: str = ""
     bic: str = ""
     status: str = "selected"    # selected, skipped, sent, accepted, rejected,
-                                # cleared, unreconciled
+                                # cleared, unreconciled, returned
     reason: str = ""            # a reason code from the bank, or why it was skipped
 
 
@@ -126,6 +131,9 @@ class Run:
     # One per camt.053 posted to SAP: its number, day, whether it adds up,
     # what SAP cleared and could not place, and the FINSTA01 that was sent.
     statements: List[Dict] = field(default_factory=list)
+    # What went wrong talking to either side, in words, rather than an
+    # exception half way through a reconciliation.
+    problems: List[str] = field(default_factory=list)
 
     @property
     def msg_id(self) -> str:
@@ -216,8 +224,13 @@ class PaymentRun:
         paying = [i for i in run.items if i.status == "selected"]
         if not paying:
             return
-        run.http_status, _body = call(self.bank, "POST", "/payments",
-                                      self.payment_file(run, paying), "application/xml")
+        run.http_status, body = call(self.bank, "POST", "/payments",
+                                     self.payment_file(run, paying), "application/xml")
+        if run.http_status not in (202, 422):
+            # 422 is a file the bank rejected, and its pain.002 says why; any
+            # other answer means the file may not have arrived at all.
+            run.problems.append("the bank answered %d to the payment file: %s"
+                                % (run.http_status, body.decode("utf-8", "replace")[:200]))
         for item in paying:
             item.status = "sent"
 
@@ -275,6 +288,8 @@ class PaymentRun:
         """
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=pain.002")
         if status != 200:
+            run.problems.append("the bank's mailbox answered %d, so no status report "
+                                "was read" % status)
             return
         by_reference = {i.reference: i for i in run.paying()}
         for root in bank_documents(raw.decode("utf-8")):
@@ -320,6 +335,8 @@ class PaymentRun:
         """
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=camt.053")
         if status != 200:
+            run.problems.append("the bank's mailbox answered %d, so no statement was "
+                                "read: %s" % (status, raw.decode("utf-8", "replace")[:200]))
             return
         statements = [s for d in bank_documents(raw.decode("utf-8"))
                       if tag(d[0]) == "BkToCstmrStmt"
@@ -339,8 +356,17 @@ class PaymentRun:
         record = {"number": number, "date": day,
                   "adds_up": opening + moved == closing,
                   "finsta": self.finsta(number, day, opening, closing, lines)}
-        applied = self.session.post_idoc(record["finsta"])
+        try:
+            applied = self.session.post_idoc(record["finsta"])
+        except urllib.error.HTTPError as error:
+            # Recorded against the statement rather than raised: the ones
+            # already posted stay posted, and this one can be posted again.
+            applied = {}
+            record["error"] = "SAP refused statement %s: %d %s" % (
+                number, error.code, error.read().decode("utf-8", "replace")[:200])
+            run.problems.append(record["error"])
         record.update(cleared=applied.get("CLEARED", []),
+                      reopened=applied.get("REOPENED", []),
                       unprocessed=applied.get("UNPROCESSED", []),
                       findings=applied.get("FINDINGS", []))
         run.statements.append(record)
@@ -350,18 +376,42 @@ class PaymentRun:
             item = by_reference.get(line["REFERENCE"])
             if item is not None and item.status == "accepted":
                 item.status, item.reason = "cleared", line["CLEARINGDOCUMENT"]
+        # A return is a credit on a later statement under the original
+        # EndToEndId; SAP has reversed the clearing and the invoice is owed
+        # again. The reason code is the bank's, from the entry's RtrInf.
+        why = {e["end_to_end_id"]: e["returned_for"] for e in lines if e["side"] == "CRDT"}
+        for line in record["reopened"]:
+            item = by_reference.get(line["REFERENCE"])
+            if item is not None and item.status == "cleared":
+                item.status = "returned"
+                item.reason = "%s, returned on %s; SAP reversed the clearing in %s" % (
+                    why.get(item.reference) or "no reason given", day,
+                    line["REVERSALDOCUMENT"])
         if not record["adds_up"]:
-            # What is missing is the difference, and a missing debit makes the
-            # closing balance lower than the entries say. The accepted payment
-            # for exactly that amount is the one the statement left out.
-            short = (opening + moved - closing).quantize(Decimal("0.01"))
-            for item in run.paying():
-                if item.status == "accepted" and Decimal(item.amount) == short:
-                    item.status = "unreconciled"
-                    item.reason = ("statement %s for %s is %s short, which is this "
-                                   "payment; the item stays open" % (number, day, short))
-                    break
+            self.name_the_shortfall(run, number, day, opening + moved - closing)
         return record
+
+    def name_the_shortfall(self, run: Run, number: str, day: str, short: Decimal):
+        """The accepted payment for exactly the amount a statement is short.
+
+        A missing debit makes the closing balance lower than the entries say,
+        by that debit. With one accepted payment of that amount, it is the one
+        left out. With several, the statement cannot say which, and each is
+        named as a candidate rather than one picked.
+        """
+        short = short.quantize(Decimal("0.01"))
+        candidates = [i for i in run.paying()
+                      if i.status == "accepted" and Decimal(i.amount) == short]
+        for item in candidates:
+            item.status = "unreconciled"
+            if len(candidates) == 1:
+                item.reason = ("statement %s for %s is %s short, which is this "
+                               "payment; the item stays open" % (number, day, short))
+            else:
+                item.reason = ("statement %s for %s is %s short, which is the amount "
+                               "of %s; one of them is missing and the statement "
+                               "cannot say which" % (number, day, short, ", ".join(
+                                   c.reference for c in candidates)))
 
     def finsta(self, number: str, day: str, opening: Decimal, closing: Decimal,
                lines: List[Dict[str, str]]) -> str:
