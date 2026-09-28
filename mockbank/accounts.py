@@ -843,3 +843,56 @@ def payment_counts(conn):
         out[status] = db.count(conn, "payment", "status = '%s'" % status)
     out["booked"] = db.count(conn, "payment", "booked_at IS NOT NULL")
     return out
+
+
+# -- a holiday declared after something was due on it (#107) --------------------
+
+# Every date the bank has fixed for something still to happen, and the row
+# that says it has happened: a payment's settlement, a return's (both kinds,
+# #14 and #54), and money arriving (#91). Payments and credits are moved by the
+# same rule, or the two would disagree about the same day.
+DUE_DATES = (("payment", "settlement_date", "booked_at", "settled"),
+             ("payment", "return_due", "returned_at", "came back"),
+             ("credit", "booking_date", "booked_at", "arrived"))
+
+
+def booked_on(conn, day: str) -> List[str]:
+    """What has already happened on `day`, in words: nothing a holiday could
+    move, because it is booked, and a holiday has no statement to show it on."""
+    done = []
+    for table, column, happened, verb in DUE_DATES:
+        for row in db.rows(conn, "SELECT end_to_end_id, account_id FROM %s WHERE %s = ?"
+                                 " AND %s IS NOT NULL" % (table, column, happened),
+                           (day,)):
+            done.append("%s %s on %s" % (row["end_to_end_id"], verb, row["account_id"]))
+    return done
+
+
+def move_off(conn, clock, day: str) -> List[Dict[str, Any]]:
+    """Move everything still due on `day` to the first business day after it.
+
+    Called when `day` has just become a holiday. Everything the bank had fixed
+    for that day and not yet done moves together, so no statement is missing
+    an entry and the next one still opens where its predecessor closed. Returns
+    what moved: the column, the `EndToEndId`, and the dates from and to.
+    """
+    due = [(table, column, row) for table, column, happened, _verb in DUE_DATES
+           for row in db.rows(conn, "SELECT id, end_to_end_id FROM %s WHERE %s = ?"
+                                    " AND %s IS NULL" % (table, column, happened),
+                              (day,))]
+    if not due:
+        return []
+    try:
+        target = clock.roll_forward(datetime.date.fromisoformat(day)).isoformat()
+    except OverflowError:
+        raise Invalid("%s has no business day after it to move what is due on it "
+                      "to" % day) from None
+    moved = []
+    for table, column, row in due:
+        conn.execute("UPDATE %s SET %s = ? WHERE id = ?" % (table, column),
+                     (target, row["id"]))
+        moved.append({"what": "%s.%s" % (table, column),
+                      "end_to_end_id": row["end_to_end_id"],
+                      "from": day, "to": target})
+    return moved
+

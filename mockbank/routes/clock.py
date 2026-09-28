@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from .. import accounts
 from .. import clock as clock_module
 from . import first, route
 
@@ -73,8 +74,29 @@ def set_holidays(h) -> None:
     except clock_module.Invalid as error:
         return h.json(400, {"error": str(error)})
     conn = h.state.conn
+    # A day that becomes a holiday takes nothing already due on it with it
+    # (#107). What is still to happen moves to the next business day; what has
+    # already happened today cannot, and a holiday has no statement to show it
+    # on, so declaring today is refused while anything has booked on it. A past
+    # day has nothing still due - every request releases what is due first - so
+    # declaring one moves nothing, and its statement is already out.
+    today = h.state.clock.today().isoformat()
+    added = sorted(set(days) - {d.isoformat() for d in h.state.clock.holidays()})
+    if today in added:
+        done = accounts.booked_on(conn, today)
+        if done:
+            return h.json(409, {
+                "error": "today, %s, cannot become a holiday: %s already, and a "
+                         "holiday has no statement to show it on" % (
+                             today, "; ".join(done))})
     conn.execute("DELETE FROM holiday")
     conn.executemany("INSERT INTO holiday (day) VALUES (?)",
                      [(day,) for day in days])
+    try:
+        for day in added:
+            accounts.move_off(conn, h.state.clock, day)
+    except accounts.Invalid as error:
+        conn.rollback()
+        return h.json(409, {"error": str(error)})
     conn.commit()
     h.json(200, days)
