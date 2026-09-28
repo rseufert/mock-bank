@@ -57,6 +57,12 @@ README = "README.md"
 # Files that are their own documentation, or carry nothing worth describing.
 EXEMPT = {".gitignore"}
 
+# Directories documented as a directory rather than file by file. A changelog
+# fragment is one entry waiting for a release; a row each would put every pull
+# request back to editing one shared file, which is the conflict `changelog.d/`
+# exists to end. The directory itself still needs its row.
+EXEMPT_DIRS = ("changelog.d/",)
+
 # Tokens in the index that look like a path and are therefore checked to exist.
 PATH_RE = re.compile(r"`([\w./-]+\.(?:py|md|yml|yaml|toml|in|sh|cfg))`")
 
@@ -126,9 +132,18 @@ def main():
         name = os.path.basename(path)
         if name in EXEMPT or path == INDEX:
             continue
+        if path.startswith(EXEMPT_DIRS):
+            continue
         if ("`%s`" % path) not in index and ("`%s`" % name) not in index:
             problems.append(
                 "%s is not documented in %s - add a row describing it" % (path, INDEX))
+
+    for directory in EXEMPT_DIRS:
+        if os.path.isdir(os.path.join(ROOT, directory)) and (
+                "`%s`" % directory) not in index:
+            problems.append(
+                "%s is not documented in %s - its files are exempt, so the "
+                "directory itself needs the row" % (directory, INDEX))
 
     # 2. documented files that no longer exist
     existing = set(tracked_files())

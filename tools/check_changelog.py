@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Guard CHANGELOG.md against drift, and against losing an entry.
+"""Guard CHANGELOG.md against drift, and keep entries out of each other's way.
 
-The second one is why this exists. Two pull requests that each add a bullet
-under `## [Unreleased]` conflict on the same lines, and resolving that conflict
-by hand is one keystroke away from keeping one side and dropping the other.
-This check came to mock-bank from its sibling project mock-sap, where exactly
-that happened: an entry went missing in a merge and came back two commits
-later by luck rather than by a check.
+The second one is why this exists. Two pull requests that each added a bullet
+under `## [Unreleased]` conflicted on the same lines, and resolving that
+conflict by hand is one keystroke away from keeping one side and dropping the
+other. This check came to mock-bank from its sibling project mock-sap, where
+exactly that happened: an entry went missing in a merge and came back two
+commits later by luck rather than by a check.
 
-Nothing can prove a resolution kept the right prose. What *can* be checked:
+Guarding the resolution was the first answer. Not needing one is the better
+answer, so an entry is now **its own file** under `changelog.d/`, named
+`<issue>.<kind>.md`, holding the bullet's text exactly as it used to be
+written. Two pull requests add two different files and never touch the same
+line, so the conflict does not happen and nothing has to be resolved
+correctly. `--assemble` writes them into the file at release time.
+
+What is checked:
 
 1. **Structure.** Every released heading has a link reference and every
    reference a heading; versions descend; `[Unreleased]` is present and its
@@ -16,26 +23,36 @@ Nothing can prove a resolution kept the right prose. What *can* be checked:
    newest released heading.
 2. **Released sections are history.** Once a version is released its section
    is frozen: a change to it is either a mistake or a rewrite of the past.
-3. **A change to the package brings an entry.** A pull request that touches
-   `mockbank/` adds at least one bullet under `## [Unreleased]`, or moves the
-   existing ones into a new release section - which is what cutting a release
-   does. A resolution that drops the branch's own entry leaves it with none,
-   and this is what says so. Note that "touched the changelog" would not: the
-   merge that lost that entry did touch it, adding a link reference and
-   dropping the prose. A change that genuinely needs no entry - a comment, a rename, a
-   pure refactor - carries the `no changelog` label, which lifts this rule and
-   leaves the other two standing.
+3. **`[Unreleased]` holds the pointer and nothing else.** This one exists
+   because of a *clean* merge: a branch replaced that section with a pointer
+   while `main` added an entry to it, git merged the two without a marker, and
+   the file then said "Nothing is added here by hand" above an entry added
+   there by hand. No conflict marker shows that and no diff review does either,
+   because both sides were right on their own. So it is asked directly, and the
+   answer names the fragment file the entry belongs in.
+4. **Fragments are well formed.** The name carries an issue number and one of
+   the kinds Keep a Changelog defines; the body is not empty. A fragment named
+   wrongly is refused by name rather than silently left out of the release,
+   which is the failure that matters: it looks like an entry, it sits in the
+   right directory, and it would vanish at assembly.
+5. **A change to the package brings a fragment.** A pull request that touches
+   `mockbank/` adds at least one file under `changelog.d/`, or cuts a release.
+   A change that genuinely needs none - a comment, a rename, a pure refactor -
+   carries the `no changelog` label, which lifts this rule and leaves the
+   others standing.
 
-(2) and (3) need something to compare against, so they run only when `--base`
+(2) and (5) need something to compare against, so they run only when `--base`
 names a revision this checkout has; CI passes the pull request's base. Run it
-directly with no arguments and you get the structural checks.
+with no arguments and you get (1), (3) and (4).
 
     python3 tools/check_changelog.py
     python3 tools/check_changelog.py --base origin/main
+    python3 tools/check_changelog.py --assemble 0.2.0 --date 2026-10-01
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import re
 import subprocess
@@ -46,6 +63,15 @@ CHANGELOG = "CHANGELOG.md"
 PYPROJECT = "pyproject.toml"
 PACKAGE = "mockbank/"
 ESCAPE_HATCH = "no changelog"
+FRAGMENTS = "changelog.d"
+
+# The kinds Keep a Changelog defines, all six, in the order a release section
+# lists them. A kind not in here is refused rather than assembled under a
+# heading nobody reads. All six from the start, including the two this project
+# has not needed yet, because adding one later is free but a contributor who
+# reached for `security` and was refused would have written it as `fixed`.
+KINDS = ("added", "changed", "deprecated", "removed", "fixed", "security")
+FRAGMENT_NAME = re.compile(r"^(\d+)\.([a-z]+)\.md$")
 
 HEADING = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$")
 LINK = re.compile(r"^\[([^\]]+)\]:\s*(\S+)\s*$")
@@ -63,6 +89,63 @@ def _read(path: str, rev: str = "") -> str:
             stderr=subprocess.DEVNULL).decode("utf-8")
     except subprocess.CalledProcessError:
         return ""
+
+
+def fragment_dir() -> str:
+    return os.path.join(ROOT, FRAGMENTS)
+
+
+def fragments():
+    """Every fragment as (issue, kind, body, name), ordered as a release lists it.
+
+    Grouped by kind in the order `KINDS` gives and then by issue number as a
+    number, so #9 comes before #10 rather than after it.
+    """
+    out = []
+    directory = fragment_dir()
+    if not os.path.isdir(directory):
+        return out
+    for name in sorted(os.listdir(directory)):
+        if name.startswith(".") or name == "README.md":
+            continue
+        found = FRAGMENT_NAME.match(name)
+        if not found:
+            continue
+        with open(os.path.join(directory, name), encoding="utf-8") as handle:
+            body = handle.read().strip()
+        out.append((int(found.group(1)), found.group(2), body, name))
+    return sorted(out, key=lambda row: (KINDS.index(row[1])
+                                        if row[1] in KINDS else len(KINDS),
+                                        row[0]))
+
+
+def check_fragments():
+    """Refuse a fragment by name rather than let it vanish at assembly."""
+    problems = []
+    directory = fragment_dir()
+    if not os.path.isdir(directory):
+        return problems
+    for name in sorted(os.listdir(directory)):
+        if name.startswith(".") or name == "README.md":
+            continue
+        path = "%s/%s" % (FRAGMENTS, name)
+        found = FRAGMENT_NAME.match(name)
+        if not found:
+            problems.append(
+                "%s is not a fragment name; it is `<issue>.<kind>.md`, where kind "
+                "is one of %s - for example `%s/42.added.md`"
+                % (path, ", ".join(KINDS), FRAGMENTS))
+            continue
+        if found.group(2) not in KINDS:
+            problems.append(
+                "%s has the kind `%s`, which is not one of %s"
+                % (path, found.group(2), ", ".join(KINDS)))
+        with open(os.path.join(directory, name), encoding="utf-8") as handle:
+            if not handle.read().strip():
+                problems.append(
+                    "%s is empty; it holds the entry's text, written as a "
+                    "changelog bullet is written" % path)
+    return problems
 
 
 def sections(text):
@@ -131,6 +214,46 @@ def _resolve(base: str) -> str:
     return ""
 
 
+def check_unreleased_is_a_pointer(text: str):
+    """[Unreleased] holds the pointer and nothing else.
+
+    This is the check that exists because of a *clean* merge. While this change
+    was being written, `main` added an entry under `## [Unreleased]` and this
+    branch replaced that section with a pointer at `changelog.d/`. Git merged
+    the two without a conflict marker, and the result was a file that said
+    "Nothing is added here by hand" directly above an entry added there by hand.
+
+    Nothing about that is visible in a diff review, and no conflict marker will
+    ever show it: both sides were edited in different places, so git was right.
+    So it is asked directly. It also catches the plainer case of somebody
+    writing a bullet where they have always written one, and tells them the file
+    to write instead rather than only that they are wrong.
+    """
+    problems = []
+    body = dict((version, section) for version, _, section in sections(text))
+    unreleased = body.get("Unreleased", "")
+
+    kind = ""
+    for line in unreleased.splitlines():
+        if line.startswith("### "):
+            kind = line[4:].strip().lower()
+            problems.append(
+                "CHANGELOG.md's [Unreleased] has a `### %s` heading. That section "
+                "holds the pointer at %s/ and nothing else; %s writes the headings "
+                "at release time." % (line[4:].strip(), FRAGMENTS, "--assemble"))
+        elif BULLET.match(line):
+            entry = BULLET.sub("", line)
+            found = re.search(r"\(#(\d+)\)", entry)
+            name = "%s.%s.md" % (found.group(1) if found else "<issue>",
+                                 kind or "<kind>")
+            problems.append(
+                "CHANGELOG.md's [Unreleased] holds an entry: %s\n    Move it to "
+                "%s/%s. That section is a pointer now, so an entry written there "
+                "is never released - and a merge can put one there without a "
+                "conflict." % (_short(entry), FRAGMENTS, name))
+    return problems
+
+
 def check_structure(text: str, pyproject: str):
     problems = []
     parsed = sections(text)
@@ -184,45 +307,160 @@ def check_against_base(text: str, before: str, base: str, labels=()):
             problems.append(
                 "[%s] is already released, so its section is history; this changes it" % version)
 
-    # Every entry that was waiting for a release is still somewhere: still
-    # waiting, or moved into the release that shipped it. Section by section,
-    # because concatenating them lets one section's last bullet swallow the
-    # next one's summary line and stop looking like itself.
-    everywhere = set()
-    for body in now.values():
-        everywhere.update(bullets(body))
-    for entry in bullets(dict((v, b) for v, _, b in then).get("Unreleased", "")):
-        if entry not in everywhere:
-            problems.append("an entry under [Unreleased] is gone: %s" % _short(entry))
+    # A fragment that was waiting for a release has not been quietly deleted.
+    # Assembling a release deletes all of them and writes them into a section,
+    # so a fragment that is gone while no new section appeared was dropped.
+    gone = _fragments_at(base) - _fragments_now()
+    cut = [v for v in now if v != "Unreleased" and v not in {x for x, _, _ in then}]
+    if gone and not cut:
+        for name in sorted(gone):
+            problems.append(
+                "%s/%s was waiting for a release and is gone; only --assemble "
+                "removes a fragment" % (FRAGMENTS, name))
 
     package = _changed_in_package(base)
     if package and ESCAPE_HATCH not in labels:
-        added = [e for e in bullets(now.get("Unreleased", "")) if e not in bullets(dict((v, b) for v, _, b in then).get("Unreleased", ""))]
-        moved = [v for v in now if v != "Unreleased" and v not in {x for x, _, _ in then}]
-        if not added and not moved:
+        added = _fragments_now() - _fragments_at(base)
+        if not added and not cut:
             problems.append(
-                "%s changed without an entry under [Unreleased]:\n%s\n    Say what changed "
-                "and, where it is not obvious, why - it is what a user of the published "
-                "package reads. If a merge resolution dropped the entry, this is it asking "
-                "to come back. If the change genuinely needs none - a comment, a rename, a "
-                "pure refactor - label the pull request `%s`."
-                % (PACKAGE.rstrip("/"), "\n".join("      %s" % name for name in package), ESCAPE_HATCH))
+                "%s changed without an entry in %s/:\n%s\n    Add a file named "
+                "`<issue>.<kind>.md` holding what changed and, where it is not "
+                "obvious, why - it is what a user of the published package reads. "
+                "One file per entry, so two pull requests never conflict over it. "
+                "If the change genuinely needs none - a comment, a rename, a pure "
+                "refactor - label the pull request `%s`."
+                % (PACKAGE.rstrip("/"), FRAGMENTS,
+                   "\n".join("      %s" % name for name in package), ESCAPE_HATCH))
     return problems
+
+
+def _fragments_now():
+    return {name for _, _, _, name in fragments()}
+
+
+def _fragments_at(rev: str):
+    """The fragment file names present at `rev`."""
+    try:
+        listed = subprocess.check_output(
+            ["git", "ls-tree", "--name-only", "%s:%s" % (rev, FRAGMENTS)],
+            cwd=ROOT, stderr=subprocess.DEVNULL).decode("utf-8")
+    except subprocess.CalledProcessError:
+        return set()          # the directory did not exist yet at that revision
+    return {name for name in listed.split() if FRAGMENT_NAME.match(name)}
 
 
 def _short(entry: str, width: int = 70) -> str:
     return entry if len(entry) <= width else entry[:width - 1] + "…"
 
 
+def assemble(version: str, date: str) -> int:
+    """Write the fragments into CHANGELOG.md as a release, and delete them.
+
+    Idempotent, because a release is the one moment nobody wants to run a step
+    twice and wonder: with no fragments left and the section already written,
+    it says so and changes nothing. That is also what makes it safe for
+    `tools/release.py` to call before it tags.
+    """
+    text = _read(CHANGELOG)
+    waiting = fragments()
+    heading = "## [%s] - %s" % (version, date)
+    already = heading in text
+
+    if not waiting:
+        if already:
+            print("[%s] is already assembled and no fragments are left; nothing to do."
+                  % version)
+            return 0
+        print("no fragments in %s/, so there is nothing to release under [%s]."
+              % (FRAGMENTS, version))
+        return 1
+    if already:
+        print("[%s] is already in %s but %d fragment(s) are still in %s/. Assembling "
+              "again would write the section twice; move or delete them first."
+              % (version, CHANGELOG, len(waiting), FRAGMENTS))
+        return 1
+
+    body = [heading, ""]
+    for kind in KINDS:
+        entries = [(issue, frag) for issue, k, frag, _ in waiting if k == kind]
+        if not entries:
+            continue
+        body.append("### %s" % kind.capitalize())
+        body.append("")
+        for _, frag in entries:
+            lines = frag.splitlines()
+            body.append("- %s" % lines[0])
+            body.extend("  %s" % line if line else "" for line in lines[1:])
+            body.append("")
+
+    marker = "## [Unreleased]"
+    start = text.index(marker)
+    after = text.index("\n## [", start + len(marker)) + 1
+    unreleased = text[start:after]
+    text = text[:after] + "\n".join(body) + "\n" + text[after:]
+
+    # The two link references: [Unreleased] now compares against this version,
+    # and this version compares against the one before it.
+    links = dict(m.groups() for m in
+                 (LINK.match(line) for line in text.splitlines()) if m)
+    previous = [v for v, _, _ in sections(text)
+                if v not in ("Unreleased", version)
+                and re.match(r"^\d+\.\d+\.\d+$", v)]
+    base_url = links.get("Unreleased", "").rsplit("/compare/", 1)[0]
+    text = re.sub(r"^\[Unreleased\]:.*$",
+                  "[Unreleased]: %s/compare/v%s...HEAD" % (base_url, version),
+                  text, count=1, flags=re.M)
+    if previous:
+        reference = "[%s]: %s/compare/v%s...v%s" % (
+            version, base_url, previous[0], version)
+    else:
+        reference = "[%s]: %s/releases/tag/v%s" % (version, base_url, version)
+    text = re.sub(r"^\[Unreleased\]:.*$", lambda m: m.group(0) + "\n" + reference,
+                  text, count=1, flags=re.M)
+
+    with open(os.path.join(ROOT, CHANGELOG), "w", encoding="utf-8") as handle:
+        handle.write(text)
+    for _, _, _, name in waiting:
+        os.remove(os.path.join(fragment_dir(), name))
+
+    print("Assembled [%s] - %s from %d fragment(s):" % (version, date, len(waiting)))
+    for issue, kind, _, name in waiting:
+        print("  %-20s -> ### %s" % (name, kind.capitalize()))
+    print("  link references updated; %s/ is empty." % FRAGMENTS)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base", default="", help="revision to compare against, e.g. origin/main")
     parser.add_argument("--labels", default="", help="comma-separated pull request labels; `%s` lifts the entry rule" % ESCAPE_HATCH)
+    parser.add_argument("--assemble", metavar="VERSION", default="",
+                        help="write %s/ into %s as this release and delete the "
+                             "fragments" % (FRAGMENTS, CHANGELOG))
+    parser.add_argument("--date", default="", metavar="YYYY-MM-DD",
+                        help="the release date for --assemble (default: today)")
     args = parser.parse_args()
     labels = [label.strip() for label in args.labels.split(",") if label.strip()]
 
+    if args.assemble:
+        if not re.match(r"^\d+\.\d+\.\d+$", args.assemble):
+            print("--assemble takes a version like 0.2.0, not %r." % args.assemble)
+            return 1
+        date = args.date or datetime.date.today().isoformat()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+            print("--date takes YYYY-MM-DD, not %r." % date)
+            return 1
+        problems = check_fragments()
+        if problems:
+            print("the fragments need attention before a release:\n")
+            for problem in problems:
+                print("  - %s" % problem)
+            return 1
+        return assemble(args.assemble, date)
+
     text = _read(CHANGELOG)
-    problems = check_structure(text, _read(PYPROJECT))
+    problems = (check_structure(text, _read(PYPROJECT))
+                + check_unreleased_is_a_pointer(text) + check_fragments())
 
     compared = ""
     if args.base:
@@ -239,8 +477,11 @@ def main() -> int:
         print("\n%d problem(s)." % len(problems))
         return 1
 
-    print("CHANGELOG.md is well formed, agrees with pyproject.toml%s."
-          % (", and has lost nothing since %s" % args.base if compared else ""))
+    waiting = len(fragments())
+    print("CHANGELOG.md is well formed, agrees with pyproject.toml, and %s%s."
+          % ("%d entr%s waiting in %s/" % (waiting, "y is" if waiting == 1 else "ies are", FRAGMENTS)
+             if waiting else "no entries are waiting in %s/" % FRAGMENTS,
+             "; nothing lost since %s" % args.base if compared else ""))
     return 0
 
 
