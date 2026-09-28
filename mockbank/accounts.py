@@ -19,7 +19,7 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from . import db, schema
+from . import db, nacha, schema
 
 # name -> what the bank does. Kept in the order the README lists them.
 BEHAVIOURS = {
@@ -313,7 +313,8 @@ def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
                       "payment names, and one without it can never be matched")
     checked = check(fields)
     check_parameters(checked.get("behaviour", DEFAULT_BEHAVIOUR),
-                     json.loads(checked.get("parameters", "{}")))
+                     json.loads(checked.get("parameters", "{}")),
+                     checked.get("format", FIELDS["format"]))
 
     columns = dict(FIELDS)
     columns["parameters"] = json.dumps({})
@@ -349,9 +350,12 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     if not fields:
         return existing
     changes = check(fields)
+    # Checked against the format it will have, so that switching an account to
+    # NACHA with an ISO 20022 return reason already set is refused too (#54).
     check_parameters(changes.get("behaviour", existing["behaviour"]),
                      json.loads(changes["parameters"]) if "parameters" in changes
-                     else existing["parameters"])
+                     else existing["parameters"],
+                     changes.get("format", existing["format"]))
     try:
         conn.execute("UPDATE account SET %s WHERE id = ?"
                      % ", ".join("%s = ?" % key for key in changes),
@@ -372,8 +376,19 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
 # so a misspelt `dyas` cannot silently mean three days.
 RETURN_LATER = {"days": 3, "reason": "AC04", "end_to_end_id": None}
 
+# A NACHA account's return reason is an R code, and closed is the default, as
+# AC04 is for an ISO 20022 account (#54).
+NACHA_RETURN_REASON = "R02"
 
-def check_parameters(behaviour: str, parameters: Dict[str, Any]) -> None:
+
+def return_reason(parameters: Dict[str, Any], account_format: str) -> str:
+    """The reason a return-later payment comes back with, for this format."""
+    default = NACHA_RETURN_REASON if account_format == "nacha" else RETURN_LATER["reason"]
+    return parameters.get("reason", default)
+
+
+def check_parameters(behaviour: str, parameters: Dict[str, Any],
+                     account_format: str = "iso20022") -> None:
     """Refuse parameters the behaviour could not act on, naming what it takes."""
     if behaviour != "return-later":
         return
@@ -385,11 +400,17 @@ def check_parameters(behaviour: str, parameters: Dict[str, Any]) -> None:
     if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 60:
         raise Invalid("return-later's days is a whole number of business days from "
                       "0 to 60, not %r" % (days,))
-    reason = parameters.get("reason", RETURN_LATER["reason"])
-    codes = schema.CODE_SETS["ExternalReturnReason1Code"]
-    if reason not in codes:
-        raise Invalid("return-later's reason is an ISO 20022 return reason code, one "
-                      "of %s; %r is not" % (", ".join(sorted(codes)), reason))
+    reason = return_reason(parameters, account_format)
+    if account_format == "nacha":
+        if reason not in nacha.RETURN_REASONS:
+            raise Invalid("return-later's reason on a NACHA account is a NACHA return "
+                          "code, one of %s; %r is not" % (", ".join(sorted(
+                              nacha.RETURN_REASONS)), reason))
+    else:
+        codes = schema.CODE_SETS["ExternalReturnReason1Code"]
+        if reason not in codes:
+            raise Invalid("return-later's reason is an ISO 20022 return reason code, one "
+                          "of %s; %r is not" % (", ".join(sorted(codes)), reason))
     e2e = parameters.get("end_to_end_id")
     if e2e is not None and (not isinstance(e2e, str) or not e2e):
         raise Invalid("return-later's end_to_end_id is the EndToEndId of the one "
@@ -644,12 +665,14 @@ def book(conn, decision):
         conn.execute(
             "INSERT INTO payment (file_id, pmt_inf_id, end_to_end_id, instruction_id,"
             " account_id, debtor_iban, amount, currency, creditor_name, creditor_iban,"
-            " creditor_bic, creditor_clearing_id, status, reason, reason_text,"
-            " settlement_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " creditor_bic, creditor_clearing_id, transaction_code, entry_class,"
+            " status, reason, reason_text, settlement_date)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (file_id, d.batch.pmt_inf_id, p.end_to_end_id, p.instruction_id,
              d.account["id"] if d.account else None, d.batch.debtor_account,
              p.amount, p.currency, p.creditor_name, p.creditor_account, p.creditor_bic,
              getattr(p, "creditor_clearing_id", None),
+             getattr(p, "transaction_code", None), getattr(p, "entry_class", None),
              d.outcome, d.reason, d.reason_text,
              d.settlement_date.isoformat() if d.settlement_date else None))
     conn.commit()
@@ -694,9 +717,52 @@ def schedule_returns(conn, booked, clock):
         due = clock.business_days_after(
             datetime.date.fromisoformat(row_["settlement_date"]), wanted["days"])
         conn.execute("UPDATE payment SET return_due = ?, return_reason = ? WHERE id = ?",
-                     (due.isoformat(), wanted["reason"], row_["id"]))
+                     (due.isoformat(), return_reason(account["parameters"],
+                                                     account["format"]), row_["id"]))
         scheduled.append(row_["id"])
     return scheduled
+
+
+def schedule_rejected_returns(conn, file_id, clock, received_on):
+    """Return, the next business day, what a NACHA account's file had rejected.
+
+    Option (a) on #54: the decision stands - the acknowledgement already says
+    rejected - and the payments the three behaviours reject are also answered
+    the way ACH answers them, as return entries: `R01`, `R02` or `R03`. Nothing
+    was debited, so nothing is credited back; the return file is the whole of
+    it. An ISO 20022 account's rejections are unchanged: the pain.002 is their
+    answer.
+    """
+    if file_id is None:
+        return []
+    rows = db.rows(conn, "SELECT payment.id, payment.reason, account.format"
+                         " FROM payment JOIN account ON account.id = payment.account_id"
+                         " WHERE payment.file_id = ? AND payment.status = ?",
+                   (file_id, REJECTED))
+    due = clock.business_days_after(received_on, 1).isoformat()
+    scheduled = []
+    for row_ in rows:
+        code = nacha.RETURN_FOR.get(row_["reason"])
+        if row_["format"] == "nacha" and code:
+            conn.execute("UPDATE payment SET return_due = ?, return_reason = ? WHERE id = ?",
+                         (due, code, row_["id"]))
+            scheduled.append(row_["id"])
+    return scheduled
+
+
+def rejected_returns_due(conn, today):
+    """The rejected payments whose return day has come, marked returned. Nothing
+    is credited: they were never debited."""
+    due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message FROM payment"
+                        " JOIN file ON file.id = payment.file_id"
+                        " WHERE payment.status = ? AND return_due IS NOT NULL"
+                        " AND return_due <= ? AND returned_at IS NULL ORDER BY payment.id",
+                  (REJECTED, today.isoformat()))
+    now = db.now()
+    for row_ in due:
+        conn.execute("UPDATE payment SET returned_at = ? WHERE id = ?", (now, row_["id"]))
+        row_["returned_at"] = now
+    return due
 
 
 def book_returns(conn, today):

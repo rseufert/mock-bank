@@ -208,8 +208,9 @@ class TheAcknowledgement(DoorCase):
         entries = [line.split()[:6] for line in lines if line.startswith("ENTRY")]
         self.assertEqual(entries, [
             ["ENTRY", "999999990000001", "INV-2026-0101", "1250.00", "ACCEPTED", "2026-10-01"],
-            ["ENTRY", "999999990000002", "INV-2026-0102", "3400.50", "REJECTED", "AC04"],
-            ["ENTRY", "999999990000003", "INV-2026-0103", "980.25", "REJECTED", "RC01"],
+            # The NACHA return code, since #54 answers these with returns too.
+            ["ENTRY", "999999990000002", "INV-2026-0102", "3400.50", "REJECTED", "R02"],
+            ["ENTRY", "999999990000003", "INV-2026-0103", "980.25", "REJECTED", "R03"],
             ["ENTRY", "999999990000004", "INV-2026-0104", "15000.00", "ACCEPTED", "2026-10-01"]])
         self.assertEqual([m for m in self.mailbox() if m["type"].startswith("pain.002")], [])
 

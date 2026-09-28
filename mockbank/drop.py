@@ -475,9 +475,9 @@ class DropBox:
                          "SELECT * FROM message WHERE id = ?", (message_id,))
             if row is None:
                 continue
-            # A NACHA acknowledgement is text, and named so (#53).
+            # A NACHA acknowledgement or return file is text, and named so.
             name = "%s-%s-%d.%s" % (row["type"], row["account"] or "bank", row["id"],
-                                    "txt" if row["type"] == nacha.ACK else "xml")
+                                    nacha.TEXT_TYPES.get(row["type"], "xml"))
             final = self._inside_pickup(name)
             if final is None:
                 self.refused.append(name)

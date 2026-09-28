@@ -102,7 +102,14 @@ def _inspect(data, content_type, today):
         return None, [_refusal("the body is empty; send a pain.001 (%s)"
                                % ", ".join(messages.READABLE))]
     if nacha.recognise(data):
-        return nacha.inspect(data, today)
+        payment_file, findings = nacha.inspect(data, today)
+        if payment_file is not None and payment_file.returns:
+            # Read without a finding - the bank writes these (#54) - but not
+            # one to be sent: a return file answers payments, it makes none.
+            findings.append(_refusal(
+                "this is a NACHA return file, %d return(s) and no payment; the bank "
+                "sends return files, it does not take them" % len(payment_file.returns)))
+        return payment_file, findings
     if data.lstrip().startswith(b"-----BEGIN PGP"):
         return None, [_refusal("the file is PGP-armoured; the mock accepts plain XML only")]
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:

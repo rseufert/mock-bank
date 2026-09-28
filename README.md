@@ -251,16 +251,34 @@ CREATED 2026-10-01T09:00:00+00:00
 FILE 0000000001-2609300930A
 STATUS PART
 ENTRY 999999990000001 INV-2026-0101 1250.00 ACCEPTED 2026-10-01
-ENTRY 999999990000002 INV-2026-0102 3400.50 REJECTED AC04 the creditor account NL84MOCK0000000003 is closed
+ENTRY 999999990000002 INV-2026-0102 3400.50 REJECTED R02 the creditor account NL84MOCK0000000003 is closed
 ```
 
-A rejection carries the bank's reason code, the one a `pain.002` would, until
-0.3 answers those as NACHA returns (`R01`, `R02`, `R03`). Statements stay
-`camt.053` until BAI2. In the mailbox an acknowledgement's type is `nacha.ack`,
-`GET /_mock/mailbox/<id>` serves it as `text/plain`, and in `--pickup-dir` it is
-a `.txt` file. `?raw` is a sequence of XML documents, so it refuses with `409`
-to mix text into one and says how to ask for each: `?raw&type=nacha.ack` and
-`?raw&type=camt.`, say.
+**What comes back is a NACHA return file.** A payment the bank rejects for one
+of three behaviours is rejected with its NACHA return code - `R01` for
+`insufficient-funds`, `R02` for `closed-account`, `R03` for `bad-bank-id` - and
+the acknowledgement says so. It also comes back the next business day as a
+return entry, the way ACH answers it: nothing was debited, so nothing is
+credited, and the return file is the whole answer. A payment that settles and
+then comes back under `return-later` is a return entry too, where an ISO 20022
+account gets a `pacs.004`; its `reason` is an `R` code on a NACHA account, `R02`
+by default, and anything else is refused at `PATCH`. A return file is a real
+NACHA file, `nacha.return`, with one return entry per payment - the original's
+return transaction code (`22` becomes `21`), amount, account number and
+identification - and its addenda 99: the reason, the original trace number and
+the original receiving bank. Its counts, entry hash, totals and padding are
+computed, and it reads back through the same reader with no finding. Sent to
+`POST /payments` it is refused by name: the bank sends return files, it does
+not take them.
+
+Statements and notifications stay `camt.053` and `camt.054` until BAI2, so a
+NACHA return shows there with the same reason in ISO 20022's words (`R01` is
+`AM04`, `R02` is `AC04`, `R03` is `AC01`). In the mailbox an acknowledgement's
+type is `nacha.ack` and a return file's `nacha.return`; `GET
+/_mock/mailbox/<id>` serves either as `text/plain`, and in `--pickup-dir` they
+are `.txt` and `.ach` files. `?raw` is a sequence of XML documents, so it
+refuses with `409` to mix text into one and says how to ask for each:
+`?raw&type=nacha.ack`, `?raw&type=nacha.return` and `?raw&type=camt.`, say.
 
 A `camt.053` closes each business day for every open account the bank holds,
 in order, as the clock passes the day's end - a day with no entries still gets

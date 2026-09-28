@@ -161,6 +161,9 @@ class State:
         decision = accounts.decide(payment_file, findings, conn, self.clock, now,
                                    self.config.allow_duplicates)
         file_id = accounts.book(conn, decision)
+        # A NACHA account's rejections also come back as returns, next business
+        # day (#54); scheduled now, released on the clock like any return.
+        accounts.schedule_rejected_returns(conn, file_id, self.clock, today)
         queued = outbox.queue_status(conn, decision, file_id, now,
                                      self.config.status_delay_ms, source)
         released = {row["id"] for row in self.release()}
