@@ -183,6 +183,26 @@ def check(fields: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# The largest balance, either side of zero, that a statement can write: a camt
+# amount has 18 digits, and in minor units that is every digit (#106). Past it
+# every statement for the account would be refused and the clock would answer
+# 500, so a balance is kept inside it where it is set and where a debit books.
+MAX_BALANCE = 10 ** 18 - 1
+
+
+def still_to_arrive(conn, account_id: str) -> int:
+    """What will be credited to an account without anyone asking again, in minor
+    units: payments due back under ``return-later``, and money arriving (#91)
+    that has not booked yet. A balance is only safe if it has room for these."""
+    returns = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                           " WHERE account_id = ? AND return_due IS NOT NULL"
+                           " AND returned_at IS NULL", (account_id,))["total"]
+    credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM credit"
+                           " WHERE account_id = ? AND booked_at IS NULL",
+                     (account_id,))["total"]
+    return int(returns) + int(credits)
+
+
 def _minor_units(value: Any) -> int:
     """A balance, as the whole number of minor units it has to be.
 
@@ -193,12 +213,16 @@ def _minor_units(value: Any) -> int:
     """
     if isinstance(value, bool):
         raise Invalid("balance is a whole number of minor units, not %r" % value)
+    number = None
     if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if re.match(r"^-?\d+$", text):
-            return int(text)
+        number = value
+    elif isinstance(value, str) and re.match(r"^-?\d+$", value.strip()):
+        number = int(value.strip())
+    if number is not None:
+        if abs(number) > MAX_BALANCE:
+            raise Invalid("balance %d is more than the 18 digits a statement can "
+                          "write, either side of zero" % number)
+        return number
     raise Invalid(
         "balance is in minor units - a whole number of cents - so 12.50 EUR is "
         "1250, not %r" % (value,))
@@ -350,6 +374,15 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     if not fields:
         return existing
     changes = check(fields)
+    if "balance" in changes:
+        # Returns and credits still to come are booked on top of whatever is
+        # set now, so the balance they will make has to fit as well (#106).
+        coming = still_to_arrive(conn, identifier)
+        if changes["balance"] + coming > MAX_BALANCE:
+            raise Invalid("balance %d and the %d still to arrive in the account - "
+                          "returns due back and credits waiting to book - would be "
+                          "more than the 18 digits a statement can write"
+                          % (changes["balance"], coming))
     # Checked against the format it will have, so that switching an account to
     # NACHA with an ISO 20022 return reason already set is refused too (#54).
     check_parameters(changes.get("behaviour", existing["behaviour"]),
@@ -545,7 +578,9 @@ def decide(payment_file, findings, conn, clock, received_at, allow_duplicates=Fa
           what is accepted and not yet booked) below zero, accepting later
           smaller ones that fit. It is the only behaviour that looks at the
           balance; under every other one a payment books even below zero, as
-          on an account with an overdraft.
+          on an account with an overdraft;
+       g. under any behaviour, a payment that would overdraw the account past
+          the 18 digits a statement can write (``MAX_BALANCE``): ``AM02`` (#106).
 
     5. A debtor account with ``silent``: decided and booked like any other,
        but marked unreported, so no ``pain.002`` is sent (#7).
@@ -622,15 +657,22 @@ def _payment_reason(conn, debtor, batch, payment, errors, available):
     if creditor and creditor["behaviour"] == "bad-bank-id":
         return "RC01", ("the creditor account %s's bank identifier does not resolve"
                         % creditor["iban"])
+    if debtor["id"] not in available:
+        available[debtor["id"]] = debtor["balance"] - _pending(conn, debtor["id"])
+    if available[debtor["id"]] - payment.amount < -MAX_BALANCE:
+        # Any behaviour: an overdraft this deep has a balance no statement can
+        # write, so the bank will not book it (#106).
+        return "AM02", ("%s would overdraw the debtor account past the 18 digits a "
+                        "statement can write" % schema.format_amount(
+                            payment.amount, payment.currency))
     if debtor["behaviour"] == "insufficient-funds":
-        if debtor["id"] not in available:
-            available[debtor["id"]] = debtor["balance"] - _pending(conn, debtor["id"])
         if payment.amount > available[debtor["id"]]:
             return "AM04", ("%s would take the debtor account below zero; %s is available"
                             % (schema.format_amount(payment.amount, payment.currency),
                                schema.format_amount(max(available[debtor["id"]], 0),
                                                     debtor["currency"])))
-        available[debtor["id"]] -= payment.amount
+    # For every account: what later payments in the same file are held to.
+    available[debtor["id"]] -= payment.amount
     return None, None
 
 

@@ -33,9 +33,6 @@ DEFAULT_WRAP = 140
 FIELDS = ("account", "amount", "currency", "value_date", "debtor", "reference",
           "note", "end_to_end_id", "wrap")
 
-# What an account can hold: 18 digits, as a camt amount has, so that no
-# statement is ever asked to write a balance it cannot.
-MAX_BALANCE = 10 ** 18 - 1
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # What XML 1.0 cannot carry, and line breaks, which no field here should hold.
 UNWRITABLE = re.compile("[\x00-\x1f\x7f\ud800-\udfff\ufffe\uffff\u2028\u2029]")
@@ -95,10 +92,11 @@ def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
         raise Refused(400, "amount is a whole number of minor units above zero - "
                            "1250.00 is 125000 - not %r" % (amount,))
-    waiting = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM credit"
-                           " WHERE account_id = ? AND booked_at IS NULL",
-                     (account["id"],))["total"]
-    if account["balance"] + waiting + amount > MAX_BALANCE:
+    # Returns due back count as well as credits waiting: either books on top
+    # of this one, and a return after a maximum credit was the second route
+    # to a balance no statement could write (#106).
+    if (account["balance"] + accounts.still_to_arrive(conn, account["id"]) + amount
+            > accounts.MAX_BALANCE):
         raise Refused(400, "amount %d would take account %s past the 18 digits a "
                            "statement balance has" % (amount, account["id"]))
     currency = body.get("currency", account["currency"])
