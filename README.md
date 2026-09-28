@@ -478,6 +478,13 @@ Two rules hold whatever the behaviour, because real banks apply them:
   that stops taking today's work at 15:00 has stopped at 15:00:00.
 - Weekends and the holiday list at `GET/PUT /_mock/holidays` are not business
   days. Bank time is one zone, `--timezone`, UTC by default.
+- **A day that becomes a holiday takes nothing with it** (#107). Whatever was
+  already due on it moves to the next business day when the holiday is
+  declared: a payment's settlement, a return, and money arriving, all by the
+  same rule. Every statement still opens where the one before it closed.
+  Something that has already booked cannot move, so declaring *today* a holiday
+  is refused with a 409 naming what booked. A day already past moves nothing,
+  and its statement is already out.
 
 Nothing waits for any of this. `POST /_mock/advance?days=N` moves bank time by
 N whole **calendar** days (0 to 3650; a fraction is refused rather than
@@ -511,7 +518,7 @@ like mock-edi's so the two feel the same.
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
-| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole |
+| Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole. What is still due on a day that becomes one moves to the next business day; today is refused once something has booked on it |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
 | Validate only | `POST /_mock/validate` | A `pain.001` or a NACHA file. Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
 | Folder in and out | `--drop-dir`, `--pickup-dir`, `GET /_mock/drop`, `POST /_mock/drop/scan` | Most bank connections are still SFTP folders, so the bank reads one directory and writes another |
