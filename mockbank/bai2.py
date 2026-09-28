@@ -146,6 +146,39 @@ RECORDS = {
 }
 
 
+def _shape(code: str):
+    """(fixed fields after the code, whether a repeating group follows).
+
+    The 03's summary repeats in fours, so its record has a floor and a stride
+    rather than an exact width; every other record has an exact one.
+    """
+    fields = RECORDS[code][1]
+    group = any(f.kind is GROUP for f in fields)
+    fixed = len([f for f in fields[1:] if f.kind is not GROUP])
+    return fixed, group
+
+
+def _field_count_problem(code: str, values) -> str:
+    """Why this record's field count does not fit its declaration, or ""."""
+    fixed, group = _shape(code)
+    name = RECORDS[code][0]
+    if not group:
+        if len(values) != fixed:
+            return ("the %s (%s) carries %d field(s) after the code; this one "
+                    "has %d" % (name, code, fixed, len(values)))
+        return ""
+    if len(values) < fixed:
+        return ("the %s (%s) carries at least %d field(s) after the code; this "
+                "one has %d" % (name, code, fixed, len(values)))
+    # The group is one slot in the declaration and any multiple of four fields on
+    # the line, so what is written is the fixed fields plus 4n - not 4n + 1.
+    extra = len(values) - fixed
+    if extra % 4:
+        return ("the %s (%s) repeats its summary in fours; this one has %d "
+                "field(s) left over" % (name, code, extra % 4))
+    return ""
+
+
 class Unreadable(ValueError):
     """A file that is not BAI2 at all, named rather than guessed at.
 
@@ -165,11 +198,24 @@ def _hhmm(at: datetime.datetime) -> str:
 
 
 def _amount(minor: int) -> str:
-    """An amount in minor units. Negative is written with a leading minus.
+    """A balance in minor units. Negative carries its minus, for an overdraft."""
+    return str(minor)
 
-    Only a balance is ever negative: a transaction's sign lives in its type
-    code, so the amount on a 16 record is the size of the movement.
+
+def _movement(minor: int) -> str:
+    """The size of a movement, which is never negative.
+
+    A transaction's direction lives in its type code, so a negative amount on a
+    16 would say the opposite of what the code says *and* lower the control
+    total. `_amount` allowed it because it was used for both; they are separate
+    now, and this refuses rather than writing a record two readers would disagree
+    about.
     """
+    if minor < 0:
+        raise Unreadable(
+            "a movement of %d cannot be written: a 16 record carries the size of "
+            "the movement and its type code carries the direction, so a negative "
+            "amount would contradict the code and lower the control total" % minor)
     return str(minor)
 
 
@@ -188,10 +234,18 @@ def _record(code: str, *values) -> str:
         raise Unreadable(
             "a %s (%s) takes %d field(s) after the code, not %d"
             % (name, code, expected, len(values)))
+    # Every alphanumeric field is made safe here rather than at the call sites.
+    # An earlier version did it at three places, all in the 16, and left the 01
+    # and the 02 open: an account named `ACME, Inc.` wrote a nine-field 02 with
+    # everything after the name shifted, and `A/S Nordisk` ended the record at
+    # `02,A/`. The account's name is free text on the control plane, so this is
+    # reachable from a PATCH, not only from a payment file.
     parts = [code]
     for field, value in zip(fields[1:], values):
         if field.kind is GROUP:
-            parts.extend(str(item) for item in value)
+            parts.extend(_safe(item) for item in value)
+        elif field.kind is A:
+            parts.append(_safe(value))
         else:
             parts.append("" if value is None else str(value))
     return SEPARATOR.join(parts) + TERMINATOR
@@ -199,14 +253,22 @@ def _record(code: str, *values) -> str:
 
 def write_statement(account: Dict, day: datetime.date, number: int,
                     opening: int, closing: int, payments: Sequence[Dict],
-                    created_at: datetime.datetime,
+                    *, created_at: datetime.datetime,
                     sender: str = "MOCKBANK", receiver: str = "") -> str:
     """One account's statement for one business day, as a BAI2 file.
 
-    The arguments are `messages.write_camt053`'s, in the same order and meaning:
-    `opening` and `closing` are the booked balances in minor units, signed;
-    `payments` are the rows whose entries the statement shows, debits and - with
-    `credit` set - returns.
+    The **statement data** is `messages.write_camt053`'s, in the same order and
+    meaning: `opening` and `closing` are the booked balances in minor units,
+    signed; `payments` are the rows whose entries the statement shows, debits and
+    - with `credit` set - returns.
+
+    The tails differ and are keyword-only here for that reason. `write_camt053`
+    ends `msg_id, created_at, zone`; this ends `created_at, sender, receiver`,
+    because BAI2 has no message id (the file identification number is `number`)
+    and no per-message zone, and it does name a sender and a receiver. An earlier
+    docstring claimed the whole signature matched, which would have let #57 pass
+    the same positional arguments to both and silently bind `msg_id` to
+    `created_at`. Keyword-only makes that a TypeError instead of a wrong file.
 
     Like the `camt.053` writer, this does not check that the balances reconcile.
     Under `statement-gap` they are meant not to, and a writer that refused would
@@ -217,8 +279,8 @@ def write_statement(account: Dict, day: datetime.date, number: int,
     # earlier draft wrote 80, which the 03 record already exceeds, so the file
     # would have described itself wrongly in its first line.
     lines = [_record(
-        "01", sender, receiver or account["id"], _yymmdd(day), _hhmm(created_at),
-        number, "", "", VERSION)]
+        "01", sender, receiver or account["id"], _yymmdd(created_at.date()),
+        _hhmm(created_at), number, "", "", VERSION)]
     lines.extend(_group(account, day, number, opening, closing, payments,
                         created_at))
     lines.append(_record("99", _control_total(lines), 1,
@@ -292,15 +354,35 @@ def _transaction(payment: Dict) -> str:
         code = RETURNED_CREDIT
     else:
         code = DEBIT
-    return _record("16", code, _amount(payment["amount"]), AVAILABLE_NOW,
+    return _record("16", code, _movement(payment["amount"]), AVAILABLE_NOW,
                    _safe(payment["end_to_end_id"]),
                    _safe(payment.get("msg_id") or ""),
                    _safe(payment.get("creditor_name") or ""))
 
 
-def _safe(text: str) -> str:
-    """A value with nothing in it that would end a field or a record."""
-    return str(text).replace(SEPARATOR, " ").replace(TERMINATOR, " ").strip()
+# Everything that would end a field, a record, or a line. The line breaks are
+# here because `splitlines()` breaks on more than CR and LF: U+2028 and U+2029
+# split too, so a creditor name carrying one wrote a record across two lines and
+# `read` then raised on the half of it. The trailers counted it once either way,
+# which is what made the file wrong rather than merely unreadable.
+UNSAFE = (SEPARATOR, TERMINATOR, "\r", "\n", "\u2028", "\u2029", "\x0b",
+          "\x0c", "\x1c", "\x1d", "\x1e", "\u0085")
+
+
+def _safe(text) -> str:
+    """A value with nothing in it that would end a field, a record or a line.
+
+    BAI2 has no escape, so there is nothing to escape *to*: a comma in a name
+    ends the field early and every field after it shifts, which is a wrong
+    statement rather than an unreadable one. Replaced with a space, and `None`
+    becomes empty rather than the text "None".
+    """
+    if text is None:
+        return ""
+    out = str(text)
+    for bad in UNSAFE:
+        out = out.replace(bad, " ")
+    return out.strip()
 
 
 def _amounts_in(line: str) -> List[int]:
@@ -365,6 +447,13 @@ def read(text: str) -> List[Record]:
         if code not in RECORDS:
             raise Unreadable("line %d has record code %r, which is not declared"
                              % (number, code))
+        # Counted against the declaration. Without this the reader accepted a
+        # nine-field 02 written by an account name with a comma in it, so a file
+        # whose fields had all shifted read back without complaint - which is why
+        # neither that nor the line-break case showed up as a failing test.
+        problem = _field_count_problem(code, values[1:])
+        if problem:
+            raise Unreadable("line %d: %s" % (number, problem))
         out.append(Record(code, RECORDS[code][0], values[1:]))
     return out
 

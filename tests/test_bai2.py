@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 # test_statements brings in support, which puts the checkout on sys.path
 from test_statements import read_statement
 
-from mockbank import bai2, messages, schema           # noqa: E402
+from mockbank import bai2, messages                   # noqa: E402
 
 UTC = datetime.timezone.utc
 DAY = datetime.date(2026, 10, 5)
@@ -50,7 +50,8 @@ def both(opening, closing, payments, account=None):
     account = account or ACCOUNT
     xml = messages.write_camt053(account, DAY, 7, opening, closing, payments,
                                  "MB-C053-ACME-7", AT, UTC)
-    text = bai2.write_statement(account, DAY, 7, opening, closing, payments, AT)
+    text = bai2.write_statement(account, DAY, 7, opening, closing, payments,
+                                 created_at=AT)
     return read_statement(ET.fromstring(xml)), bai2.statements(text)[0], text
 
 
@@ -148,7 +149,8 @@ class TheTypeCodes(unittest.TestCase):
         arriving = payment(9, "CUSTOMER-1", 50000, credit=True)
         arriving["return_reason"] = ""
         with self.assertRaises(bai2.Unreadable) as refused:
-            bai2.write_statement(ACCOUNT, DAY, 7, 0, 50000, [arriving], AT)
+            bai2.write_statement(ACCOUNT, DAY, 7, 0, 50000, [arriving],
+                                 created_at=AT)
         self.assertIn("CUSTOMER-1", str(refused.exception))
         self.assertIn("came back", str(refused.exception))
 
@@ -160,8 +162,11 @@ class TheTypeCodes(unittest.TestCase):
         account_record = [l for l in text.splitlines() if l.startswith("03,")][0]
         self.assertIn("010,10875000", account_record)
         self.assertIn("015,12500000", account_record)
-        self.assertNotIn("455", account_record)
-        self.assertNotIn("165", account_record)
+        # Against the constants: an earlier version asserted "455" was absent,
+        # which was the first draft's debit code, so after it changed to 495 the
+        # assertion could no longer fail for the reason it was written for.
+        self.assertNotIn(bai2.DEBIT, account_record)
+        self.assertNotIn(bai2.RETURNED_CREDIT, account_record)
 
     def test_the_end_to_end_id_is_the_bank_reference(self):
         # The field a treasury system reconciles on, which is the whole point of
@@ -245,6 +250,123 @@ class FieldsThatCouldEndARecordEarly(unittest.TestCase):
     def test_a_reference_with_a_comma_still_reconciles(self):
         _, ba, _ = both(2000, 1000, [payment(1, "INV,1", 1000)])
         self.assertEqual(ba.entries[0].reference, "INV 1")
+
+
+class FreeTextInEveryRecord(unittest.TestCase):
+    """Not only the 16. The account's name is free text on the control plane.
+
+    `_safe` used to be applied at three call sites, all in the 16, so the 01 and
+    the 02 were open: an account named `ACME, Inc.` wrote a nine-field 02 with
+    every field after the name shifted, and `A/S Nordisk` ended the record at
+    `02,A/`. Neither showed up as a failing test, because `read` did not count a
+    record's fields against its declaration and accepted the nine-field 02.
+    """
+
+    def with_name(self, name):
+        account = dict(ACCOUNT, name=name)
+        return bai2.write_statement(account, DAY, 7, 2000, 1000, THREE[:1],
+                                    created_at=AT)
+
+    def group_header(self, text):
+        return [l for l in text.splitlines() if l.startswith("02,")][0]
+
+    def test_a_comma_in_the_account_name_does_not_shift_the_group_header(self):
+        text = self.with_name("ACME, Inc.")
+        self.assertEqual(self.group_header(text),
+                         "02,ACME  Inc.,ACME,1,261005,0000,EUR,/")
+        self.assertEqual(len(bai2.read(text)), 7)
+
+    def test_a_slash_in_the_account_name_does_not_end_the_group_header(self):
+        text = self.with_name("A/S Nordisk")
+        self.assertIn("A S Nordisk", self.group_header(text))
+        self.assertEqual(len(bai2.read(text)), 7)
+
+    def test_a_line_break_in_the_account_name_does_not_split_the_record(self):
+        # The trailers count the record once however many lines it occupies, so
+        # a split record is a wrong file rather than merely an unreadable one.
+        for breaker in ("\n", "\r", "\r\n", "\u2028", "\u2029", "\u0085"):
+            with self.subTest(breaker=repr(breaker)):
+                text = self.with_name("ACME" + breaker + "Inc.")
+                self.assertEqual(len(text.splitlines()), 7)
+                self.assertEqual(len(bai2.read(text)), 7)
+                self.assertEqual(bai2.trailers_agree(text), [])
+
+    def test_the_file_header_is_made_safe_too(self):
+        text = bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, THREE[:1],
+                                    created_at=AT, sender="MOCK, BANK/1")
+        header = [l for l in text.splitlines() if l.startswith("01,")][0]
+        self.assertEqual(header, "01,MOCK  BANK 1,ACME,261006,0000,7,,,2/")
+        self.assertEqual(len(bai2.read(text)), 7)
+
+    def test_none_is_written_as_nothing_rather_than_as_the_word(self):
+        row = dict(THREE[0], creditor_name=None, end_to_end_id=None)
+        text = bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, [row],
+                                    created_at=AT)
+        detail = [l for l in text.splitlines() if l.startswith("16,")][0]
+        self.assertNotIn("None", detail)
+        self.assertEqual(bai2.statements(text)[0].entries[0].reference, "")
+
+
+class TheReaderCountsFields(unittest.TestCase):
+    """Without this, a file whose fields had all shifted read back clean."""
+
+    def clean(self):
+        return both(2000, 1000, THREE[:1])[2]
+
+    def test_a_record_with_a_field_too_many_is_refused_by_line_and_name(self):
+        text = self.clean().replace("02,ACME Corporation,",
+                                    "02,ACME,Corporation,")
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read(text)
+        self.assertIn("line 2", str(refused.exception))
+        self.assertIn("group header", str(refused.exception))
+
+    def test_a_record_with_a_field_too_few_is_refused(self):
+        text = self.clean().replace("49,", "49x,").replace("49x,", "49,", 0)
+        lines = self.clean().splitlines()
+        trailer = [i for i, l in enumerate(lines) if l.startswith("49,")][0]
+        lines[trailer] = "49,100/"                     # a total and no count
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read("\n".join(lines) + "\n")
+        self.assertIn("account trailer", str(refused.exception))
+
+    def test_the_summary_must_repeat_in_fours(self):
+        lines = self.clean().splitlines()
+        account = [i for i, l in enumerate(lines) if l.startswith("03,")][0]
+        lines[account] = lines[account].rstrip("/")[:-2] + "/"      # drop one field
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read("\n".join(lines) + "\n")
+        self.assertIn("fours", str(refused.exception))
+
+    def test_a_clean_file_still_reads(self):
+        self.assertEqual(len(bai2.read(self.clean())), 7)
+
+
+class OnlyABalanceMayBeNegative(unittest.TestCase):
+
+    def test_a_negative_movement_is_refused_rather_than_written(self):
+        # It would contradict its own type code and lower the control total.
+        row = dict(THREE[0], amount=-1000)
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, [row],
+                                 created_at=AT)
+        self.assertIn("direction", str(refused.exception))
+
+    def test_a_negative_balance_is_still_written(self):
+        text = both(1000, -500, THREE[:1])[2]
+        self.assertIn("015,-500", text)
+
+
+class TheFileHeaderDate(unittest.TestCase):
+
+    def test_it_is_the_creation_date_not_the_statement_day(self):
+        # The time beside it was already the creation time, so the two halves of
+        # one timestamp disagreed: the statement day with the creation clock.
+        text = bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, THREE[:1],
+                                    created_at=AT)
+        header = [l for l in text.splitlines() if l.startswith("01,")][0]
+        self.assertEqual(header.split(",")[3], "261006")        # AT, not DAY
+        self.assertNotEqual(header.split(",")[3], "261005")
 
 
 class ReadingBackWhatIsNotBai2(unittest.TestCase):
