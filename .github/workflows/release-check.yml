@@ -1,0 +1,46 @@
+name: Release check
+
+# Notices a release that stopped half way: `main` claiming a version that has no
+# tag, or a tag with no published GitHub Release. 0.1.0 sat in the first state
+# for hours and nothing in the repository said so.
+#
+# Deliberately not on push. On the release commit itself the tag cannot exist
+# yet - it is created from that commit, afterwards - so a push trigger would
+# fail every release by design and be switched off within a month. A daily run
+# and a button suit a question whose answer changes by somebody forgetting.
+on:
+  schedule:
+    # 07:00 UTC, so a release finished late the evening before is caught before
+    # the next working day rather than after it.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check
+  cancel-in-progress: true
+
+jobs:
+  finished:
+    name: the released version is tagged and published
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tags are the thing being checked, and a default checkout does not
+          # fetch them. `check_release.py` fetches them itself if they are
+          # missing, but starting with them makes a missing tag mean a missing
+          # tag rather than a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Nothing is half released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --require, so that being unable to ask GitHub about the Release is a
+        # failure here rather than a pass. A watchdog that passes because it
+        # could not ask is worse than no watchdog.
+        run: python3 tools/check_release.py --require
