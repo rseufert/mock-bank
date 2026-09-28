@@ -128,7 +128,7 @@ def json_body(body: bytes) -> Any:
 
 # Imported last, so that `route` and the helpers above exist when each module
 # asks for them. The order here is the order of the table.
-from . import (control, accounts, clock, payments, mailbox,  # noqa: E402,F401
+from . import (control, accounts, clock, payments, credits, mailbox,  # noqa: E402,F401
                validate, transport)
 
 # What this build answers, in the order the modules registered it, so a 404

@@ -234,9 +234,12 @@ BANK_TRANSACTION_CODES = {
                               "Transfer: every debit the mock books",
     ("PMNT", "ICDT", "RRTN"): "Payments / Issued Credit Transfers / Reversal due "
                               "to Payment Return: the credit a return books",
+    ("PMNT", "RCDT", "ESCT"): "Payments / Received Credit Transfers / SEPA Credit "
+                              "Transfer: money arriving from somebody else (#91)",
 }
 BOOKED_DEBIT = ("PMNT", "ICDT", "ESCT")
 RETURNED_CREDIT = ("PMNT", "ICDT", "RRTN")
+RECEIVED_CREDIT = ("PMNT", "RCDT", "ESCT")
 
 # Code sets checked by pattern rather than list, and identifier shapes.
 PATTERNS = {

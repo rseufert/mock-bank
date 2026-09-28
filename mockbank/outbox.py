@@ -31,7 +31,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List
 
-from . import accounts, bai2, db, messages, nacha
+from . import accounts, bai2, credits, db, messages, nacha
 
 
 # Every message type that is not XML, and the extension it is written under.
@@ -155,6 +155,7 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
         conn.execute(
             "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
             (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
+    _release_credits(conn, now, today, clock)
     released = db.rows(conn, "SELECT id, type, account, due_at FROM message"
                              " WHERE released_at IS NULL AND due_at <= ? ORDER BY id",
                        (stamp,))
@@ -162,6 +163,24 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
                  " AND due_at <= ?", (stamp, stamp))
     conn.commit()
     return released
+
+
+def _release_credits(conn, now, today, clock):
+    """Book the money arriving today, and say so: a ``camt.054`` credit per
+    account and booking day, the same granularity as the debits (#91)."""
+    stamp = db.stamp(now)
+    by_day: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in credits.book_due(conn, today, clock):
+        by_day.setdefault((row["account_id"], row["booking_date"]), []).append(
+            dict(row, incoming=True))
+    for (account_id, day), rows in sorted(by_day.items()):
+        account = accounts.require(conn, account_id)
+        sequence = db.next_value(conn, "camt.054:" + account_id)
+        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
+                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        conn.execute(
+            "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
 
 
 def _release_returns(conn, now, today):
@@ -401,6 +420,11 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
                                       " AND return_due = ? ORDER BY payment.id",
                                 (account["id"], when))
             booked += [dict(p, credit=True) for p in came_back]
+            # Money that arrived from somebody else (#91): on the day it booked,
+            # and undone, like a return, for any day before it.
+            later_credits += credits.booked_after(conn, account["id"], when)
+            booked += [dict(c, incoming=True, credit=True)
+                       for c in credits.booked_on(conn, account["id"], when)]
             closing = account["balance"] + int(later_debits) - int(later_credits)
             opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
                                     for p in booked)

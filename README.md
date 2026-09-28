@@ -324,6 +324,67 @@ a folder client has to match the refusal to.
 Each payment keeps its `EndToEndId` through every message, so a client can
 match a status, a statement line and a return to the invoice it paid.
 
+## Money arriving
+
+Everything above is money leaving, or coming back. `POST /_mock/credits` makes
+money *arrive*: a customer paying your invoice, which is the whole receivable
+side of a business and where cash application quietly goes wrong, because **the
+payer controls the reference**. You describe what the payer sent; the bank books
+it and reports it the way it reports anything else.
+
+```
+curl -s -X POST http://127.0.0.1:8080/_mock/credits -H 'Content-Type: application/json' \
+     -d '{"account": "ACME", "amount": 118000, "note": "INV-1001 less 70.00 damaged goods",
+          "debtor": {"name": "Customer Ltd", "iban": "NL14MOCK0000000002"}}'
+```
+
+- **It books on its value date** (`value_date`, bank today by default), or on
+  the next business day if that is a weekend, a holiday or today after the
+  cutoff - the rule a payment's settlement follows - so `POST /_mock/advance`
+  drives it. Booking sends a `camt.054` credit notification, and the day's
+  `camt.053` shows it and still reconciles, to the cent.
+- **On the statement it is a received transfer**: `CRDT` under
+  `PMNT`/`RCDT`/`ESCT`, not a return, with the payer in `Dbtr`, `DbtrAcct` and
+  `DbtrAgt`, the payer's value date in `ValDt`, the note to payee in
+  `RmtInf/Ustrd` and a structured `reference` apart from it in
+  `RmtInf/Strd/CdtrRefInf/Ref`. A receiving system that reads the structured
+  field can be tested against one that has to parse the prose.
+- **For an account that banks in NACHA the statement is BAI2**, as it is for
+  that account's debits, and money arriving is a `16` of type code `195`, an
+  incoming transfer: the `EndToEndId` as the bank reference, the structured
+  reference as the customer reference and the payer's name as the text. `195`
+  is a placeholder, like the other two codes. The `camt.054` goes to every
+  account, whatever its format.
+- **Amounts are minor units** and the currency is the account's; a credit in
+  another is refused, as the mock does no FX, and so is one to a closed or
+  unknown account, or for a value date already past.
+- **What the bank could not report is refused when it is sent, never stored.**
+  That covers a blank name, reference or line of note, a control character or
+  line break, a BIC that is not one, and an amount that would take the balance
+  past a statement's 18 digits. The credit's `camt.054` is written once before
+  the credit is kept, so nothing waiting can stop a later release.
+- **An account closed while a credit waits does not book it.** A closed account
+  gets no statement, so the money would arrive unreported. The credit stays
+  unbooked in `GET /_mock/credits`, and the mock does not send it back to the
+  payer. Reopened, the account books it on the next business day, which is on
+  a statement, and keeps the payer's value date.
+- **On a `statement-gap` account the entry left off is the day's last**, and
+  credits come after the day's debits. So on a day money arrives, it is a credit
+  that goes missing rather than a debit.
+
+The failures worth testing are four requests:
+
+| Scenario | The request |
+| --- | --- |
+| A short payment | `"amount"` below the invoice, with or without a reason in `"note"` |
+| A payment that names no invoice | leave out `"note"` and `"reference"`, or send `"note": "PAYMENT"` |
+| One credit for several invoices | several invoice numbers in `"note"` - or fewer than it settles |
+| A reference the bank splits | `"wrap": 35` or `70`: the bank re-cuts the note at that width wherever the cut falls, invoice numbers included, as banks that reformat remittance do. The default, `140`, keeps the payer's lines |
+
+The first three are what the payer sent, which is why they are fields and not
+account behaviours; the fourth is the bank's doing, and the only one the mock
+adds. Whether a deduction is justified is the receiving system's to judge.
+
 ## Account behaviours
 
 Each seeded account has a behaviour, changed at runtime with
@@ -439,6 +500,7 @@ like mock-edi's so the two feel the same.
 | Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
 | Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
+| Money arriving | `POST /_mock/credits`, `GET /_mock/credits` | Make a credit arrive in an account from a payer you describe: it books on its value date and shows on the `camt.054` and `camt.053` as a received transfer. The listing is every credit, newest first |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
@@ -747,6 +809,7 @@ stderr at startup if you do not. `-q` does not silence that warning.
 ```
 mockbank/accounts.py           the account behaviours, and what a valid account is
 mockbank/clock.py              bank time: the cutoff, business days, holidays, and advancing
+mockbank/credits.py            money arriving: a credit the test describes, booked on its value date (#91)
 mockbank/drop.py               the second door: a directory watched, and one written
 mockbank/db.py                 the schema, the upgrade, and the seeded accounts
 mockbank/handler.py            the request handler: authentication, the body, the request log, and the lookup in the route table
@@ -758,6 +821,7 @@ mockbank/routes/__init__.py    the route table: each surface registers method, p
 mockbank/routes/control.py     health, state, reset, behaviours, the dictionary and the index page
 mockbank/routes/accounts.py    the accounts and their statements
 mockbank/routes/clock.py       advancing bank time, and the holidays
+mockbank/routes/credits.py     POST and GET /_mock/credits
 mockbank/routes/payments.py    POST /payments, and /_mock/payments
 mockbank/routes/mailbox.py     the mailbox, and the request log
 mockbank/routes/validate.py    POST /_mock/validate

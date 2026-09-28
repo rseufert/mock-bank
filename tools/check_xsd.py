@@ -238,7 +238,8 @@ def files_to_check():
 def written_by_the_mock():
     """(label, XML) for every message a running mock writes for the sample:
     its status report, a DUPL rejection and the refusal of a file with no
-    MsgId (OrgnlMsgId NOTPROVIDED), the debit notification, the
+    MsgId (OrgnlMsgId NOTPROVIDED), money arriving from somebody else, the
+    debit notification, the
     return a return-later account brings (a pacs.004 and a camt.054 credit),
     and the statements for the days an advance crosses, the return's among
     them."""
@@ -264,6 +265,13 @@ def written_by_the_mock():
         call("POST", "/payments", sample)
         call("POST", "/payments", sample)                 # DUPL: a rejection
         call("POST", "/payments", b"not a payment file")  # NOTPROVIDED
+        # money arriving (#91): a received transfer with the payer, a note the
+        # bank re-cuts and a structured reference, on the next camt.054/053
+        call("POST", "/_mock/credits", json.dumps({
+            "account": "GLOBEX", "amount": 118000, "reference": "RF18539007547034",
+            "note": "Payment for INV-2026-0041 less the 70.00 we agreed", "wrap": 35,
+            "debtor": {"name": "Customer Ltd", "iban": "NL41MOCK0000000001",
+                       "bic": "MOCKNL2A"}}).encode("utf-8"))
         call("POST", "/_mock/advance?to=2026-10-06")
         messages = json.loads(call("GET", "/_mock/mailbox").decode("utf-8"))
     finally:

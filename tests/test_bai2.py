@@ -140,7 +140,22 @@ class TheTypeCodes(unittest.TestCase):
                          [bai2.DEBIT, bai2.DEBIT, bai2.RETURNED_CREDIT])
         self.assertNotEqual(bai2.DEBIT, bai2.RETURNED_CREDIT)
         self.assertEqual(set(bai2.PLACEHOLDER_CODES),
-                         {bai2.DEBIT, bai2.RETURNED_CREDIT})
+                         {bai2.DEBIT, bai2.RETURNED_CREDIT, bai2.RECEIVED_CREDIT})
+
+    def test_money_arriving_is_a_received_credit_not_a_return(self):
+        # The row `credits.booked_on` gives the statement, as the outbox marks it.
+        arriving = {"id": 3, "amount": 125000, "currency": "EUR", "credit": True,
+                    "incoming": True, "end_to_end_id": "CUST-77",
+                    "reference": "RF18539007547034", "debtor_name": "Customer, Ltd",
+                    "value_date": "2026-10-01", "note": ["INV-1001"]}
+        text = bai2.write_statement(ACCOUNT, DAY, 7, 0, 125000, [arriving],
+                                    created_at=AT)
+        self.assertEqual(self.codes(text), [bai2.RECEIVED_CREDIT])
+        self.assertEqual(len({bai2.DEBIT, bai2.RETURNED_CREDIT, bai2.RECEIVED_CREDIT}), 3)
+        [detail] = [l for l in text.splitlines() if l.startswith("16,")]
+        self.assertEqual(detail.split(",")[3:],
+                         ["Z", "CUST-77", "RF18539007547034", "Customer  Ltd/"])
+        self.assertEqual(bai2.trailers_agree(text), [])
 
     def test_a_credit_that_is_not_a_return_is_refused_rather_than_mislabelled(self):
         # #96 adds money arriving, whose rows are credits too. Coding a
@@ -153,6 +168,7 @@ class TheTypeCodes(unittest.TestCase):
                                  created_at=AT)
         self.assertIn("CUSTOMER-1", str(refused.exception))
         self.assertIn("came back", str(refused.exception))
+        self.assertIn("not money arriving", str(refused.exception))
 
     def test_the_account_record_carries_the_two_balances_and_no_movement_totals(self):
         # Movement summaries on the 03 are legal BAI2 and were in a first draft.
