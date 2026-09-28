@@ -139,14 +139,36 @@ AVAILABLE_NOW = "Z"
 Field = namedtuple("Field", "name kind")
 
 # An integer in minor units or a count; text; a date as yymmdd; a time as hhmm;
-# SIGNED, an amount that carries an explicit `+` or `-`; and GROUP, which is the
-# 03 record's repeating summary of (code, amount, item count, funds type).
+# SIGNED, an amount that carries an explicit `+` or `-`; FUNDS, a funds type
+# whose *width* depends on its value; OPT, a trailing field a producer may simply
+# leave off; and GROUP, the 03's repeating summary of (code, amount, item count,
+# funds type).
 #
 # SIGNED is a kind rather than something the callers format, for the reason the
 # comment in `_record` gives about `_safe`: the three control totals are written
 # from three places, and doing it at the call sites is how the 01 and the 02 got
 # missed last time.
-N, A, DATE, TIME, SIGNED, GROUP = "N", "A", "D", "T", "S", "G"
+#
+# FUNDS and OPT exist because #114 found that a record's width is not a constant.
+# Both are read-side facts - this mock writes `Z` and fills every field - so they
+# change what `read` accepts and nothing about what the writer produces.
+N, A, DATE, TIME, SIGNED, FUNDS, OPT, GROUP = ("N", "A", "D", "T", "S", "F",
+                                               "O", "G")
+
+# A continuation. It has no fields of its own: it continues the comma-separated
+# field stream of the record before it, and `_fold` joins the two before anything
+# is parsed. That is why it is not in `RECORDS`.
+#
+# Established from moov-io/bai2's samples rather than reasoned about (#114):
+# `88` follows an `03`, a `16` and another `88`; it chains, 68 deep in `sample4`;
+# and a field group may split straight across the boundary, as in
+#
+#     03,0975312468,,010,500000,,,190,70000000,4,0,110/
+#     88,70000000,15,D,3,0,20000000,1,30000000,3,20000000/
+#
+# where the type code `110` ends one record and its amount begins the next. A
+# continuation that carried fields of its own could not do that.
+CONTINUATION = "88"
 
 
 def _fields(*spec) -> tuple:
@@ -170,8 +192,8 @@ RECORDS = {
         ("currency code", A), ("summary", GROUP))),
     "16": ("transaction detail", _fields(
         ("record code", A), ("type code", A), ("amount", N),
-        ("funds type", A), ("bank reference number", A),
-        ("customer reference number", A), ("text", A))),
+        ("funds type", FUNDS), ("bank reference number", OPT),
+        ("customer reference number", OPT), ("text", OPT))),
     "49": ("account trailer", _fields(
         ("record code", A), ("account control total", SIGNED),
         ("number of records", N))),
@@ -184,37 +206,114 @@ RECORDS = {
 }
 
 
-def _shape(code: str):
-    """(fixed fields after the code, whether a repeating group follows).
+# How many fields a funds type occupies, counting the funds type itself. A
+# record's width is a function of its contents, which is the second half of what
+# #114 found - the first being continuations.
+#
+# Measured over moov-io/bai2's `sample1.txt` and `sample2.txt`: with these widths
+# every 16 in both files ends with nought to three trailing fields and every 03's
+# summary groups consume *exactly* all of their fields, including the D group
+# split across an 88 boundary (19 of 19). Get either a width or the fold wrong
+# and one of those overruns or falls short, which is why they are checked
+# together in `tests/test_bai2_external.py`.
+FUNDS_WIDTHS = {
+    "V": 3,        # V, availability date, availability time
+    "S": 4,        # S, and three availability amounts: now, one day, two or more
+}
+DISTRIBUTED = "D"  # D, a count, then that many (number of days, amount) pairs
 
-    The 03's summary repeats in fours, so its record has a floor and a stride
-    rather than an exact width; every other record has an exact one.
+
+def _funds_width(value: str, rest: Sequence[str]) -> int:
+    """Fields the funds type at the head of `value + rest` occupies.
+
+    Blank, `Z` and a single digit take one field and nothing follows: `Z` is
+    available now, a digit is that many days away. Raises `Unreadable` for a `D`
+    whose count is not a number, because the alternative is reading the rest of
+    the record at an offset that happens to parse.
     """
-    fields = RECORDS[code][1]
-    group = any(f.kind is GROUP for f in fields)
-    fixed = len([f for f in fields[1:] if f.kind is not GROUP])
-    return fixed, group
+    if value in FUNDS_WIDTHS:
+        return FUNDS_WIDTHS[value]
+    if value == DISTRIBUTED:
+        if not rest or not rest[0].strip().isdigit():
+            raise Unreadable(
+                "a distributed funds type (D) is followed by how many "
+                "(days, amount) pairs it carries; this one has %r"
+                % (rest[0] if rest else ""))
+        return 2 + 2 * int(rest[0])
+    return 1
+
+
+def _walk(code: str, values: Sequence[str]):
+    """Consume `values` against the declaration of `code`.
+
+    Returns (fields consumed, problem) - and a problem is a sentence, not a
+    boolean, because "this record is the wrong shape" is not an answer anybody
+    can act on.
+
+    A record is no longer a fixed count. It is a prefix of fixed fields, then
+    possibly a funds type whose width depends on its value, then trailing fields
+    a producer may leave off, or a group that repeats until the fields run out.
+    """
+    name, fields = RECORDS[code]
+    spec = fields[1:]
+    used = 0
+    for index, field in enumerate(spec):
+        if field.kind is GROUP:
+            return _walk_groups(code, values, used)
+        if field.kind is OPT:
+            # Trailing fields may simply be absent - sample2's
+            # `16,115,450000,S,100000,200000,150000,,,/` fills them and
+            # `16,165,123000000000,S,100000000000,20000000000,3000000000/` stops
+            # at the availability amounts. Once one is missing the rest are.
+            if used >= len(values):
+                return used, ""
+            used += 1
+            continue
+        if used >= len(values):
+            return used, ("the %s (%s) needs a %s; the record ends first"
+                          % (name, code, field.name))
+        if field.kind is FUNDS:
+            used += _funds_width(values[used], values[used + 1:])
+            if used > len(values):
+                return used, ("the %s (%s) states a funds type that runs past "
+                              "the end of the record" % (name, code))
+            continue
+        used += 1
+    if used != len(values):
+        return used, ("the %s (%s) carries %d field(s) after the code; this one "
+                      "has %d" % (name, code, used, len(values)))
+    return used, ""
+
+
+def _walk_groups(code: str, values: Sequence[str], used: int):
+    """The 03's summary, which repeats until the fields run out.
+
+    A group is (type code, amount, item count, funds type), and the funds type
+    carries its own width, so the stride is four *or more*. The old reader
+    checked `(len(values) - fixed) % 4`, which passed whenever a six-field V
+    group happened to appear in pairs and then read every amount out of the wrong
+    slot - a wrong answer rather than a refusal, which is the worse kind (#114).
+    """
+    name = RECORDS[code][0]
+    while used < len(values):
+        if not values[used].strip():
+            # A trailing empty field: the record ended on a separator.
+            used += 1
+            continue
+        if used + 3 >= len(values):
+            return used, ("the %s (%s) ends part-way through a summary group, "
+                          "which is a type code, an amount, an item count and a "
+                          "funds type" % (name, code))
+        used += 3 + _funds_width(values[used + 3], values[used + 4:])
+        if used > len(values):
+            return used, ("the %s (%s) has a summary group that runs past the "
+                          "end of the record" % (name, code))
+    return used, ""
 
 
 def _field_count_problem(code: str, values) -> str:
-    """Why this record's field count does not fit its declaration, or ""."""
-    fixed, group = _shape(code)
-    name = RECORDS[code][0]
-    if not group:
-        if len(values) != fixed:
-            return ("the %s (%s) carries %d field(s) after the code; this one "
-                    "has %d" % (name, code, fixed, len(values)))
-        return ""
-    if len(values) < fixed:
-        return ("the %s (%s) carries at least %d field(s) after the code; this "
-                "one has %d" % (name, code, fixed, len(values)))
-    # The group is one slot in the declaration and any multiple of four fields on
-    # the line, so what is written is the fixed fields plus 4n - not 4n + 1.
-    extra = len(values) - fixed
-    if extra % 4:
-        return ("the %s (%s) repeats its summary in fours; this one has %d "
-                "field(s) left over" % (name, code, extra % 4))
-    return ""
+    """Why this record does not fit its declaration, or ""."""
+    return _walk(code, values)[1]
 
 
 class Wrong(ValueError):
@@ -258,14 +357,25 @@ def _signed(minor: int) -> str:
     `moov-io/bai2`'s `sample1.txt` writes every one of these with an explicit
     sign - `49,+00000000000834000,14/`, and `+000000000000` for a zero balance in
     the 03 - and writes movement amounts on the 16 with no sign at all. That is
-    the same line this module already draws between `_amount` and `_movement`, so
-    the sample settles the notation rather than the design: whatever states a
-    position states its sign, and whatever states the size of a movement does
-    not, because its direction is in its type code.
+    the same line this module already draws between `_amount` and `_movement`:
+    whatever states a position states its sign, and whatever states the size of a
+    movement does not, because its direction is in its type code.
 
     Writing `-` for a negative and nothing for a positive, which this did
     before #57, was the asymmetry: a reader that requires the sign refuses the
     positive case, and the file is inconsistent with itself.
+
+    **Correcting what #57 recorded here.** That said the sample "settles the
+    notation". It settles *a* notation. #114 read six more of moov-io/bai2's
+    samples: 45 control totals across them are written bare and 7 signed, and
+    `spec-section3.txt` - the specification's own section 3 example - writes
+    `49,72000000,3/`. `sample2.txt` writes `010,+4350000` and `040,2830000` in
+    one record, so it is not even consistent within a file.
+
+    So signing is a choice and not a requirement. It is kept because it is
+    self-consistent and `-` was already being written, not because the format
+    asks. What the format does require is that a *reader* take either, which is
+    `_int`, and a test holds it.
 
     Not adopted: that sample zero-pads these to a fixed width - 17 digits for a
     control total, 12 for a summary amount, 15 for an unsigned 16 amount. BAI2 is
@@ -533,6 +643,64 @@ def _safe(text) -> str:
     return out.strip()
 
 
+Summary = namedtuple("Summary", "type_code amount count funds")
+Detail = namedtuple("Detail", "type_code amount funds availability reference "
+                              "customer_reference text")
+
+
+def summary_groups(values: Sequence[str]) -> List["Summary"]:
+    """An 03's repeating summary, walked rather than counted in fours.
+
+    `values` is the record's fields after the code, continuations already folded
+    in. A group is (type code, amount, item count, funds type) and the funds type
+    carries its own width, so the stride is four or more.
+
+    The old version took every second field of four. Over a real file that reads
+    each amount out of a later group's slot, and on `sample1` it raised a bare
+    `ValueError` from `int("")` - not even a refusal (#114).
+    """
+    out, index, rest = [], 2, values
+    while index < len(rest):
+        if not rest[index].strip():
+            index += 1                      # the record ended on a separator
+            continue
+        if index + 3 >= len(rest):
+            break                           # `_walk_groups` already refused this
+        funds = rest[index + 3]
+        out.append(Summary(rest[index], _int(rest[index + 1]),
+                           rest[index + 2], funds))
+        index += 3 + _funds_width(funds, rest[index + 4:])
+    return out
+
+
+def detail(values: Sequence[str]) -> "Detail":
+    """A 16's fields, with the variable-width funds type accounted for.
+
+    Read by walking and not by position: with a value-dated funds type the bank
+    reference is at index 5 rather than 3, which is how `statements` was reading
+    a real file's availability date as its reference.
+    """
+    width = _funds_width(values[2], values[3:]) if len(values) > 2 else 1
+    after = 2 + width
+    trailing = list(values[after:]) + ["", "", ""]
+    return Detail(values[0], _int(values[1]),
+                  values[2] if len(values) > 2 else "",
+                  tuple(values[3:after]),
+                  trailing[0], trailing[1], trailing[2])
+
+
+def _int(value: str) -> int:
+    """An amount, signed or bare.
+
+    Both occur, and bare is the majority: across moov-io/bai2's seven samples 45
+    control totals are written bare and 7 signed, and `spec-section3.txt` - the
+    specification's own section 3 example - writes `49,72000000,3/`. `sample2`
+    writes `010,+4350000` and `040,2830000` in one record. `int` takes either, so
+    this is a name for the fact rather than a conversion, and a test holds it.
+    """
+    return int(value.strip() or 0)
+
+
 def _amounts_in(line: str) -> List[int]:
     """Every amount a record carries, for a control total.
 
@@ -540,18 +708,17 @@ def _amounts_in(line: str) -> List[int]:
     that gains a field does not silently change what a trailer totals.
     """
     parts = line.rstrip(TERMINATOR).split(SEPARATOR)
-    code, values = parts[0], parts[1:]
+    return _amounts_of(parts[0], parts[1:])
+
+
+def _amounts_of(code: str, values: Sequence[str]) -> List[int]:
+    """The same, for a record already folded and split."""
     if code not in RECORDS:
         return []
     if code == "03":
-        # The repeating summary, as (type code, amount, item count, funds type)
-        # after the account number and currency: every second field of four.
-        summary = values[2:]
-        return [int(summary[index + 1])
-                for index in range(0, len(summary), 4)
-                if len(summary) > index + 1 and summary[index]]
+        return [group.amount for group in summary_groups(values)]
     if code == "16":
-        return [int(values[1])]
+        return [_int(values[1])]
     return []
 
 
@@ -574,13 +741,30 @@ def _count(lines: Sequence[str], trailers: int = 0) -> int:
 Record = namedtuple("Record", "code name values")
 
 
-def read(text: str) -> List[Record]:
-    """A BAI2 file as records, by the same declarations that wrote it.
+Folded = namedtuple("Folded", "line code values lines")
 
-    For the tests, and deliberately strict: this reads files this mock wrote, so
-    anything unexpected is a bug here rather than a fact about a file somebody
-    sent, and it raises instead of collecting findings. #57 is where a file from
-    outside the project is read.
+
+def _fold(text: str) -> List["Folded"]:
+    """The file as logical records, each remembering how many lines it occupied.
+
+    A `88` carries no fields of its own. It continues the comma-separated field
+    stream of the record before it, so it is joined on here and nothing further
+    down has to know continuations exist. The line number kept is the *first*
+    line of the logical record, because that is the one a reader looking for the
+    problem should open.
+
+    `lines` is kept because the two things a trailer states are counted over
+    different units: a **record count** counts physical records, and sample1's
+    `49` states 14 for a span that holds 13 lines plus itself *including* the
+    continuation - so a continuation counts as a record. A **control total** sums
+    the amounts of the logical record, where the continuation's fields are part
+    of the record above. Counting either one over the other's unit gives a number
+    that is wrong in a file with an `88` in it and right in every file this mock
+    writes.
+
+    This is what `examples/payment_run.py` had been doing since #113 while this
+    module refused any file containing an `88` - the module and the example
+    disagreeing about the format, with only the example held to a real file.
     """
     out = []
     for number, line in enumerate(text.splitlines(), start=1):
@@ -591,18 +775,41 @@ def read(text: str) -> List[Record]:
             raise Unreadable("line %d does not end with %r: %r"
                              % (number, TERMINATOR, line[:40]))
         values = line[:-1].split(SEPARATOR)
-        code = values[0]
+        code, rest = values[0], values[1:]
+        if code == CONTINUATION:
+            if not out:
+                raise Unreadable(
+                    "line %d is a continuation (%s) with no record before it to "
+                    "continue" % (number, CONTINUATION))
+            out[-1].values.extend(rest)
+            out[-1] = out[-1]._replace(lines=out[-1].lines + 1)
+            continue
         if code not in RECORDS:
             raise Unreadable("line %d has record code %r, which is not declared"
                              % (number, code))
+        out.append(Folded(number, code, rest, 1))
+    return out
+
+
+def read(text: str) -> List[Record]:
+    """A BAI2 file as records, by the same declarations that wrote it.
+
+    Continuations are folded into the record they continue, so a file this mock
+    wrote and a file a bank wrote read the same way. Still strict: a record that
+    does not fit its declaration raises rather than being collected as a finding,
+    because this reads statements rather than validating payment files somebody
+    sent.
+    """
+    out = []
+    for number, code, values, _ in _fold(text):
         # Counted against the declaration. Without this the reader accepted a
         # nine-field 02 written by an account name with a comma in it, so a file
         # whose fields had all shifted read back without complaint - which is why
         # neither that nor the line-break case showed up as a failing test.
-        problem = _field_count_problem(code, values[1:])
+        problem = _field_count_problem(code, values)
         if problem:
             raise Unreadable("line %d: %s" % (number, problem))
-        out.append(Record(code, RECORDS[code][0], values[1:]))
+        out.append(Record(code, RECORDS[code][0], values))
     return out
 
 
@@ -615,16 +822,33 @@ def statements(text: str) -> List[Parsed]:
 
     Opening balance, closing balance and the entries, so a test can compare the
     two renderings without either trusting the other's arithmetic.
+
+    This needs the two ledger balances, so it is narrower than `read`, which since
+    #114 takes any BAI2 file. `sample1.txt` reads and cannot be reduced: its 03
+    reports available balances (`040`, `045`) and movement totals (`100`, `400`)
+    and never states a ledger balance. That is a legal statement and not something
+    this can answer about, so it says which code is missing rather than raising a
+    `KeyError` from a dictionary two frames down.
     """
     out, current, entries = [], None, []
     for record in read(text):
         if record.code == "03":
             current, entries = record, []
         elif record.code == "16" and current is not None:
-            entries.append(Entry(record.values[0], int(record.values[1]),
-                                 record.values[3], record.values[5]))
+            one = detail(record.values)
+            entries.append(Entry(one.type_code, one.amount,
+                                 one.reference, one.text))
         elif record.code == "49" and current is not None:
             summary = _summary_of(current)
+            for code, what in ((OPENING_LEDGER, "opening"),
+                               (CLOSING_LEDGER, "closing")):
+                if code not in summary:
+                    raise Unreadable(
+                        "account %s states no %s ledger balance (%s); it reports "
+                        "%s, so it cannot be reduced to the three things a "
+                        "camt.053 asserts"
+                        % (current.values[0], what, code,
+                           ", ".join(sorted(summary)) or "nothing"))
             out.append(Parsed(current.values[0], current.values[1],
                               summary[OPENING_LEDGER], summary[CLOSING_LEDGER],
                               entries))
@@ -633,15 +857,9 @@ def statements(text: str) -> List[Parsed]:
 
 
 def _summary_of(record: Record) -> Dict[str, int]:
-    """The 03 record's repeating (code, amount, count, funds type) as a mapping."""
-    values = record.values[2:]
-    found = {}
-    for index in range(0, len(values), 4):
-        group = values[index:index + 4]
-        if len(group) < 2 or not group[0]:
-            continue
-        found[group[0]] = int(group[1])
-    return found
+    """The 03 record's summary as {type code: amount}."""
+    return {group.type_code: group.amount
+            for group in summary_groups(record.values)}
 
 
 def trailers_agree(text: str) -> List[str]:
@@ -651,10 +869,10 @@ def trailers_agree(text: str) -> List[str]:
     which is the only way a control total is worth anything. It is used by the
     tests and by `#57`'s comparison against an outside file.
     """
-    problems, lines = [], [l.strip() for l in text.splitlines() if l.strip()]
+    problems, lines = [], _fold(text)
     account_start = group_start = None
-    for index, line in enumerate(lines):
-        code = line.split(SEPARATOR)[0]
+    for index, record in enumerate(lines):
+        code = record.code
         if code == "03":
             account_start = index
         elif code == "02":
@@ -673,16 +891,28 @@ def trailers_agree(text: str) -> List[str]:
     return problems
 
 
-def _check(lines, start, trailer, code, names) -> List[str]:
-    covered = lines[start:trailer]
-    stated = lines[trailer].rstrip(TERMINATOR).split(SEPARATOR)[1:]
-    wanted = [_control_total(covered), None, _count(covered, trailers=1)] \
-        if len(names) == 3 else [_control_total(covered), _count(covered, trailers=1)]
+def _check(folded, start, trailer, code, names) -> List[str]:
+    """One trailer against what it covers.
+
+    The two numbers are counted over different units, which a file with a
+    continuation in it can tell apart and a file this mock writes cannot: the
+    **total** sums the amounts of each logical record, and the **count** counts
+    physical records, continuations included. `sample1`'s 49 states 14 for
+    thirteen lines and itself.
+    """
+    covered = folded[start:trailer]
+    stated = folded[trailer].values
+    total = sum(sum(_amounts_of(r.code, r.values)) for r in covered)
+    if not CONTROL_TOTALS_ARE_SIGNED:
+        total = abs(total)
+    physical = sum(r.lines for r in covered)
+    count = physical + (1 if COUNTS_INCLUDE_THE_TRAILER else 0)
+    wanted = [total, None, count] if len(names) == 3 else [total, count]
     problems = []
     for name, want, got in zip(names, wanted, stated):
         if name is None or want is None:
             continue
-        if int(got) != want:
+        if _int(got) != want:
             problems.append("the %s record's %s says %s; the records it covers "
                             "give %d" % (code, name, got, want))
     return problems
