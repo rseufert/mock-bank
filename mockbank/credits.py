@@ -164,7 +164,12 @@ def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
     # The first day the bank can book it: the value date, or later if that is
     # a weekend or holiday, or today after the cutoff - the same rule a
     # payment's settlement follows.
-    booking = clock.settlement_date(now, value_date)
+    try:
+        booking = clock.settlement_date(now, value_date)
+    except OverflowError:
+        # 9999-12-31 on a holiday rolls forward past the last date there is.
+        raise Refused(400, "value_date %s has no business day on or after it"
+                           % value_date.isoformat())
     record = {"id": 0, "amount": amount, "currency": currency,
               "value_date": value_date.isoformat(),
               "end_to_end_id": end_to_end_id or "NOTPROVIDED",
@@ -204,25 +209,34 @@ def listing(conn) -> List[Dict[str, Any]]:
     return [_row(r) for r in db.rows(conn, "SELECT * FROM credit ORDER BY id DESC")]
 
 
-def book_due(conn, today: datetime.date) -> List[Dict[str, Any]]:
+def book_due(conn, today: datetime.date, clock) -> List[Dict[str, Any]]:
     """Book every credit whose day has come: the balance goes up. Returns them.
 
     Not into an account closed while the credit waited: a closed account gets
     no statement, so booked there it would be money that arrived and was never
-    reported. It is left unbooked while the account is closed.
+    reported. Its booking date moves on to the next business day instead, each
+    time it comes due, so that if the account is reopened it books on a day
+    that account has a statement for, never under a day already passed.
     """
-    due = db.rows(conn, "SELECT credit.* FROM credit JOIN account"
-                        " ON account.id = credit.account_id"
-                        " WHERE credit.booked_at IS NULL AND account.closed = 0"
+    due = db.rows(conn, "SELECT credit.*, account.closed AS closed FROM credit"
+                        " JOIN account ON account.id = credit.account_id"
+                        " WHERE credit.booked_at IS NULL"
                         " AND credit.booking_date <= ? ORDER BY credit.id",
                   (today.isoformat(),))
+    later = clock.next_business_day(today).isoformat()
     now = db.now()
+    booked = []
     for row in due:
+        closed = row.pop("closed")
+        if closed:
+            conn.execute("UPDATE credit SET booking_date = ? WHERE id = ?", (later, row["id"]))
+            continue
         conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",
                      (row["amount"], row["account_id"]))
         conn.execute("UPDATE credit SET booked_at = ? WHERE id = ?", (now, row["id"]))
         row["booked_at"] = now
-    return [_row(r) for r in due]
+        booked.append(row)
+    return [_row(r) for r in booked]
 
 
 def booked_on(conn, account_id: str, day: str) -> List[Dict[str, Any]]:

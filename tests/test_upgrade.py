@@ -310,6 +310,10 @@ class FromVersionSeven(FileDatabaseCase):
             "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour,"
             " format, account_number) VALUES ('ACME', 'ACME', 'NL41MOCK0000000001',"
             " 'MOCKNL2A', 'EUR', 1000, 'accept', 'nacha', '0000000001')")
+        conn.execute("INSERT INTO file (id, msg_id, message, received_at, status)"
+                     " VALUES (1, 'MSG-7', 'nacha', '2026-10-01T09:00:00Z', 'ACCP')")
+        conn.execute("INSERT INTO payment (file_id, status, end_to_end_id, amount,"
+                     " transaction_code) VALUES (1, 'accepted', 'INV-7', 250, '22')")
         conn.commit()
         conn.close()
 
@@ -325,6 +329,15 @@ class FromVersionSeven(FileDatabaseCase):
         account = self.get("/_mock/accounts/ACME").json()
         self.assertEqual((account["format"], account["account_number"], account["balance"]),
                          ("nacha", "0000000001", 1000))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT file.msg_id, payment.end_to_end_id, payment.amount,"
+                " payment.transaction_code FROM payment JOIN file"
+                " ON file.id = payment.file_id").fetchall(),
+                [("MSG-7", "INV-7", 250, "22")])
+        finally:
+            conn.close()
         today = self.get("/_mock/state").json()["clock"]["date"]
         resp = self.request("POST", "/_mock/credits", body={
             "account": "ACME", "amount": 500, "value_date": today,

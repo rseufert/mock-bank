@@ -340,7 +340,9 @@ curl -s -X POST http://127.0.0.1:8080/_mock/credits -H 'Content-Type: applicatio
   the credit is kept, so nothing waiting can stop a later release.
 - **An account closed while a credit waits does not book it.** A closed account
   gets no statement, so the money would arrive unreported. The credit stays
-  unbooked in `GET /_mock/credits`. The mock does not send it back to the payer.
+  unbooked in `GET /_mock/credits`, and the mock does not send it back to the
+  payer. Reopened, the account books it on the next business day, which is on
+  a statement, and keeps the payer's value date.
 - **On a `statement-gap` account the entry left off is the day's last**, and
   credits come after the day's debits. So on a day money arrives, it is a credit
   that goes missing rather than a debit.

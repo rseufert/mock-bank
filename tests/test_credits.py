@@ -151,6 +151,9 @@ class WhatTheStatementShows(CreditCase):
 class Refused(CreditCase):
 
     def test_what_the_bank_would_not_book_is_refused_with_why(self):
+        # The last date there is, a holiday: rolling forward from it overflows.
+        self.assertEqual(self.request("PUT", "/_mock/holidays",
+                                      body=["9999-12-31"]).status, 200)
         cases = [
             ({"account": "NOPE"}, 409, "no account"),
             ({"account": "INITECH"}, 409, "closed"),
@@ -176,6 +179,7 @@ class Refused(CreditCase):
             ({"reference": "   "}, 400, "blank"),
             ({"end_to_end_id": "   "}, 400, "blank"),
             ({"value_date": "20261005"}, 400, "YYYY-MM-DD"),
+            ({"value_date": "9999-12-31"}, 400, "no business day"),
             ({"wrap": 35.0}, 400, "wrap"),
             ({"wrap": True}, 400, "wrap"),
             ({"note": "INV-1\x01"}, 400, "control character"),
@@ -204,6 +208,19 @@ class OnAnAccountThatIsNotPlain(CreditCase):
         self.advance(MONDAY)
         self.assertEqual(self.balance("ACME"), before)
         self.assertEqual([c["booked_at"] for c in self.get("/_mock/credits").json()], [None])
+
+    def test_reopened_it_books_on_a_day_with_a_statement_not_its_old_one(self):
+        before = self.balance("ACME")
+        self.credit(value_date=FRIDAY.isoformat())
+        self.patch("/_mock/accounts/ACME", body={"closed": True})
+        self.advance(MONDAY)                         # Friday passes while closed
+        self.patch("/_mock/accounts/ACME", body={"closed": False})
+        tuesday = MONDAY + datetime.timedelta(days=1)
+        self.advance(tuesday + datetime.timedelta(days=1))
+        self.assertEqual(self.balance("ACME"), before + 125000)
+        entries = [e for r in self.statement_roots() for e in self.credit_entries(r)]
+        self.assertEqual([(e["booked"], e["value"]) for e in entries],
+                         [(tuesday.isoformat(), FRIDAY.isoformat())])
 
     def test_statement_gap_leaves_the_credit_off_when_it_is_the_last_entry(self):
         # Credits come after the day's debits, so the gap now drops a credit

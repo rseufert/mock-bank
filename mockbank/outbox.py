@@ -148,7 +148,7 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
         conn.execute(
             "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
             (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
-    _release_credits(conn, now, today)
+    _release_credits(conn, now, today, clock)
     released = db.rows(conn, "SELECT id, type, account, due_at FROM message"
                              " WHERE released_at IS NULL AND due_at <= ? ORDER BY id",
                        (stamp,))
@@ -158,12 +158,12 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     return released
 
 
-def _release_credits(conn, now, today):
+def _release_credits(conn, now, today, clock):
     """Book the money arriving today, and say so: a ``camt.054`` credit per
     account and booking day, the same granularity as the debits (#91)."""
     stamp = db.stamp(now)
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
-    for row in credits.book_due(conn, today):
+    for row in credits.book_due(conn, today, clock):
         by_day.setdefault((row["account_id"], row["booking_date"]), []).append(
             dict(row, incoming=True))
     for (account_id, day), rows in sorted(by_day.items()):
