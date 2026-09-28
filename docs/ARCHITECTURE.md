@@ -23,9 +23,13 @@ self-consistent.
 
 ## One pipeline, two doors
 
-A `pain.001` arrives by `POST /payments`, or it is dropped into `--drop-dir`.
-Both doors call `State.receive`, which is the pipeline: read, validate, decide,
-book, queue. The folder door was written second and the pipeline was pulled out
+A `pain.001` or a NACHA file arrives by `POST /payments`, or it is dropped into
+`--drop-dir`. Both doors call `State.receive`, which is the pipeline: read,
+validate, resolve, decide, book, queue. Both formats read into one model, so
+nothing after the reader knows which it was. `accounts.resolve` is the one step
+between reading and deciding: it names the accounts the bank holds by IBAN,
+whatever the file named them by (a NACHA file has no IBANs), so `decide` looks
+up by IBAN and nothing else. The folder door was written second and the pipeline was pulled out
 of the HTTP handler to make room for it, rather than the handler being called
 with a fabricated request - two doors that agree because there is only one
 thing behind them, not because two code paths were kept in step.
@@ -33,7 +37,8 @@ thing behind them, not because two code paths were kept in step.
 debtor-side ones from the debtor, `closed-account` and `bad-bank-id` from a
 creditor account the bank holds - and produces an outcome and a reason code per
 payment. `accounts.book` moves balances, debit side only. `outbox.queue_status`
-puts the `pain.002` on the `message` table due `--status-delay-ms` after
+puts the status on the `message` table - a `pain.002`, or for an account whose
+`format` is `nacha` a plain acknowledgement - due `--status-delay-ms` after
 receipt, and the `camt.054` and `camt.053` are written as the clock reaches
 them rather than predicted in advance, because a later file can add payments to
 the same account and day.

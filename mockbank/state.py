@@ -9,7 +9,8 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any, Dict
 
-from . import __version__, accounts, clock as clock_module, db, drop, outbox, validate
+from . import (__version__, accounts, clock as clock_module, db, drop, nacha, outbox,
+               validate)
 from .accounts import BEHAVIOURS
 from .routes import SUPPORTED
 from .routes.control import PLANNED
@@ -153,7 +154,10 @@ class State:
         name, which a refusal's ``pain.002`` carries.
         """
         conn, now, today = self.conn, self.now(), self.today()
+        # Either door takes a NACHA file as well as a pain.001 (#53), and then
+        # names the accounts it holds by IBAN, which is all `decide` knows.
         payment_file, findings = validate.inspect(body, content_type, today)
+        accounts.resolve(conn, payment_file)
         decision = accounts.decide(payment_file, findings, conn, self.clock, now,
                                    self.config.allow_duplicates)
         file_id = accounts.book(conn, decision)
@@ -167,6 +171,9 @@ class State:
             conn, "SELECT booked_at FROM payment WHERE file_id = ? ORDER BY id",
             (file_id,))]
         answer = {
+            "format": ("nacha" if payment_file is not None
+                       and payment_file.message == nacha.NAME
+                       else "iso20022" if payment_file is not None else None),
             "msg_id": decision.msg_id,
             "status": decision.status,
             "reason": decision.reason,

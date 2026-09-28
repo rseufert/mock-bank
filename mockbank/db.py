@@ -57,7 +57,14 @@ SCHEMA = [
         -- {"days": 3} from it. An object rather than columns, because each
         -- behaviour wants different parameters and most want none.
         parameters  TEXT NOT NULL DEFAULT '{}',
-        closed      INTEGER NOT NULL DEFAULT 0
+        closed      INTEGER NOT NULL DEFAULT 0,
+        -- What the bank writes for this account: `iso20022`, or `nacha` for a
+        -- plain acknowledgement in place of the pain.002 (#53).
+        format      TEXT NOT NULL DEFAULT 'iso20022',
+        -- Its domestic account number, which is how a NACHA file names an
+        -- account the bank holds: at the bank's routing number, or as the
+        -- company identification of the account paying. '' for none.
+        account_number TEXT NOT NULL DEFAULT ''
     )
     """,
     # A day the bank does not settle on, `YYYY-MM-DD` in bank time. The clock
@@ -189,6 +196,10 @@ INDEXES = [
     # id, so that is the lookup that has to be fast. Unique because two
     # accounts with one IBAN would leave the pipeline picking one arbitrarily.
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_account_iban ON account (iban)",
+    # Unique where there is one: an account number that named two accounts
+    # would send a NACHA payment to whichever the lookup found first.
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_account_number ON account (account_number)"
+    " WHERE account_number <> ''",
     # The request log is read newest-first and pruned oldest-first.
     "CREATE INDEX IF NOT EXISTS ix_request_log_at ON request_log (at)",
     # The duplicate check, and a tester looking a payment up by the id their
@@ -213,7 +224,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class DatabaseError(Exception):
@@ -549,11 +560,14 @@ def seed(conn: sqlite3.Connection) -> None:
         return
     for (identifier, name, country, bban, bic, currency, balance,
          behaviour, closed) in SEED:
+        # The domestic account number is the account part of the IBAN, the
+        # last ten digits of these NL ones, so the two agree at a glance.
         conn.execute(
             "INSERT INTO account (id, name, iban, bic, currency, balance,"
-            " behaviour, parameters, closed) VALUES (?,?,?,?,?,?,?,?,?)",
+            " behaviour, parameters, closed, account_number)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (identifier, name, iban(country, bban), bic, currency, balance,
-             behaviour, json.dumps({}), closed))
+             behaviour, json.dumps({}), closed, bban[-10:]))
     conn.commit()
 
 

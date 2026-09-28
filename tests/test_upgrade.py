@@ -26,6 +26,7 @@ SCHEMA_V2 = os.path.join(HERE, "fixtures", "schema-v2.sql")
 SCHEMA_V3 = os.path.join(HERE, "fixtures", "schema-v3.sql")
 SCHEMA_V4 = os.path.join(HERE, "fixtures", "schema-v4.sql")
 SCHEMA_V5 = os.path.join(HERE, "fixtures", "schema-v5.sql")
+SCHEMA_V6 = os.path.join(HERE, "fixtures", "schema-v6.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -253,6 +254,45 @@ class FromVersionFive(FileDatabaseCase):
                       if name.startswith("pain.002"))
 
 
+class FromVersionSix(FileDatabaseCase):
+    """A file written before an account had a format or a domestic account
+    number (#53): its accounts gain both, as ISO 20022 accounts with no
+    number, which is what they were."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V6, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        for identifier, iban in (("ACME", "NL41MOCK0000000001"),
+                                 ("GLOBEX", "NL14MOCK0000000002")):
+            conn.execute(
+                "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+                " VALUES (?, ?, ?, 'MOCKNL2A', 'EUR', 1000, 'accept')",
+                (identifier, identifier, iban))
+        conn.commit()
+        conn.close()
+
+    def test_its_accounts_gain_a_format_and_no_number(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        found = {a["id"]: (a["format"], a["account_number"], a["balance"])
+                 for a in self.request("GET", "/_mock/accounts").json()}
+        # No number is invented for an account the seed did not make: a NACHA
+        # file cannot name it until one is set, and then only that one.
+        self.assertEqual(found, {"ACME": ("iso20022", "", 1000),
+                                 "GLOBEX": ("iso20022", "", 1000)})
+        for identifier, number in (("ACME", "1234"), ("GLOBEX", "")):
+            resp = self.request("PATCH", "/_mock/accounts/" + identifier,
+                                body={"account_number": number})
+            self.assertEqual(resp.status, 200, resp.body)
+        clash = self.request("PATCH", "/_mock/accounts/GLOBEX",
+                             body={"account_number": "1234"})
+        self.assertEqual(clash.status, 400)
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -287,7 +327,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (6, "a0eff71b361f16e0")
+    FINGERPRINT = (7, "1c855a6c931a5949")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

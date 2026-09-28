@@ -112,7 +112,7 @@ sends them.
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
 | `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
-| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(0.3; so far a NACHA file is read and checked by `POST /_mock/validate`)** |
+| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(0.3; so far NACHA files are read at both doors and acknowledged, and returns and BAI2 follow)** |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
@@ -207,7 +207,55 @@ has no ISO 20022 equivalent, the mock makes these choices:
 - **Only credit entries are payments.** A debit, a prenote or a return entry
   is an `FF01` finding, because this bank sends money and does not collect it.
 
-`POST /payments` does not take a NACHA file yet (0.3): it refuses one by name.
+**Both doors take a NACHA file**, `POST /payments` and the drop directory, and
+it is decided by the same engine as a `pain.001`; the JSON answer's `format`
+says which it saw. A NACHA file names accounts by number, never by IBAN, so the
+bank finds the ones it holds before deciding:
+
+- **The bank's routing number is `999999992`.** It is fictional on purpose:
+  it passes the check digit, and no Federal Reserve district starts with 99.
+- **Each account has an `account_number`**, its domestic account number, up to
+  17 digits and unique. The seed gives the four accounts the account part of
+  their IBANs, `0000000001` to `0000000004`; an account you create or `PATCH`
+  has one only if you give it one.
+- A creditor at `999999992` whose account number is a held account's **is that
+  account**; so is a debtor whose company identification is one. Anything else
+  is an account at another bank, or a debtor the bank does not hold (`AC02`).
+  A `pain.001` naming accounts by `Othr/Id` and `ClrSysMmbId` is found the same
+  way.
+
+A NACHA file is in dollars, so an account that sends one is set up for it:
+
+```
+curl -s -X PATCH http://127.0.0.1:8080/_mock/accounts/ACME \
+     -H 'Content-Type: application/json' -d '{"format": "nacha", "currency": "USD"}'
+curl -s --data-binary @tests/samples/nacha_four_payments_to_the_seed.ach http://127.0.0.1:8080/payments
+```
+
+A NACHA account held in euros is not refused: each payment is rejected `AM03`,
+the currency mismatch rule that already exists, and says so.
+
+**A NACHA account is sent an acknowledgement, not a `pain.002`.** Real banks
+acknowledge an ACH file in shapes that differ from bank to bank, and NACHA
+specifies none, so this one is the mock's choice: plain text, one fact to a
+line, each line starting with what it is. For the file above it begins:
+
+```
+ACKNOWLEDGEMENT MB-ACK-000001
+CREATED 2026-10-01T09:00:00+00:00
+FILE 0000000001-2609300930A
+STATUS PART
+ENTRY 999999990000001 INV-2026-0101 1250.00 ACCEPTED 2026-10-01
+ENTRY 999999990000002 INV-2026-0102 3400.50 REJECTED AC04 the creditor account NL84MOCK0000000003 is closed
+```
+
+A rejection carries the bank's reason code, the one a `pain.002` would, until
+0.3 answers those as NACHA returns (`R01`, `R02`, `R03`). Statements stay
+`camt.053` until BAI2. In the mailbox an acknowledgement's type is `nacha.ack`,
+`GET /_mock/mailbox/<id>` serves it as `text/plain`, and in `--pickup-dir` it is
+a `.txt` file. `?raw` is a sequence of XML documents, so it refuses with `409`
+to mix text into one and says how to ask for each: `?raw&type=nacha.ack` and
+`?raw&type=camt.`, say.
 
 A `camt.053` closes each business day for every open account the bank holds,
 in order, as the clock passes the day's end - a day with no entries still gets
@@ -350,7 +398,7 @@ like mock-edi's so the two feel the same.
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
 | Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
-| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters |
+| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole |
