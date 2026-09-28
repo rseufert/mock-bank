@@ -451,16 +451,22 @@ that applies wins:
 5. `silent` decides and books, and reports nothing.
 
 Only `insufficient-funds` looks at the balance: under every other behaviour a
-payment books even below zero, as on an account with an overdraft. A creditor
+payment books even below zero, as on an account with an overdraft - down to the
+limit every account has, whatever its behaviour. A balance is at most 18
+digits of minor units either side of zero, because that is what a statement can
+write. A payment that would overdraw past it is `AM02`. A `PATCH` or a new
+account past it is refused. So is a `PATCH` or a credit that would leave no room
+for the returns due back and the credits waiting to book (#106). A creditor
 at another bank - a well-formed IBAN the mock does not hold - is not something
 a bank can check at acceptance, so a payment to it settles.
 
 An accepted payment debits its account on its settlement date, not on
 receipt. The mock books the **debit side only**: a payment into an
 account it holds does not credit that account, so every balance change has a
-statement entry to explain it. That is a choice, and it is stated here. The one
-credit it books is a return, which puts the money back where it came from, with
-a `CRDT` entry on that day's statement to explain it.
+statement entry to explain it. That is a choice, and it is stated here. The
+credits it books are a return, which puts the money back where it came from,
+and money arriving from somebody else through `POST /_mock/credits` (#91). Each
+has a `CRDT` entry on that day's statement to explain it.
 
 Two rules hold whatever the behaviour, because real banks apply them:
 
