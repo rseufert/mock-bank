@@ -123,11 +123,44 @@ that from tangling:
   become ancestors of `main` and `git branch --merged` does not list a squashed
   branch. Whether a branch is merged is answered by its pull request, not by
   git.
+- **Never rewrite a commit onto a newer `main` from a working tree that predates
+  it.** Tidying a branch with `git reset --soft origin/main` and committing
+  records every file your tree has not caught up on as a deliberate removal. The
+  new parent has changes your files do not, so committing your files says
+  "remove them" — and nothing fails. No test, no check, no conflict marker: the
+  result is internally consistent, just older. Bring `main` into the working tree
+  first, with a rebase or a merge, and only then rewrite anything.
+
+  **Then, before every push: bring `main` in, and run
+  `git diff origin/main...HEAD --stat`**, confirming that each file listed is one
+  the issue asked you to change. Three dots, not two. Two dots compare your tip
+  against `main`'s tip, so a branch that is merely *behind* `main` reports every
+  change `main` has made since as your deletion — on a branch three commits
+  behind, 261 of them across nine files. A check that cries wolf gets ignored,
+  and then it is not there on the day it would have mattered. Three dots compare
+  against where you branched, which is the question you are asking.
+
+  This is not covered by one worktree per session. A worktree stops two sessions
+  colliding with each other; it does nothing about one session colliding with a
+  `main` that moved underneath it. It happened on #66: the squash's parent was
+  the documentation pull request it silently reverted, 36 lines out of
+  `README.md` and 34 out of `docs/ARCHITECTURE.md`, and it took a reviewer
+  reading the file list to find it.
 - **The junior developer's pull requests get the senior developer's review
   first**, as a comment on the pull request, before the maintainer looks. The
   senior developer's pull requests go straight to the maintainer. A review asks
   whether the change is faithful to the standard, whether it holds to the
   principles above, and whether the test it adds could actually fail.
+- **A reviewer reads the file list before the diff.** A file the issue does not
+  mention is the first question, whatever its diff looks like — and a file the
+  issue *does* mention, carrying changes in the opposite direction to what it
+  asked for, is the second. #66 had both: `README.md` and `docs/ARCHITECTURE.md`
+  were nowhere in an issue about changelog fragments, and `docs/FILES.md`, which
+  that issue did legitimately touch, had five rows taken out while three were put
+  in. Reading the diff first means reading each change on its own terms, where a
+  plausible-looking removal is indistinguishable from an intended one. This is
+  how that revert was caught, and it is the only thing that could have caught
+  it.
 - **One worktree per session.** `git worktree add ../mock-bank-<slug> -b
   <branch>` gives a session its own checkout and its own branch. Two sessions
   sharing one checkout switch its branch under each other, and the uncommitted
