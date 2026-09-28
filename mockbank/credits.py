@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 from typing import Any, Dict, List, Optional
 
-from . import accounts, db, schema
+from . import accounts, db, messages, schema
 
 # How wide a line of note to payee is shown. 140 is `Ustrd`'s own limit and
 # keeps what the payer wrote; 35 and 70 are the widths banks re-cut to.
@@ -31,6 +32,13 @@ DEFAULT_WRAP = 140
 
 FIELDS = ("account", "amount", "currency", "value_date", "debtor", "reference",
           "note", "end_to_end_id", "wrap")
+
+# What an account can hold: 18 digits, as a camt amount has, so that no
+# statement is ever asked to write a balance it cannot.
+MAX_BALANCE = 10 ** 18 - 1
+DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# What XML 1.0 cannot carry, and line breaks, which no field here should hold.
+UNWRITABLE = re.compile("[\x00-\x1f\x7f\ud800-\udfff\ufffe\uffff\u2028\u2029]")
 
 
 class Refused(ValueError):
@@ -54,7 +62,10 @@ def wrap(lines: List[str], width: int) -> List[str]:
                 for piece in ([line[i:i + width] for i in range(0, len(line), width)]
                               or [""])]
     text = " ".join(lines)
-    return [text[i:i + width] for i in range(0, len(text), width)]
+    # A cut that leaves only a space is dropped: the bank's re-cut never
+    # makes an empty line the payer did not write.
+    return [piece for piece in (text[i:i + width] for i in range(0, len(text), width))
+            if piece.strip()]
 
 
 def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
@@ -84,6 +95,12 @@ def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
         raise Refused(400, "amount is a whole number of minor units above zero - "
                            "1250.00 is 125000 - not %r" % (amount,))
+    waiting = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM credit"
+                           " WHERE account_id = ? AND booked_at IS NULL",
+                     (account["id"],))["total"]
+    if account["balance"] + waiting + amount > MAX_BALANCE:
+        raise Refused(400, "amount %d would take account %s past the 18 digits a "
+                           "statement balance has" % (amount, account["id"]))
     currency = body.get("currency", account["currency"])
     if currency != account["currency"]:
         raise Refused(400, "the credit is in %s but account %s is held in %s, and "
@@ -93,7 +110,10 @@ def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
     today = clock.today()
     raw = body.get("value_date", today.isoformat())
     try:
-        value_date = datetime.date.fromisoformat(raw) if isinstance(raw, str) else None
+        # The pattern first: `fromisoformat` takes 20261005 from Python 3.11
+        # on and refuses it before, and the answer must not depend on that.
+        value_date = (datetime.date.fromisoformat(raw)
+                      if isinstance(raw, str) and DATE.fullmatch(raw) else None)
     except ValueError:
         value_date = None
     if value_date is None:
@@ -110,9 +130,13 @@ def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
     iban = str(debtor.get("iban", "")).replace(" ", "").upper()
     if iban and not schema.iban_is_valid(iban):
         raise Refused(400, "the debtor's iban %r fails its check digits" % iban)
+    bic = str(debtor.get("bic", "")).upper()
+    if bic and not re.fullmatch(schema.PATTERNS["BICFIDec2014Identifier"], bic):
+        raise Refused(400, "the debtor's bic %r is not a BIC: 8 or 11 letters and "
+                           "digits, the country at 5 and 6" % bic)
 
     width = body.get("wrap", DEFAULT_WRAP)
-    if width not in WRAPS:
+    if isinstance(width, bool) or not isinstance(width, int) or width not in WRAPS:
         raise Refused(400, "wrap is how wide the bank cuts the note: one of %s, "
                            "not %r" % (", ".join(map(str, WRAPS)), width))
     note = body.get("note", [])
@@ -121,24 +145,45 @@ def create(conn, clock, now: datetime.datetime, body: Any) -> Dict[str, Any]:
         raise Refused(400, "note is the note to payee: a string, or a list of lines")
     reference = body.get("reference", "")
     end_to_end_id = body.get("end_to_end_id", "NOTPROVIDED")
-    for name, value, limit in (("reference", reference, 35),
+    for name, value, limit in [("reference", reference, 35),
                                ("end_to_end_id", end_to_end_id, 35),
-                               ("debtor name", debtor.get("name", ""), 140)):
-        if not isinstance(value, str) or len(value) > limit:
+                               ("debtor name", debtor.get("name", ""), 140)] + [
+                               ("line %d of the note" % n, line, None)
+                               for n, line in enumerate(note, start=1)]:
+        # A line of note is not limited: the bank cuts it to the wrap.
+        if not isinstance(value, str) or (limit and len(value) > limit):
             raise Refused(400, "%s is text of at most %d characters" % (name, limit))
+        if value and not value.strip():
+            raise Refused(400, "%s is blank: leave it out, or give it text" % name)
+        if name.startswith("line") and not value:
+            raise Refused(400, "%s is empty: leave the line out" % name)
+        if UNWRITABLE.search(value):
+            raise Refused(400, "%s holds a control character or line break, which "
+                               "the bank's XML cannot carry" % name)
 
     # The first day the bank can book it: the value date, or later if that is
     # a weekend or holiday, or today after the cutoff - the same rule a
     # payment's settlement follows.
     booking = clock.settlement_date(now, value_date)
+    record = {"id": 0, "amount": amount, "currency": currency,
+              "value_date": value_date.isoformat(),
+              "end_to_end_id": end_to_end_id or "NOTPROVIDED",
+              "debtor_name": debtor.get("name", ""), "debtor_iban": iban,
+              "debtor_bic": bic, "reference": reference, "note": wrap(note, width),
+              "incoming": True}
+    try:
+        # Written once now, as the release will write it: a credit the bank
+        # cannot report is refused here, not stored to fail every release after.
+        messages.write_camt054(account, [record], booking, "MB-C054-CHECK", now)
+    except ValueError as error:
+        raise Refused(400, "the bank could not report this credit: %s" % error)
     cursor = conn.execute(
         "INSERT INTO credit (account_id, amount, currency, value_date, booking_date,"
         " end_to_end_id, debtor_name, debtor_iban, debtor_bic, reference, note,"
         " received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (account["id"], amount, currency, value_date.isoformat(), booking.isoformat(),
-         end_to_end_id or "NOTPROVIDED", debtor.get("name", ""), iban,
-         str(debtor.get("bic", "")).upper(), reference,
-         json.dumps(wrap(note, width)), db.stamp(now)))
+         record["end_to_end_id"], record["debtor_name"], iban, bic, reference,
+         json.dumps(record["note"]), db.stamp(now)))
     conn.commit()
     return get(conn, cursor.lastrowid)
 
@@ -160,9 +205,17 @@ def listing(conn) -> List[Dict[str, Any]]:
 
 
 def book_due(conn, today: datetime.date) -> List[Dict[str, Any]]:
-    """Book every credit whose day has come: the balance goes up. Returns them."""
-    due = db.rows(conn, "SELECT * FROM credit WHERE booked_at IS NULL"
-                        " AND booking_date <= ? ORDER BY id", (today.isoformat(),))
+    """Book every credit whose day has come: the balance goes up. Returns them.
+
+    Not into an account closed while the credit waited: a closed account gets
+    no statement, so booked there it would be money that arrived and was never
+    reported. It is left unbooked while the account is closed.
+    """
+    due = db.rows(conn, "SELECT credit.* FROM credit JOIN account"
+                        " ON account.id = credit.account_id"
+                        " WHERE credit.booked_at IS NULL AND account.closed = 0"
+                        " AND credit.booking_date <= ? ORDER BY credit.id",
+                  (today.isoformat(),))
     now = db.now()
     for row in due:
         conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",

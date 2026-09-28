@@ -79,6 +79,20 @@ class ArrivingOnTheClock(CreditCase):
         self.assertEqual([(e["booked"], e["value"]) for e in entries],
                          [(MONDAY.isoformat(), SATURDAY.isoformat())])
 
+    def test_advancing_twice_books_it_once(self):
+        before = self.balance("ACME")
+        self.credit(value_date=FRIDAY.isoformat())
+        self.advance(FRIDAY)
+        self.advance(MONDAY)
+        self.assertEqual(self.balance("ACME"), before + 125000)
+        self.assertEqual([c["booked_at"] is not None
+                          for c in self.get("/_mock/credits").json()], [True])
+
+    def test_a_reset_clears_what_was_waiting(self):
+        self.credit(value_date=FRIDAY.isoformat())
+        self.post("/_mock/reset")
+        self.assertEqual(self.get("/_mock/credits").json(), [])
+
     def test_it_is_notified_as_it_books(self):
         self.credit()                                 # today, before the cutoff
         notices = self.of_type(self.mailbox(), CAMT054)
@@ -120,6 +134,12 @@ class WhatTheStatementShows(CreditCase):
         [entry] = self.credit_entries(self.statement_roots()[0])
         self.assertEqual((entry["note"], entry["reference"]), ([], None))
 
+    def test_a_cut_that_leaves_only_a_space_makes_no_empty_line(self):
+        self.credit(note="x" * 35 + " ", wrap=35)
+        self.advance(FRIDAY)
+        [entry] = self.credit_entries(self.statement_roots()[0])
+        self.assertEqual(entry["note"], ["x" * 35])
+
     def test_every_message_still_walks_clean(self):
         self.credit(note="x" * 200, reference="REF-1")
         self.advance(FRIDAY)
@@ -140,12 +160,78 @@ class Refused(CreditCase):
             ({"wrap": 50}, 400, "wrap"),
             ({"debtor": {"name": "X", "iban": "NL00MOCK0000000001"}}, 400, "check digits"),
             ({"colour": "blue"}, 400, "unknown field"),
+            # What the bank's writer would refuse (the PM review of #96): each
+            # was once stored first, and every release after it failed.
+            ({"amount": 0}, 400, "minor units"),
+            ({"amount": -1}, 400, "minor units"),
+            ({"amount": True}, 400, "minor units"),
+            ({"amount": "100"}, 400, "minor units"),
+            ({"amount": 10 ** 19}, 400, "18 digits"),
+            ({"amount": 999999999999999999}, 400, "18 digits"),
+            ({"debtor": {"name": "X", "bic": "xx"}}, 400, "not a BIC"),
+            ({"debtor": {"name": "   "}}, 400, "blank"),
+            ({"note": ""}, 400, "empty"),
+            ({"note": ["INV-1", ""]}, 400, "line 2 of the note is empty"),
+            ({"note": "  "}, 400, "blank"),
+            ({"reference": "   "}, 400, "blank"),
+            ({"end_to_end_id": "   "}, 400, "blank"),
+            ({"value_date": "20261005"}, 400, "YYYY-MM-DD"),
+            ({"wrap": 35.0}, 400, "wrap"),
+            ({"wrap": True}, 400, "wrap"),
+            ({"note": "INV-1\x01"}, 400, "control character"),
+            ({"note": ["INV-1", "two\nlines"]}, 400, "control character"),
+            ({"reference": "RF\x01"}, 400, "control character"),
+            ({"end_to_end_id": "E2E\x01"}, 400, "control character"),
+            ({"debtor": {"name": "Customer\x01Ltd"}}, 400, "control character"),
+            ({"debtor": {"name": "Customer\u2028Ltd"}}, 400, "control character"),
         ]
         for fields, status, words in cases:
             with self.subTest(fields):
                 answer = self.credit(status=status, **fields)
                 self.assertIn(words, answer["error"])
         self.assertEqual(self.get("/_mock/credits").json(), [])
+        # And the bank still answers: nothing was left to fail a release.
+        self.advance(MONDAY)
+        self.assertEqual(self.get("/_mock/mailbox?leave").status, 200)
+
+
+class OnAnAccountThatIsNotPlain(CreditCase):
+
+    def test_an_account_closed_while_it_waited_does_not_book_it(self):
+        before = self.balance("ACME")
+        self.credit(value_date=FRIDAY.isoformat())
+        self.assertEqual(self.patch("/_mock/accounts/ACME", body={"closed": True}).status, 200)
+        self.advance(MONDAY)
+        self.assertEqual(self.balance("ACME"), before)
+        self.assertEqual([c["booked_at"] for c in self.get("/_mock/credits").json()], [None])
+
+    def test_statement_gap_leaves_the_credit_off_when_it_is_the_last_entry(self):
+        # Credits come after the day's debits, so the gap now drops a credit
+        # where it used to drop the last debit; the closing balance keeps it.
+        self.patch("/_mock/accounts/ACME", body={"behaviour": "statement-gap"})
+        before = self.balance("ACME")
+        self.credit()
+        self.advance(FRIDAY)
+        [root] = self.statement_roots()
+        self.assertEqual(self.credit_entries(root), [])
+        self.assertEqual(read_statement(root)["closing"], before + 125000)
+
+    def test_a_nacha_account_books_it_too(self):
+        self.patch("/_mock/accounts/ACME", body={"format": "nacha", "currency": "USD"})
+        before = self.balance("ACME")
+        self.credit(currency="USD")
+        self.advance(FRIDAY)
+        self.assertEqual(self.balance("ACME"), before + 125000)
+        [entry] = self.credit_entries(self.statement_roots()[0])
+        self.assertEqual(entry["amount"], 125000)
+
+    def test_return_later_never_sends_money_that_arrived_back(self):
+        self.patch("/_mock/accounts/ACME", body={"behaviour": "return-later"})
+        before = self.balance("ACME")
+        self.credit()
+        self.advance(MONDAY + datetime.timedelta(days=7))
+        self.assertEqual(self.balance("ACME"), before + 125000)
+        self.assertEqual(self.of_type(self.mailbox(), schema.MESSAGES["pacs.004.001.09"]), [])
 
     def test_the_listing_shows_what_arrived_newest_first(self):
         self.credit(end_to_end_id="A")

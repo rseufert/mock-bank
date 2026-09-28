@@ -333,6 +333,17 @@ curl -s -X POST http://127.0.0.1:8080/_mock/credits -H 'Content-Type: applicatio
 - **Amounts are minor units** and the currency is the account's; a credit in
   another is refused, as the mock does no FX, and so is one to a closed or
   unknown account, or for a value date already past.
+- **What the bank could not report is refused when it is sent, never stored.**
+  That covers a blank name, reference or line of note, a control character or
+  line break, a BIC that is not one, and an amount that would take the balance
+  past a statement's 18 digits. The credit's `camt.054` is written once before
+  the credit is kept, so nothing waiting can stop a later release.
+- **An account closed while a credit waits does not book it.** A closed account
+  gets no statement, so the money would arrive unreported. The credit stays
+  unbooked in `GET /_mock/credits`. The mock does not send it back to the payer.
+- **On a `statement-gap` account the entry left off is the day's last**, and
+  credits come after the day's debits. So on a day money arrives, it is a credit
+  that goes missing rather than a debit.
 
 The failures worth testing are four requests:
 

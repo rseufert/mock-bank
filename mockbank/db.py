@@ -262,7 +262,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class DatabaseError(Exception):

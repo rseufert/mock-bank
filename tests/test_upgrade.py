@@ -27,6 +27,7 @@ SCHEMA_V3 = os.path.join(HERE, "fixtures", "schema-v3.sql")
 SCHEMA_V4 = os.path.join(HERE, "fixtures", "schema-v4.sql")
 SCHEMA_V5 = os.path.join(HERE, "fixtures", "schema-v5.sql")
 SCHEMA_V6 = os.path.join(HERE, "fixtures", "schema-v6.sql")
+SCHEMA_V7 = os.path.join(HERE, "fixtures", "schema-v7.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -293,6 +294,46 @@ class FromVersionSix(FileDatabaseCase):
         self.assertEqual(clash.status, 400)
 
 
+class FromVersionSeven(FileDatabaseCase):
+    """A file from 0.3, before money could arrive from somebody else (#91): it
+    gains the credit table, keeps its NACHA account as it was, and takes a
+    credit that books on the clock."""
+
+    start_on_setup = False
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V7, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour,"
+            " format, account_number) VALUES ('ACME', 'ACME', 'NL41MOCK0000000001',"
+            " 'MOCKNL2A', 'EUR', 1000, 'accept', 'nacha', '0000000001')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_credit_table_and_keeps_its_account(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertNotIn("credit", {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")})
+        finally:
+            conn.close()
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        account = self.get("/_mock/accounts/ACME").json()
+        self.assertEqual((account["format"], account["account_number"], account["balance"]),
+                         ("nacha", "0000000001", 1000))
+        today = self.get("/_mock/state").json()["clock"]["date"]
+        resp = self.request("POST", "/_mock/credits", body={
+            "account": "ACME", "amount": 500, "value_date": today,
+            "debtor": {"name": "Customer Ltd", "iban": "NL14MOCK0000000002"}})
+        self.assertEqual(resp.status, 201, resp.body)
+        self.request("POST", "/_mock/advance?days=1")
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 1500)
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -327,7 +368,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (7, "1b90e58ef46609e0")
+    FINGERPRINT = (8, "1b90e58ef46609e0")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())
