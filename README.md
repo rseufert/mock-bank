@@ -280,16 +280,27 @@ reason in ISO 20022's words (`R01` is `AM04`, `R02` is `AC04`, `R03` is
 `AC01`). A BAI2 statement carries no reason at all; the `R` code is in the
 return file.
 
-**What the BAI2 statement does not yet settle.** It is held to a file from
+**What the BAI2 statement does not yet settle.** It is held to files from
 outside the project, which fixed who the `02` names as originator, what a record
-count covers and that balances and control totals state their sign. It could not
-settle the transaction type codes on the `16` records: `495` for a payment and
+count covers, and that a balance or a control total may state its sign - though
+most real files do not, so signing is this mock's choice rather than the format's
+requirement. They could not settle the transaction type codes on the `16`
+records: `495` for a payment and
 `165` for one coming back are placeholders, and a reader should take a
 movement's direction from the code's range, 100 to 399 a credit and 400 to 699 a
-debit, as `examples/payment_run.py` does. The mock writes BAI2 and does not
-claim to read it: `mockbank.bai2.read` reads what the mock wrote and refuses a
-real bank's file
-([#114](https://github.com/rseufert/mock-bank/issues/114)).
+debit, as `examples/payment_run.py` does.
+
+`mockbank.bai2.read` reads a real bank's file as well as the mock's own
+([#114](https://github.com/rseufert/mock-bank/issues/114)). A `88` continuation
+is folded into the record it continues, because it continues that record's
+comma-separated field stream rather than carrying fields of its own; a funds type
+occupies one field, or three when it is value-dated, or four when availability is
+distributed over three periods, or 2 + 2n when it is distributed over named days;
+and an amount may carry an explicit sign or not. Two files from moov-io/bai2 are
+held to that, and the check worth naming is that every control total and record
+count in both, recomputed from the records it covers, comes out as stated. Three
+things it still does not read: a text field containing commas, several records
+packed onto one line, and a record with no `/` where the newline terminates.
 
 In the mailbox an acknowledgement's type is `nacha.ack`, a return file's
 `nacha.return` and a BAI2 statement's `bai2.statement`; `GET
@@ -804,6 +815,93 @@ writes to the open-item cube, which is read-only in SAP and, from mock-sap
 0.13.1, in the mock. `SAP_URL` and `BANK_URL` point the tests at mocks running
 elsewhere. CI runs them against mock-sap from PyPI.
 
+## Worked example: procure to pay, all three mocks
+
+[`examples/procure_to_pay.py`](examples/procure_to_pay.py) carries one purchase
+the whole way, joining this mock to both
+[mock-sap](https://github.com/rseufert/mock-sap) and
+[mock-edi](https://github.com/rseufert/mock-edi). The other two worked examples
+each use two mocks; this one exists for what only appears between them.
+
+```
+SAP  ──850──▶  supplier          a purchase order becomes an EDI order
+     ◀──855/856/810──  supplier  confirmed, shipped, invoiced
+SAP  ◀──INVOIC──                 matched, posted, and now owed
+     ──pain.001──▶  bank         a payment run selects what is due
+SAP  ◀──FINSTA01◀──camt.053──    the statement clears what was paid
+```
+
+It composes rather than reimplements: the three-way match is
+[`examples/invoice_check.py`](examples/invoice_check.py), a checked copy of
+mock-sap's example, and selection, payment and reconciliation are
+[`examples/payment_run.py`](examples/payment_run.py). The only logic of its own
+is `DurableInvoiceCheck`.
+
+**It was written to find bugs and it found three**, each one invisible to a pair
+of mocks whose tests were green, because each pair asserts what the *next* system
+received rather than what it could do with what it received. An `INVOIC` that
+named no supplier, so nothing was owed; a mock reporting status `53` for having
+posted nothing; and an order placed in EUR that came back invoiced in dollars,
+where this mock refusing the payment - a SEPA transfer is in EUR - was the only
+objection anywhere in the chain
+([mock-sap#68](https://github.com/rseufert/mock-sap/issues/68),
+[#67](https://github.com/rseufert/mock-sap/issues/67),
+[#74](https://github.com/rseufert/mock-sap/issues/74)).
+
+**Both protections against paying an invoice twice are accidents of what else was
+lost, and neither is a check.** A supplier retries an invoice after the first was
+taken, and a restarted middleware posts it again:
+
+* *Upstream*, a fresh `InvoiceCheck` has forgotten its ship notices as well as
+  what it posted, so a retry arriving alone is blocked for billing more than was
+  shipped - `item 00010 bills 100, shipped 0`. That is a second thing being
+  missing, not the duplicate being caught. Resend the despatch advice with it, as
+  a partner replaying a batch does, and it posts.
+* *Downstream*, within one run `PaymentRun.select` marks a repeated reference
+  `skipped`, so two payments in one file cannot share an `EndToEndId`. It looks
+  caught. The next run pays it, because by then the first has cleared and the
+  second is alone in the selection.
+
+The fix is to ask the system of record: does SAP already hold a supplier invoice
+with this number, from this invoicing party? One `$filter`, and it survives a
+restart because SAP is where the answer lives. Per party, because an invoice
+number is only unique within one - and with its quotes doubled, because the
+number is the supplier's to choose and `O'BRIEN-014` would otherwise close the
+literal early and be answered with a `400`.
+
+| Test | What it proves |
+| --- | --- |
+| `test_1_a_purchase_becomes_a_cleared_payment` | The whole loop: an order out, the supplier's answers back, a matched invoice posted as an open payable in EUR, paid on its due date, and cleared by the statement |
+| `test_the_payment_carries_the_suppliers_own_invoice_number` | The `EndToEndId` is what SAP stored as `SupplierInvoiceIDByInvcgParty`, so the bank's answer is findable in SAP |
+| `test_2_without_asking_sap_the_duplicate_is_paid_too` | A retried invoice plus a middleware restart posts a second payable, and the payment run pays it in the run after the one that skipped it: the supplier is paid twice and nothing refused it |
+| `test_a_resent_invoice_alone_is_blocked_for_the_wrong_reason` | The upstream accident, held rather than described: the retry arriving on its own is blocked for `bills 100, shipped 0`, because the restart lost the ship notice too |
+| `test_2b_asking_sap_refuses_the_duplicate_across_a_restart` | Asking SAP blocks the copy across the restart, and the one real invoice still clears |
+| `test_the_duplicate_question_is_asked_per_supplier` | Two suppliers may both number an invoice the same; one is not the other, and refusing the second would mean it is never paid |
+| `test_an_invoice_number_holding_a_quote_is_asked_about_correctly` | `O'BRIEN-014` is a supplier's number, not OData syntax; the quote is doubled and the question is answered rather than refused |
+| `test_3_a_price_disagreement_is_blocked_before_any_money_moves` | A block with a real cause - an `810` disagreeing with the purchase order - and the bank is never asked at all |
+| `test_a_short_shipment_is_paid_for_what_shipped` | The supplier ships and bills less than was ordered and is paid that; matching the ordered quantity would block it and paying it would overpay |
+| `test_4_a_rejected_payment_leaves_the_invoice_owed` | SAP approved it, the bank refused it `AC04` on a closed account SAP still believes in, and the item stays open and stays distinguishable from one paid and returned |
+
+**What it does not do.** It does not tell the supplier what was paid. That needs a
+remittance advice - X12 820 or EDIFACT `REMADV` - which mock-edi does not speak
+yet ([mock-edi#149](https://github.com/rseufert/mock-edi/issues/149)), so the loop
+ends with SAP and the bank agreeing and the supplier none the wiser. Which is
+why a supplier keeps dunning you for an invoice you paid.
+
+**mock-sap 0.13.2 is a real floor**: before it the `INVOIC` this example sends
+created no payable, and the `850` declared no currency. **mock-edi has no floor** -
+the tests pass against every published version back to 0.2.1, the oldest on PyPI.
+The examples are not carried in any wheel, so this one needs the checkout.
+
+```bash
+pip install "mock-sap>=0.13.2" mock-edi
+git clone https://github.com/rseufert/mock-bank && cd mock-bank
+mock-sap --port 8000 &
+mock-edi --port 8080 &
+python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
+cd examples && python3 -m unittest -v test_procure_to_pay
+```
+
 ## Docker
 
 ```bash
@@ -873,7 +971,7 @@ than half-supporting it.
 | 0.1 | ISO 20022 credit transfers: `pain.001` in; `pain.002`, `camt.054`, `camt.053` out; accounts, balances, cutoff, holidays, clock; every behaviour above except `return-later`; HTTP only | **Done.** Every message the mock writes validates against its own dictionary and against the published XSDs; the tour and the example client run in CI |
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
-| 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | The procure to pay example runs in CI against mock-sap and mock-edi from PyPI |
+| 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Both are in, not yet released.** Incoming credits landed in #96 (closing #91), and `procure_to_pay`'s ten tests run in CI against mock-sap and mock-edi from PyPI |
 
 ## Contributing
 

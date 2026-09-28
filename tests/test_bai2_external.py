@@ -36,11 +36,16 @@ sys.path.insert(0, os.path.dirname(HERE))
 from mockbank import bai2                                            # noqa: E402
 
 SAMPLE = os.path.join(HERE, "samples", "external", "bai2-sample1.txt")
+TWO = os.path.join(HERE, "samples", "external", "bai2-sample2.txt")
 
 # The digest in SOURCES.md. Not a checksum for its own sake: it is what makes
 # "byte-for-byte from that commit" a claim a test can fail on, and it is how a
 # re-pin becomes a visible change rather than a quiet one.
-DIGEST = "0150331e6118e9fc6a1a10871f739b2d317c5cca5159c007622cffbbb64fe00c"
+DIGESTS = {
+    SAMPLE: "0150331e6118e9fc6a1a10871f739b2d317c5cca5159c007622cffbbb64fe00c",
+    TWO: "34ccf04a37e44353e5aac16981201239ae90102c12806aaa739a2e13ae3aee6b",
+}
+DIGEST = DIGESTS[SAMPLE]
 
 DAY = datetime.date(2026, 10, 5)
 AT = datetime.datetime(2026, 10, 6, 9, 0)
@@ -51,8 +56,8 @@ IBAN_ACCOUNT = {"id": "ACME", "name": "ACME Corporation", "currency": "USD",
                 "iban": "NL41MOCK0000000001"}
 
 
-def text():
-    with open(SAMPLE, "r", encoding="utf-8") as handle:
+def text(path=SAMPLE):
+    with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
 
 
@@ -88,8 +93,11 @@ class TheSampleIsWhatSourcesMdSaysItIs(unittest.TestCase):
     """Every claim below is about *this* file, so first, that it is that file."""
 
     def test_the_bytes_are_the_ones_recorded_in_sources_md(self):
-        with open(SAMPLE, "rb") as handle:
-            self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), DIGEST)
+        for path, digest in sorted(DIGESTS.items()):
+            with self.subTest(os.path.basename(path)):
+                with open(path, "rb") as handle:
+                    self.assertEqual(hashlib.sha256(handle.read()).hexdigest(),
+                                     digest)
 
     @unittest.skipIf(shutil.which("git") is None, "no git to ask")
     def test_git_is_told_not_to_rewrite_these_files_line_endings(self):
@@ -136,7 +144,9 @@ class TheSampleIsWhatSourcesMdSaysItIs(unittest.TestCase):
             sources = handle.read()
         self.assertIn("d3e11b628d3d59fd6911836b9ca328cb8b7621f2", sources)
         self.assertIn("test/testdata/sample1.txt", sources)
-        self.assertIn(DIGEST, sources)
+        self.assertIn("test/testdata/sample2.txt", sources)
+        for digest in DIGESTS.values():
+            self.assertIn(digest, sources)
 
     def test_it_is_the_shape_the_rest_of_this_file_assumes(self):
         rows = records()
@@ -277,63 +287,170 @@ class WhatTheSampleSettles(unittest.TestCase):
         self.assertEqual(longest, 75)
 
 
-class WhatTheSampleShowsTheReaderCannotDo(unittest.TestCase):
-    """`bai2.read` refuses or breaks on this file in three ways. That is #114.
+class TheReaderReadsARealFile(unittest.TestCase):
+    """What `WhatTheSampleShowsTheReaderCannotDo` used to pin, now inverted (#114).
 
-    Each test pins the failure as it is today. They pass, and they are meant to
-    be *deleted or inverted* by the change that adds continuation records and a
-    variable-width funds type - which is the point: the alternative is a gap
-    recorded only in prose, and prose does not fail.
+    Those four tests asserted the three ways `read` failed on this file: an
+    undeclared `88`, a value-dated `16` two fields wider than declared, and a
+    value-dated summary group that passed the "repeats in fours" check and then
+    raised a bare `ValueError` out of `_amounts_in`. They were written to be
+    changed by the work that fixed them rather than deleted quietly, so here is
+    the same ground from the other side.
 
-    None of this reaches a user of the mock. `read` exists for the tests, and
-    what the mock writes it reads. It matters because a reader that cannot open
-    a real file has never been held to one, so every agreement it reports is an
-    agreement with itself.
+    The strongest assertion in this class is not that the file reads. It is that
+    `trailers_agree` finds nothing: every control total and every record count in
+    both samples, recomputed from the records they cover. Get the fold wrong, or
+    any funds-type width wrong, and a total or a count comes out different - so
+    one call checks the whole design at once, against arithmetic the project did
+    not write.
     """
 
-    def test_the_whole_sample_is_refused_for_the_continuation_record(self):
-        with self.assertRaises(bai2.Unreadable) as refused:
-            bai2.read(text())
-        self.assertIn("'88'", str(refused.exception))
-        self.assertIn("not declared", str(refused.exception))
-        self.assertNotIn("88", bai2.RECORDS)
+    def test_both_samples_read(self):
+        self.assertEqual(len(bai2.read(text())), 25)
+        self.assertEqual(len(bai2.read(text(TWO))), 24)
 
-    def test_a_value_dated_detail_carries_two_fields_more_than_declared(self):
-        # `V` is followed by an availability date and time, so a funds type is
-        # one field or three. The declaration allows one.
-        detail = [line for line in text().split("\n") if line.startswith("16,")][0]
-        self.assertIn(",V,", detail)
-        with self.assertRaises(bai2.Unreadable) as refused:
-            bai2.read(detail + "\n")
-        self.assertIn("transaction detail", str(refused.exception))
-        self.assertIn("6 field", str(refused.exception))
-        self.assertIn("has 8", str(refused.exception))
+    def test_every_trailer_in_both_samples_agrees(self):
+        for name in (SAMPLE, TWO):
+            with self.subTest(os.path.basename(name)):
+                self.assertEqual(bai2.trailers_agree(text(name)), [])
 
-    def test_a_value_dated_summary_group_raises_a_bare_value_error(self):
-        # The worst of the three, because it is not a refusal. A summary group is
-        # four fields for a blank funds type and six for `V`; six passes the
-        # "repeats in fours" check when there are two of them, and then the
-        # amount is read out of the wrong slot.
-        group = [line for line in text().split("\n") if line.startswith("88,")][0]
+    def test_a_continuation_is_folded_into_the_record_it_continues(self):
+        folded = bai2._fold(text())
+        self.assertEqual(len(folded), 25, "25 logical records")
+        self.assertEqual(sum(r.lines for r in folded), 27, "from 27 lines")
+        self.assertNotIn(bai2.CONTINUATION, [r.code for r in folded])
+        # The 03 that an 88 continues carries both records' fields and counts as
+        # two, which is what makes the 49's count of 14 come out right.
+        first = [r for r in folded if r.code == "03"][0]
+        self.assertEqual(first.lines, 2)
+        self.assertIn("100", first.values, "the 88's summary type code")
+
+    def test_a_group_split_across_the_boundary_is_read_as_one(self):
+        # sample2's hardest record, and the one that proves a continuation is a
+        # continuation of the *field stream* rather than a record of its own: the
+        # type code 110 ends the 03 and its amount begins the 88.
+        account = [r for r in bai2._fold(text(TWO))
+                   if r.code == "03" and "110" in r.values
+                   and any(v == "D" for v in r.values)][0]
+        groups = bai2.summary_groups(account.values)
+        self.assertEqual([g.type_code for g in groups], ["010", "190", "110"])
+        distributed = groups[-1]
+        self.assertEqual(distributed.type_code, "110")
+        self.assertEqual(distributed.amount, 70000000)
+        self.assertEqual(distributed.funds, "D")
+
+    def test_every_funds_type_in_both_samples_is_accounted_for(self):
+        # The widths, checked the way they were derived: a 16 must end with
+        # nought to three trailing fields, never a negative number of them.
+        seen = set()
+        for name in (SAMPLE, TWO):
+            for record in bai2._fold(text(name)):
+                if record.code != "16":
+                    continue
+                one = bai2.detail(record.values)
+                seen.add(one.funds)
+                trailing = len(record.values) - 2 - len(one.availability) - 1
+                self.assertGreaterEqual(trailing, 0, record.values)
+                self.assertLessEqual(trailing, 3, record.values)
+        self.assertEqual(seen, {"V", "S", "1"},
+                         "the funds types these two files exercise")
+
+    def test_a_value_dated_detail_reads_its_reference_from_the_right_field(self):
+        # The bug this replaces was not only a refusal. With `V` the bank
+        # reference is at index 5, not 3, so the old positional read would have
+        # taken the availability date `060316` for the reference.
+        record = [r for r in bai2._fold(text()) if r.code == "16"][0]
+        one = bai2.detail(record.values)
+        self.assertEqual(one.funds, "V")
+        self.assertEqual(one.availability, ("060316", ""))
+        self.assertEqual(one.reference, "", "blank here, and not the date")
+        self.assertNotEqual(one.reference, "060316")
+        self.assertEqual(one.text, "RETURNED CHEQUE     ")
+        self.assertEqual(one.amount, 2500)
+
+    def test_the_value_error_is_gone_and_a_refusal_is_in_its_place(self):
+        # `_amounts_in` raised `ValueError: invalid literal for int()` on a real
+        # 03. It reads it now; and where a record genuinely does not fit, the
+        # refusal is an `Unreadable`, which is a `Wrong`.
+        group = [line for line in text().split("\n")
+                 if line.startswith("88,")][0]
         as_an_03 = "03,10200123456,CAD," + group.split(",", 1)[1]
-        bai2.read(as_an_03 + "\n")          # accepted, which is the problem
-        with self.assertRaises(ValueError) as broken:
-            bai2._amounts_in(as_an_03)
-        self.assertNotIsInstance(broken.exception, bai2.Wrong)
-        # And the shape of why: a V group is six fields, not four.
-        fields = as_an_03.rstrip("/").split(",")[3:]
-        self.assertEqual(len(fields), 12)
-        self.assertEqual(fields[4], "060316", "the date that makes it six")
-
-    def test_the_three_failures_are_the_whole_list(self):
-        # So that #114 cannot fix two of them and look finished. Dropping the
-        # 88s and widening nothing else must still fail on the funds type, and
-        # that is the only thing left.
-        without_88 = "\n".join(line for line in text().split("\n")
-                               if not line.startswith("88")) + "\n"
+        self.assertEqual(bai2._amounts_in(as_an_03), [208500, 208500])
         with self.assertRaises(bai2.Unreadable) as refused:
-            bai2.read(without_88)
+            bai2.read("03,1,CAD,010,100,,D,4/\n")
+        self.assertIsInstance(refused.exception, bai2.Wrong)
+
+    def test_an_amount_may_be_signed_or_bare(self):
+        # sample1 signs every control total; sample2 writes them bare and puts
+        # `010,+4350000` and `040,2830000` in one record. A reader that required
+        # either would refuse half of the files in existence.
+        signs = set()
+        for name in (SAMPLE, TWO):
+            for record in bai2._fold(text(name)):
+                if record.code in ("49", "98", "99"):
+                    signs.add("signed" if record.values[0][:1] in "+-" else "bare")
+                if record.code == "03":
+                    for group in bai2.summary_groups(record.values):
+                        self.assertIsInstance(group.amount, int)
+        self.assertEqual(signs, {"signed", "bare"},
+                         "both forms must be present for this to prove anything")
+        self.assertEqual(bai2._int("+4350000"), 4350000)
+        self.assertEqual(bai2._int("2830000"), 2830000)
+        self.assertEqual(bai2._int("-500000"), -500000)
+
+    def test_a_continuation_with_nothing_before_it_is_still_refused(self):
+        # Folding is not the same as accepting anything. A file that opens with a
+        # continuation has no record for it to continue.
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read("88,100,200/\n")
+        self.assertIn("no record before it", str(refused.exception))
+
+    def test_what_reads_cannot_always_be_reduced_to_a_statement(self):
+        # `read` takes any BAI2 file; `statements` needs the two ledger balances.
+        # Neither sample states both, and saying which is missing beats a KeyError.
+        for name, missing in ((SAMPLE, "opening"), (TWO, "closing")):
+            with self.subTest(os.path.basename(name)):
+                with self.assertRaises(bai2.Unreadable) as refused:
+                    bai2.statements(text(name))
+                self.assertIn(missing, str(refused.exception))
+                self.assertIn("camt.053", str(refused.exception))
+
+
+class WhatIsStillNotRead(unittest.TestCase):
+    """Three more classes moov-io/bai2's other samples show, pinned as gaps.
+
+    Same contract as the class this replaces: each passes today, describes a real
+    limitation, and has to be changed by the work that closes it. They are not
+    in this change because each needs its own fixture and rule 11 wants one
+    capability per pull request.
+
+    The samples are not vendored yet, so these are built from the shape rather
+    than from the files - which is weaker, and is why the follow-up issue names
+    the sample each one needs.
+    """
+
+    def test_a_text_field_containing_commas_is_read_short(self):
+        # sample4: `16,447,60000,,SPB2322984714570,1111,ACH Credit Payment,Entry
+        # Description: EXP; -, SEC: CCD, ...` - ten comma-separated pieces that
+        # are one field, because a 16's text runs to the end of the record.
+        packed = "16,447,60000,,REF1,1111,ACH Credit Payment, SEC: CCD/"
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read(packed + "\n")
         self.assertIn("transaction detail", str(refused.exception))
+
+    def test_several_records_on_one_line_are_not_split(self):
+        # sample3 packs them: `16,...PPD/ 16,142,500,Z,...`. The `/` terminates a
+        # record there and the newline does not.
+        two = "16,142,2500,Z,,,FIRST/ 16,142,500,Z,,,SECOND/"
+        with self.assertRaises(bai2.Unreadable):
+            bai2.read(two + "\n")
+
+    def test_a_record_with_no_terminator_is_refused(self):
+        # sample4 has 102 of 116 lines unterminated and sample5 110 of 124: the
+        # newline is the terminator in those files.
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read("01,MOCKBANK,ACME,261006,0000,7,,,2\n")
+        self.assertIn("does not end with", str(refused.exception))
 
 
 if __name__ == "__main__":

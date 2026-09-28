@@ -8,6 +8,16 @@
 
 SAP_URL, EDI_URL and BANK_URL point the tests elsewhere.
 
+**mock-sap 0.13.2 is a real floor.** Before it, the `INVOIC` this example sends
+created no payable at all and the `850` declared no currency, so there was
+nothing to pay and the payment run refused what there was.
+
+**mock-edi has no floor**, which is worth stating rather than leaving to a pin
+nobody checked: these tests were run against every published mock-edi back to
+0.2.1, the oldest on PyPI, and all of them pass. The example uses the `850`'s
+`CUR` segment, `/_mock/send` and the `short-ship` behaviour, and all three have
+been there throughout.
+
 Each test runs a whole purchase: a purchase order in SAP, an 850 to the supplier,
 the supplier's answers, the three-way match, the posting, a payment run and a
 statement. That is slower to arrange than a two-mock test and it is the only way
@@ -37,8 +47,8 @@ import urllib.request
 from decimal import Decimal
 
 from invoice_check import PO_SERVICE, Sap
-from payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, odata, sap_date
-from procure_to_pay import ProcureToPay
+from payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, odata
+from procure_to_pay import DurableInvoiceCheck, ProcureToPay, odata_string
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 EDI = os.environ.get("EDI_URL", "http://127.0.0.1:8080")
@@ -114,6 +124,20 @@ class PurchaseCase(unittest.TestCase):
             control(EDI, "POST", "/_mock/send",
                     {"partner": "ACME", "kind": kind, "order": po_number})
 
+    def post_invoice(self, supplier, reference, gross):
+        """An INVOIC straight into SAP, for a reference mock-edi will not mint."""
+        idoc = ("""<?xml version="1.0"?>
+<INVOIC02><IDOC BEGIN="1">
+<EDI_DC40 SEGMENT="1"><IDOCTYP>INVOIC02</IDOCTYP><MESTYP>INVOIC</MESTYP></EDI_DC40>
+<E1EDK01 SEGMENT="1"><CURCY>EUR</CURCY><ZTERM>NT30</ZTERM></E1EDK01>
+<E1EDKA1 SEGMENT="1"><PARVW>LF</PARVW><PARTN>%s</PARTN></E1EDKA1>
+<E1EDK02 SEGMENT="1"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDK02>
+<E1EDS01 SEGMENT="1"><SUMID>010</SUMID><SUMME>%s</SUMME></E1EDS01>
+</IDOC></INVOIC02>""" % (supplier, reference, gross))
+        receipt = self.sap.request("POST", "/sap/bc/idoc", idoc, "application/xml")
+        self.assertEqual(receipt["STATUS"], "53", receipt)
+        return receipt["APPLIED"][0]
+
     def supplier_behaves(self, behaviour):
         control(EDI, "PATCH", "/_mock/partners/ACME", {"behaviour": behaviour})
 
@@ -150,7 +174,7 @@ class PurchaseCase(unittest.TestCase):
     def invoice_numbers(self, reference):
         """The accounting documents behind a supplier's own invoice number."""
         query = urllib.parse.urlencode({
-            "$filter": "SupplierInvoiceIDByInvcgParty eq '%s'" % reference,
+            "$filter": "SupplierInvoiceIDByInvcgParty eq '%s'" % odata_string(reference),
             "$format": "json"})
         found = self.sap.request(
             "GET", "/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
@@ -267,6 +291,48 @@ class TestTheSameInvoiceTwice(PurchaseCase):
         self.assertTrue(self.p2p.check.already_posted(reference, GLOBEX))
         self.assertFalse(self.p2p.check.already_posted(reference, INITECH),
                          "another supplier's invoice of the same number is not ours")
+
+    def test_a_resent_invoice_alone_is_blocked_for_the_wrong_reason(self):
+        """The upstream near miss, held by a test rather than only described.
+
+        Resend only the invoice and a restarted middleware does block it - but
+        for billing more than was shipped, because the restart forgot the ship
+        notice too. That is a second thing being missing, not the duplicate being
+        caught, and it is why `test_2` resends the despatch advice as well. If
+        this ever starts failing with a different reason, the story the example
+        tells about accidental protection has changed.
+        """
+        po = self.purchase()
+        self.p2p.approve()
+        self.supplier_resends(po, "invoice")           # the invoice, and nothing else
+
+        restarted = self.middleware(durable=False)     # no SAP check, so the
+        [result] = restarted.approve()                 # only objection is the match
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(any("bills 100, shipped 0" in p for p in result["problems"]),
+                        result["problems"])
+        self.assertEqual(len(self.open_items()), 1, "still one thing owed, not two")
+
+    def test_an_invoice_number_holding_a_quote_is_asked_about_correctly(self):
+        """`O'BRIEN-014` is a supplier's invoice number, not OData syntax.
+
+        The number is the supplier's to choose, and an apostrophe closes a
+        `$filter` literal early: mock-sap answers `400`, so without doubling the
+        quote this check raises instead of answering and every invoice from that
+        supplier stops being paid. Doubling is OData's own escape.
+
+        mock-edi numbers its invoices itself and will not produce one, so the
+        invoice is posted straight into SAP and the question asked of it.
+        """
+        reference = "O'BRIEN-014"
+        self.post_invoice(GLOBEX, reference, "500.00")
+
+        self.assertTrue(self.p2p.check.already_posted(reference, GLOBEX))
+        self.assertFalse(self.p2p.check.already_posted(reference, INITECH),
+                         "another supplier's number of the same name is not ours")
+        self.assertFalse(self.p2p.check.already_posted("O'NEILL-1", GLOBEX),
+                         "a quoted number that is not there answers no, not 400")
 
     def test_2b_asking_sap_refuses_the_duplicate_across_a_restart(self):
         """The same arrangement, with the question asked where the answer lives."""
