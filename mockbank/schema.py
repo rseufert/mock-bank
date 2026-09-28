@@ -210,6 +210,7 @@ CODE_SETS = {
         "AC04": "ClosedAccountNumber: the creditor's account has been closed",
         "AC06": "BlockedAccount: the creditor's account is blocked",
         "AG01": "TransactionForbidden: the transaction is forbidden on this type of account",
+        "AM04": "InsufficientFunds: the amount is more than the account has available",
         "AM05": "Duplication: the payment was a duplicate",
         "BE04": "MissingCreditorAddress: the creditor's address is missing or incorrect",
         "CUST": "RequestedByCustomer: the creditor asked for the payment to be returned",

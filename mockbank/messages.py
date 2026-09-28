@@ -293,6 +293,18 @@ def write_pain002(decision, msg_id, created_at, source="") -> bytes:
         "OrgnlPmtInfAndSts": batches}})
 
 
+# A NACHA account's returns carry NACHA's R codes (#54), but its statement and
+# notifications are still ISO 20022 until BAI2, and RtrInf there takes an ISO
+# code: the same reason, in the other vocabulary.
+ISO_RETURN_REASON = {"R01": "AM04",    # insufficient funds
+                     "R02": "AC04",    # account closed
+                     "R03": "AC01"}    # no account, or unable to locate it
+
+
+def iso_return_reason(code):
+    return ISO_RETURN_REASON.get(code, code)
+
+
 def _entry(p, day):
     """One booked movement as an ``Ntry``: what a ``camt.054`` and a
     ``camt.053`` both carry for a payment row (with its original ``msg_id``
@@ -330,7 +342,7 @@ def _entry(p, day):
         tx["RtrInf"] = {
             "OrgnlBkTxCd": {"Domn": {"Cd": original[0], "Fmly": {
                 "Cd": original[1], "SubFmlyCd": original[2]}}},
-            "Rsn": {"Cd": p["return_reason"]}}
+            "Rsn": {"Cd": iso_return_reason(p["return_reason"])}}
     return {
         "Amt": amount, "CdtDbtInd": side, "Sts": {"Cd": "BOOK"},
         "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},

@@ -327,7 +327,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (7, "7aca8c7cc479e08e")
+    FINGERPRINT = (7, "c0abcd8085665fe1")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

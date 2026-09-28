@@ -91,6 +91,23 @@ def _silent(conn, decision) -> bool:
     return False
 
 
+def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
+    """A NACHA account's returns for one day and one original file, as the
+    return file NACHA sends where ISO 20022 sends a pacs.004 (#54)."""
+    for row in rows:
+        # The account the payment was made to, as the file named it: a held
+        # account's domestic number, since resolve gave the payment its IBAN.
+        held = accounts.by_iban(conn, row.get("creditor_iban") or "")
+        row["creditor_number"] = (held["account_number"] if held
+                                  else row.get("creditor_iban") or "")
+    sequence = db.next_value(conn, "nacha.return:" + account["id"])
+    modifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[(sequence - 1) % 36]
+    body = nacha.return_file(accounts.ROUTING, account, rows, day, now, modifier)
+    conn.execute(
+        "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
+        (nacha.RETURN, account["id"], file_id, db.stamp(now), body))
+
+
 def upcoming(conn, file_id) -> List[Dict[str, Any]]:
     """The ``camt.054`` s a file's accepted, unbooked payments will bring, and
     when: one per account per settlement date."""
@@ -151,8 +168,16 @@ def _release_returns(conn, now, today):
     for row in returned:
         by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
         by_day.setdefault((row["account_id"], row["return_due"]), []).append(row)
+    # A NACHA account's rejected payments come back too, as return entries,
+    # though nothing is credited: they were never debited (#54).
+    for row in accounts.rejected_returns_due(conn, today):
+        by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
     for (account_id, day, file_id), rows in sorted(by_file.items()):
         account = accounts.require(conn, account_id)
+        if account["format"] == "nacha":
+            _queue_return_file(conn, account, rows, datetime.date.fromisoformat(day),
+                               file_id, now)
+            continue
         sequence = db.next_value(conn, "pacs.004:" + account_id)
         body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
                                       "MB-P004-%s-%d" % (account_id[:18], sequence), now)

@@ -130,6 +130,11 @@ SCHEMA = [
         -- receiving DFI, or a pain.001's ClrSysMmbId. What a NACHA return's
         -- addenda names as the original receiving bank (#54).
         creditor_clearing_id TEXT,
+        -- For a payment that came in a NACHA file: its entry's transaction
+        -- code and its batch's standard entry class, which a return of it
+        -- echoes (#54). NULL for a pain.001.
+        transaction_code TEXT,
+        entry_class      TEXT,
         -- accepted or rejected, and for rejected the ISO 20022 reason code
         status           TEXT NOT NULL,
         reason           TEXT,

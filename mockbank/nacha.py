@@ -126,10 +126,31 @@ RECORDS = {
         ("total credit entry dollar amount", 12, N), ("reserved", 39, A))),
 }
 
+# An addenda record is laid out by its type: 05 carries payment related
+# information (declared above), 99 is a return's (#54).
+RETURN_ADDENDA = ("return addenda", _fields(
+    ("record type code", 1, N), ("addenda type code", 2, N),
+    ("return reason code", 3, A), ("original entry trace number", 15, N),
+    ("date of death", 6, A), ("original receiving DFI identification", 8, N),
+    ("addenda information", 44, A), ("trace number", 15, N)))
+
 # Transaction codes that move money to the receiver: checking, savings,
 # general ledger and loan credits. Everything else is a debit, a prenote or a
 # return, which this bank does not originate.
 CREDITS = {"22", "32", "42", "52"}
+
+# Each credit's automated return, which is what a return file carries (#54):
+# a returned checking credit is 21, a savings one 31, and so on.
+RETURN_OF = {"22": "21", "32": "31", "42": "41", "52": "51"}
+RETURNS = set(RETURN_OF.values())
+
+# The return codes the bank answers with, from what it decided (#54): the
+# same behaviours a pain.002 answers with ISO 20022 reasons.
+RETURN_FOR = {"AM04": "R01",    # insufficient funds
+              "AC04": "R02",    # account closed
+              "RC01": "R03"}    # no account, unable to locate
+RETURN_REASONS = {"R01": "insufficient funds", "R02": "account closed",
+                  "R03": "no account, or unable to locate the account"}
 
 PADDING = "9" * LINE
 
@@ -151,7 +172,7 @@ class Record:
     def __init__(self, number: int, line: str):
         self.number = number
         self.type = line[:1]
-        self.label, fields = RECORDS[self.type]
+        self.label, fields = (RETURN_ADDENDA if line[:3] == "799" else RECORDS[self.type])
         self.fields = fields
         self.values = {f.name: line[f.start - 1:f.start - 1 + f.width] for f in fields}
         self.path = "/line %d (%s)" % (number, self.label)
@@ -174,8 +195,11 @@ class Record:
 # that everything downstream of the reader takes either without knowing.
 
 class Payment(messages.Payment):
-    def __init__(self, entry: Record, addenda: List[Record]):
+    def __init__(self, entry: Record, addenda: List[Record], entry_class: str = ""):
         self.node = None
+        # What a return of this payment has to echo (#54).
+        self.transaction_code = entry.text("transaction code")
+        self.entry_class = entry_class
         self._path = entry.path
         self.end_to_end_id = entry.text("individual identification number") or NOT_PROVIDED
         self.instruction_id = entry.text("trace number")
@@ -195,9 +219,33 @@ class Payment(messages.Payment):
         return self._path
 
 
+class Return:
+    """One return entry and its addenda 99: a payment coming back, and why."""
+
+    def __init__(self, entry: Record, addenda: Record):
+        self.path = entry.path
+        self.transaction_code = entry.text("transaction code")
+        self.amount = entry.number_of("amount")
+        self.account = entry.text("DFI account number")
+        self.name = entry.text("individual name")
+        self.end_to_end_id = entry.text("individual identification number") or NOT_PROVIDED
+        self.trace = entry.text("trace number")
+        self.reason = addenda.text("return reason code")
+        self.original_trace = addenda.text("original entry trace number")
+        self.original_receiving_dfi = addenda.text("original receiving DFI identification")
+
+    def to_json(self):
+        return {"end_to_end_id": self.end_to_end_id, "amount": self.amount,
+                "account": self.account, "reason": self.reason,
+                "original_trace": self.original_trace,
+                "original_receiving_dfi": self.original_receiving_dfi}
+
+
 class Batch(messages.Batch):
-    def __init__(self, header: Record, payments: List[Payment]):
+    def __init__(self, header: Record, payments: List[Payment],
+                 returns: Optional[List[Return]] = None):
         self.node = None
+        self.returns = returns or []
         self._path = header.path
         company = header.text("company identification")
         number = header.number_of("batch number")
@@ -230,6 +278,8 @@ class PaymentFile(messages.PaymentFile):
                               if created and len(time) == 4 and time.isdigit() else None)
         self.initiating_party = header.text("immediate origin name")
         self.batches = batches
+        # A return file carries returns, not payments (#54).
+        self.returns = [r for b in batches for r in b.returns]
         self.nb_of_txs = sum(len(b.payments) for b in batches)
         self.ctrl_sum = _dollars(p.amount for p in self.payments)
 
@@ -361,7 +411,8 @@ def _batch(records, index, findings):
     is, and (entry hash, credit total, entries and addenda) as computed."""
     header = records[index]
     index += 1
-    payments, entry_hash, credits, count = [], 0, 0, 0
+    entry_class = header.text("standard entry class code")
+    payments, returns, entry_hash, credits, count = [], [], 0, 0, 0
     control = None
     while index < len(records):
         record = records[index]
@@ -383,9 +434,20 @@ def _batch(records, index, findings):
                         % (routing, digit, check_digit(routing))))
             code = record.text("transaction code")
             if code in CREDITS:
-                payment = Payment(record, addenda)
+                payment = Payment(record, addenda, entry_class)
                 payments.append(payment)
                 credits += payment.amount or 0
+            elif code in RETURNS:
+                why = [a for a in addenda if a.label == RETURN_ADDENDA[0]]
+                if why:
+                    returned = Return(record, why[0])
+                    returns.append(returned)
+                    credits += returned.amount or 0
+                else:
+                    findings.append(_finding(
+                        record.field_path("transaction code"), "FF01",
+                        "transaction code %s is a return, and a return carries an "
+                        "addenda 99 saying why; this one has none" % code))
             else:
                 findings.append(_finding(
                     record.field_path("transaction code"), "FF01",
@@ -411,7 +473,7 @@ def _batch(records, index, findings):
                              "to ten digits")
         findings += _compare(control, "total credit entry dollar amount", credits, "AM10",
                              "the batch's credit entries sum to %d cents")
-    return Batch(header, payments), index, (entry_hash, credits, count)
+    return Batch(header, payments, returns), index, (entry_hash, credits, count)
 
 
 def _compare(record: Record, name: str, actual: int, code: str, why: str) -> List[Finding]:
@@ -455,8 +517,10 @@ def acknowledgement(decision, ack_id: str, created_at, source: str = "") -> str:
     a line, each line starting with what it is, so a client reads it with
     ``split()`` and nothing else. An entry line carries the trace number, the
     identification number, the amount in dollars and what became of it. A
-    rejection carries the reason code the bank decided, the same code a
-    ``pain.002`` would, until #54 answers those as NACHA returns.
+    rejection carries the NACHA return code where the bank answers with one -
+    ``R01``, ``R02``, ``R03``, and the entry comes back in a return file the
+    next business day too (#54) - and otherwise the reason code a ``pain.002``
+    would carry.
     """
     lines = ["ACKNOWLEDGEMENT %s" % ack_id,
              "CREATED %s" % created_at.isoformat(),
@@ -475,6 +539,120 @@ def acknowledgement(decision, ack_id: str, created_at, source: str = "") -> str:
         if d.outcome == "accepted":
             lines.append("%s ACCEPTED %s" % (head, d.settlement_date.isoformat()))
         else:
-            lines.append("%s REJECTED %s %s" % (head, d.reason,
+            # The return code where the bank answers with one (#54): the
+            # entry comes back in a return file the next business day as well.
+            lines.append("%s REJECTED %s %s" % (head, RETURN_FOR.get(d.reason, d.reason),
                                                 " ".join((d.reason_text or "").split())))
     return "\n".join(lines) + "\n"
+
+
+# -- writing: the return file -----------------------------------------------------
+
+RETURN = "nacha.return"
+
+# What the bank writes as text rather than XML, and the extension each gets in
+# the pickup directory.
+TEXT_TYPES = {ACK: "txt", RETURN: "ach"}
+
+
+def line(layout, **values) -> str:
+    """One record from its declaration: numbers zero-filled, text space-filled.
+
+    ``layout`` is a ``RECORDS`` entry or ``RETURN_ADDENDA``; a value that does
+    not fit its field is an error in the caller, not something to truncate.
+    """
+    out = []
+    for field in layout[1]:
+        value = "" if values.get(field.name) is None else str(values[field.name])
+        value = value.rjust(field.width, "0") if field.numeric else value.ljust(field.width)
+        if len(value) != field.width:
+            raise ValueError("%s is %d characters, not %d: %r"
+                             % (field.name, len(value), field.width, value))
+        out.append(value)
+    return "".join(out)
+
+
+def return_file(routing: str, originator: dict, returns: List[dict], day, created_at,
+                modifier: str = "A") -> str:
+    """The return file a NACHA account is sent for payments that came back (#54).
+
+    From the bank - ``routing``, its own - to ``originator``, the account that
+    sent them (``account_number``, ``name``). Each of ``returns`` is a payment
+    row with what the return has to echo - ``transaction_code``,
+    ``entry_class``, ``instruction_id`` (the original trace), ``amount``,
+    ``end_to_end_id``, ``creditor_name``, ``creditor_number`` and
+    ``creditor_clearing_id`` - and its ``return_reason``, an ``R`` code.
+
+    Everything a reader checks is computed here, never copied: the entry and
+    addenda counts, the entry hash, the credit totals, the block count and the
+    nines that pad the last block. The file reads back through ``inspect``
+    with no finding, which is the test that holds it to that.
+    """
+    odfi = routing[:8]
+    company = originator["account_number"][:10]
+    records = [line(RECORDS["1"], **{
+        "record type code": 1, "priority code": 1,
+        "immediate destination": company.rjust(10), "immediate origin": " " + routing,
+        "file creation date": created_at.strftime("%y%m%d"),
+        "file creation time": created_at.strftime("%H%M"),
+        "file ID modifier": modifier, "record size": LINE, "blocking factor": BLOCK,
+        "format code": 1, "immediate destination name": originator["name"][:23],
+        "immediate origin name": "MOCK BANK"})]
+    by_class: Dict[str, List[dict]] = {}
+    for row in returns:
+        by_class.setdefault(row.get("entry_class") or "CCD", []).append(row)
+    file_hash = file_credits = file_count = sequence = 0
+    for number, (entry_class, rows) in enumerate(sorted(by_class.items()), start=1):
+        records.append(line(RECORDS["5"], **{
+            "record type code": 5, "service class code": 220,
+            "company name": originator["name"][:16], "company identification": company,
+            "standard entry class code": entry_class,
+            "company entry description": "RETURN",
+            "effective entry date": day.strftime("%y%m%d"),
+            "originator status code": "1", "originating DFI identification": odfi,
+            "batch number": number}))
+        batch_hash = batch_credits = batch_count = 0
+        for row in rows:
+            sequence += 1
+            trace = "%s%07d" % (odfi, sequence)
+            # A return goes back to the bank that sent the payment, so its
+            # receiving DFI is this bank; the original receiving bank is named
+            # in the addenda.
+            records.append(line(RECORDS["6"], **{
+                "record type code": 6,
+                "transaction code": RETURN_OF.get(row.get("transaction_code") or "22", "21"),
+                "receiving DFI identification": odfi, "check digit": routing[8],
+                "DFI account number": (row.get("creditor_number") or "")[:17],
+                "amount": row["amount"],
+                "individual identification number": (row.get("end_to_end_id") or "")[:15],
+                "individual name": (row.get("creditor_name") or "")[:22],
+                "addenda record indicator": 1, "trace number": trace}))
+            records.append(line(RETURN_ADDENDA, **{
+                "record type code": 7, "addenda type code": 99,
+                "return reason code": row["return_reason"],
+                "original entry trace number": row.get("instruction_id") or "0",
+                "original receiving DFI identification":
+                    (row.get("creditor_clearing_id") or "0")[:8],
+                "trace number": trace}))
+            batch_hash += int(odfi)
+            batch_credits += row["amount"]
+            batch_count += 2
+        records.append(line(RECORDS["8"], **{
+            "record type code": 8, "service class code": 220,
+            "entry/addenda count": batch_count, "entry hash": batch_hash % 10 ** 10,
+            "total debit entry dollar amount": 0,
+            "total credit entry dollar amount": batch_credits,
+            "company identification": company,
+            "originating DFI identification": odfi, "batch number": number}))
+        file_hash += batch_hash
+        file_credits += batch_credits
+        file_count += batch_count
+    records.append(line(RECORDS["9"], **{
+        "record type code": 9, "batch count": len(by_class),
+        "block count": -(-(len(records) + 1) // BLOCK),
+        "entry/addenda count": file_count, "entry hash": file_hash % 10 ** 10,
+        "total debit entry dollar amount": 0,
+        "total credit entry dollar amount": file_credits}))
+    while len(records) % BLOCK:
+        records.append(PADDING)
+    return "\n".join(records) + "\n"
