@@ -19,6 +19,7 @@ first.
 | `MANIFEST.in` | Adds the Dockerfile, examples and tests to the sdist; without it an sdist carries only the package itself. |
 | `Dockerfile` | `python:3.12-slim`, `pip install .`, entrypoint bound to `0.0.0.0:8080`. Built and exercised by CI on every push. |
 | `.gitignore` | Build output, virtualenvs, `*.db` files left behind by `--db`. |
+| `.gitattributes` | `tests/samples/external/** -text`: the vendored samples keep the bytes their authors published. Without it a Windows checkout rewrites every LF to CRLF, which broke the BAI2 sample's SHA-256 on `windows-latest` alone and was silently rewriting the NACHA samples too. |
 
 ## `mockbank/` - the package
 

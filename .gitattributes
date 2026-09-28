@@ -1,0 +1,18 @@
+# Files vendored from outside this project keep the bytes their authors
+# published, on every platform.
+#
+# `tests/samples/external/` holds samples fetched byte-for-byte from pinned
+# commits, and `SOURCES.md` records that claim - `tests/test_bai2_external.py`
+# pins one of them by SHA-256. Without this, a Windows checkout with the default
+# `core.autocrlf=true` rewrites every LF to CRLF, so the file on disk is not the
+# file the commit holds: the BAI2 sample hashes to 0258766c... instead of
+# 0150331e..., and that test failed on windows-latest and nowhere else (#57).
+#
+# The NACHA samples were being rewritten the same way and nothing caught it,
+# because `nacha.inspect` strips a line before reading it. They passed while
+# reading a file moov never published, which is the opposite of what an outside
+# sample is for.
+#
+# `-text`, not `binary`: no end-of-line conversion either way, and diffs stay
+# readable.
+tests/samples/external/** -text

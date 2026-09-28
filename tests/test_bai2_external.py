@@ -25,6 +25,8 @@ that stays.
 import datetime
 import hashlib
 import os
+import shutil
+import subprocess
 import sys
 import unittest
 
@@ -88,6 +90,45 @@ class TheSampleIsWhatSourcesMdSaysItIs(unittest.TestCase):
     def test_the_bytes_are_the_ones_recorded_in_sources_md(self):
         with open(SAMPLE, "rb") as handle:
             self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), DIGEST)
+
+    @unittest.skipIf(shutil.which("git") is None, "no git to ask")
+    def test_git_is_told_not_to_rewrite_these_files_line_endings(self):
+        """The guard that makes the digest test fail on every platform, not one.
+
+        A Windows checkout with the default `core.autocrlf=true` rewrites every
+        LF to CRLF, so the file on disk is not the file the commit holds: this
+        sample hashed to `0258766c...` there and `0150331e...` everywhere else,
+        and the test above failed on `windows-latest` alone. `.gitattributes`
+        declares the directory `-text`.
+
+        Asking `git check-attr` rather than reading `.gitattributes` is the
+        point: a pattern that does not match is a file this will not protect,
+        and only git knows which it is. And the NACHA samples were being
+        rewritten the same way with nothing to catch it, because
+        `nacha.inspect` strips a line before reading it - they passed while
+        reading a file moov never published.
+        """
+        root = os.path.dirname(HERE)
+        directory = os.path.join(HERE, "samples", "external")
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", directory],
+            cwd=root, capture_output=True, text=True)
+        if tracked.returncode != 0:
+            self.skipTest("not a git work tree")
+        files = [name for name in tracked.stdout.split("\0") if name]
+        self.assertGreaterEqual(len(files), 15, "no external samples found")
+        self.assertIn("tests/samples/external/bai2-sample1.txt", files)
+        asked = subprocess.run(
+            ["git", "check-attr", "-z", "text", "--"] + files,
+            cwd=root, capture_output=True, text=True)
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        # -z gives path, attribute, value, repeated.
+        parts = [p for p in asked.stdout.split("\0")][:-1]
+        answers = dict(zip(parts[0::3], parts[2::3]))
+        self.assertEqual(len(answers), len(files))
+        for name, value in sorted(answers.items()):
+            self.assertEqual(value, "unset",
+                             "%s may be rewritten on checkout" % name)
 
     def test_sources_md_names_the_commit_and_the_path(self):
         here = os.path.join(HERE, "samples", "external", "SOURCES.md")
