@@ -280,7 +280,9 @@ disagrees with `origin/main`, a `pyproject.toml` that does not say the version, 
 `CHANGELOG.md` with no dated section for it, fragments still waiting in
 `changelog.d/`, or CI that is not green on the commit about to be tagged. Then it
 creates the annotated tag, pushes it, and publishes the GitHub Release — last,
-because that is the irreversible step. Run on a version that is already tagged
+because that is the irreversible step. The Release body is the version's own
+`CHANGELOG.md` section, not generated notes, which on a squash-merged repository
+only restate the commit titles; `--dry-run` prints the body it would use. Run on a version that is already tagged
 and published it says so and does nothing.
 
 `tools/check_release.py` asks the same question afterwards, and the
