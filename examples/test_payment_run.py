@@ -20,6 +20,7 @@ to the open-item cube, which is read-only in SAP and in mock-sap.
 import datetime
 import json
 import os
+import socket
 import unittest
 import urllib.parse
 import urllib.request
@@ -43,6 +44,13 @@ ACCOUNTS = {
     UMBRELLA: "NL30MOCK0000000005",     # at another bank: settles
     INITECH: "NL84MOCK0000000003",      # held by mock-bank, closed: AC04
 }
+
+
+def closed_port():
+    """A URL on this machine that nothing listens on: bound, then let go."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return "http://127.0.0.1:%d" % probe.getsockname()[1]
 
 
 def control(base, method, path, body=None):
@@ -314,7 +322,7 @@ class WhenSomethingAnswersBadly(MocksCase):
         self.assertIn("503", run.statements[0]["error"])
         self.assertEqual(run.problems, [run.statements[0]["error"]])
 
-    def test_a_bank_that_does_not_answer_is_a_problem_not_silence(self):
+    def test_a_bank_that_answers_with_an_error_is_a_problem_not_silence(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         nowhere = PaymentRun(SAP, SAP, ACME)           # SAP is no bank: 404 throughout
         run = nowhere.run(self.today, "RUN1")
@@ -324,6 +332,37 @@ class WhenSomethingAnswersBadly(MocksCase):
         self.assertIn("no status report was read", run.problems[1])
         self.assertIn("no statement was read", run.problems[2])
         self.assertEqual(run.items[0].status, "sent")
+
+    def test_a_bank_that_does_not_answer_is_a_problem_not_silence(self):
+        # A port nothing listens on: no HTTP status at all, which used to be an
+        # exception that stopped the run half way (#88).
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        down = PaymentRun(SAP, closed_port(), ACME)
+        run = down.run(self.today, "RUN1")
+        down.reconcile(run)
+        self.assertEqual(len(run.problems), 3, run.problems)
+        self.assertIn("the bank did not answer, so the payment file was not sent",
+                      run.problems[0])
+        self.assertIn("mailbox did not answer", run.problems[1])
+        self.assertIn("mailbox did not answer", run.problems[2])
+        # The file never reached the bank: the item is as it was, to send again.
+        self.assertEqual([i.status for i in run.items], ["selected"])
+
+    def test_sap_not_answering_the_selection_selects_nothing_and_says_so(self):
+        run = PaymentRun(closed_port(), BANK, ACME).run(self.today, "RUN1")
+        self.assertEqual(run.items, [])
+        self.assertEqual(len(run.problems), 1, run.problems)
+        self.assertIn("SAP did not answer, so no open item was selected", run.problems[0])
+
+    def test_sap_not_answering_a_statement_is_recorded_against_it(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        run = self.payments.run(self.today, "RUN1")
+        control(BANK, "POST", "/_mock/advance?to=%s"
+                % (self.today + datetime.timedelta(days=1)).isoformat())
+        self.payments.session = SapSession(closed_port())
+        self.payments.reconcile(run)
+        self.assertIn("SAP did not answer, so statement", run.statements[0]["error"])
+        self.assertEqual(run.problems, [run.statements[0]["error"]])
 
     def test_two_payments_of_the_missing_amount_are_both_named(self):
         run = Run(self.today, "RUN1", [

@@ -20,8 +20,17 @@ PAIN001 = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.09"
 ACCEPTED = {"ACCP", "ACSP", "ACSC", "ACTC", "ACWC"}
 
 
+# The status `call` gives when nothing answered at all: no HTTP status is 0.
+NO_ANSWER = 0
+
+
 def call(base: str, method: str, path: str, body=None, content_type: str = ""):
-    """One HTTP request. Returns the status and the body, error or not."""
+    """One HTTP request. Returns the status and the body, error or not.
+
+    A host that does not answer - down, refusing the connection, timing out -
+    is `NO_ANSWER` with the reason as the body, rather than an exception, so a
+    caller says so in words the way it does for an error answer (#88).
+    """
     data = body.encode("utf-8") if isinstance(body, str) else body
     request = urllib.request.Request(base.rstrip("/") + path, data=data, method=method)
     if content_type:
@@ -31,6 +40,8 @@ def call(base: str, method: str, path: str, body=None, content_type: str = ""):
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
+    except (urllib.error.URLError, OSError) as error:
+        return NO_ANSWER, str(getattr(error, "reason", error)).encode("utf-8")
 
 
 DECLARATION = re.compile(r"(?=<\?xml\b)")
