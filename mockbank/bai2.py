@@ -27,21 +27,32 @@ Type codes
 ==============  ==============================================================
 ``010``         opening ledger balance
 ``015``         closing ledger balance
-``455``         the debit for a payment that left the account
-``165``         the credit for a payment that came back
+``495``         the debit for a payment that left the account (**placeholder**)
+``165``         the credit for a payment that came back (**placeholder**)
 ==============  ==============================================================
 
-``010`` and ``015`` are the two this mock needs of the status codes, and are
-not in doubt. The two transaction codes are choices, stated here because a
-reader of the file cannot see the reasoning:
+``010`` and ``015`` are the two status codes this mock needs and are not in
+doubt. **The two transaction codes are placeholders, and are wrong until #57
+settles them against a file from outside the project.** They are listed in
+``PLACEHOLDER_CODES`` so that nothing else in the package has to know which is
+which.
 
-- **``455``, preauthorized ACH debit, for the debit.** What leaves these
-  accounts is a credit transfer, which #19 also writes as an ACH entry, so the
-  ACH debit code describes the same movement in both formats. ``475``, check
-  paid, is the other code a statement of this shape often carries; it is
-  rejected because nothing here is a cheque.
-- **``165`` for the return**, from the issue. It is a credit code, which is
-  right: a return puts money back on the account it left.
+The first draft used ``455`` for the debit and kept ``165`` for the return,
+both reasoned from "these are ACH movements". That was shown to be the wrong
+reasoning in review: in BAI2 **"preauthorized" describes a movement the *other*
+party initiated** - a direct debit pulling from the account, or a credit pushed
+into it. Neither is what this mock books. What leaves these accounts is a
+payment the account holder sent, and what comes back is one of those returning.
+So ``455`` was not merely unverified, it described the wrong originator.
+
+``495`` replaces it on that reasoning, with ``466`` (an ACH settlement) named as
+the other candidate. ``165`` stays for the moment because #56 names it
+explicitly and an issue is the maintainer's to change, but the same objection
+applies to it and is recorded on the pull request rather than acted on here.
+
+Swapping one unverified code for another is not progress on its own, which is
+why both are marked rather than quietly corrected: the honest state is that the
+reasoning improved and the evidence did not.
 
 What is *not* certain, and is asked on #56 rather than assumed quietly: this
 module has been written against the BAI2 record layout as it is commonly
@@ -79,8 +90,13 @@ COUNTS_INCLUDE_THE_TRAILER = True
 # two movements it books. See the module docstring for why these two.
 OPENING_LEDGER = "010"
 CLOSING_LEDGER = "015"
-DEBIT = "455"
+
+# **Placeholders pending #57.** See the module docstring: the balance codes are
+# certain and these two are not, so they are named here and nowhere else, and
+# #57 replaces them against a file from outside the project.
+DEBIT = "495"
 RETURNED_CREDIT = "165"
+PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT)
 
 # `Z` means the amount is immediately available; BAI2's other funds types say
 # when it becomes so. Everything this mock books is already booked, so there is
@@ -258,7 +274,24 @@ def _transaction(payment: Dict) -> str:
     comma in either would end the field early, so it is replaced rather than
     escaped: BAI2 has no escape, and a name with a comma in it is common.
     """
-    code = RETURNED_CREDIT if payment.get("credit") else DEBIT
+    if payment.get("credit"):
+        # Every credit this mock books today is a payment of its own coming
+        # back, and carries the reason it came back. #96 adds money *arriving*,
+        # whose rows are credits too - and coding a customer's payment as a
+        # return would be a wrong statement, not a cosmetic one. So the
+        # distinction is the return reason rather than the credit flag, and an
+        # unexplained credit stops here instead of being mislabelled. Whichever
+        # of #56 and #96 lands second adds the received-credit code.
+        if not payment.get("return_reason"):
+            raise Unreadable(
+                "a credit with no return reason is not a return, and BAI2 has "
+                "no code here for one yet: %r would be written as %s, which "
+                "says the payment came back. A received credit needs its own "
+                "type code (see #57)."
+                % (payment.get("end_to_end_id"), RETURNED_CREDIT))
+        code = RETURNED_CREDIT
+    else:
+        code = DEBIT
     return _record("16", code, _amount(payment["amount"]), AVAILABLE_NOW,
                    _safe(payment["end_to_end_id"]),
                    _safe(payment.get("msg_id") or ""),

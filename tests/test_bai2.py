@@ -129,9 +129,28 @@ class TheTypeCodes(unittest.TestCase):
     def codes(self, text):
         return [e.type_code for e in bai2.statements(text)[0].entries]
 
-    def test_a_debit_is_455_and_a_return_is_165(self):
+    def test_a_debit_and_a_return_get_the_codes_the_module_names(self):
+        # Asserted against the constants, not against literals: both are
+        # placeholders until #57 settles them, and a test hard-coding them would
+        # have to be edited in lockstep for no gain. What is worth pinning is
+        # that a debit and a return differ and that the return is the credit.
         _, _, text = both(10875000, 12500000, THREE)
-        self.assertEqual(self.codes(text), ["455", "455", "165"])
+        self.assertEqual(self.codes(text),
+                         [bai2.DEBIT, bai2.DEBIT, bai2.RETURNED_CREDIT])
+        self.assertNotEqual(bai2.DEBIT, bai2.RETURNED_CREDIT)
+        self.assertEqual(set(bai2.PLACEHOLDER_CODES),
+                         {bai2.DEBIT, bai2.RETURNED_CREDIT})
+
+    def test_a_credit_that_is_not_a_return_is_refused_rather_than_mislabelled(self):
+        # #96 adds money arriving, whose rows are credits too. Coding a
+        # customer's payment as a return would be a wrong statement rather than
+        # a cosmetic slip, so an unexplained credit stops here.
+        arriving = payment(9, "CUSTOMER-1", 50000, credit=True)
+        arriving["return_reason"] = ""
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.write_statement(ACCOUNT, DAY, 7, 0, 50000, [arriving], AT)
+        self.assertIn("CUSTOMER-1", str(refused.exception))
+        self.assertIn("came back", str(refused.exception))
 
     def test_the_account_record_carries_the_two_balances_and_no_movement_totals(self):
         # Movement summaries on the 03 are legal BAI2 and were in a first draft.
