@@ -658,6 +658,23 @@ python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
 cd examples && python3 -m unittest -v test_payment_run
 ```
 
+**NACHA mode.** `PaymentRun(..., file_format="nacha")` pays the same
+invoices by ACH: a NACHA file of credits instead of the `pain.001`, the bank's
+acknowledgement read instead of the `pain.002`, and each supplier paid to the
+ABA routing and account number SAP holds for it (`BankNumber`, `BankAccount`)
+instead of an IBAN. The file's header is built from the run, so the same run
+sent twice is still the same file and still `DUPL`. Statements are still
+`camt.053`, so reconciling does not change. The same thirteen tests run in
+this mode too, which is 0.3's definition of done:
+
+```bash
+PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v test_payment_run
+```
+
+In that mode the tests make ACME a dollar account in NACHA format and give the
+three suppliers US bank details through `A_BusinessPartnerBank`; a closed
+account is answered `R02` where the ISO run sees `AC04`.
+
 **The example does not advance bank time; the tests do.** A client cannot move
 a real bank's clock. It sends its file and reads statements as they arrive, so
 `reconcile` posts whatever the bank has sent so far, and a payment not on a

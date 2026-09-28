@@ -33,7 +33,17 @@ from payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Ru
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
 
-ACME = {"name": "ACME Corporation", "iban": "NL41MOCK0000000001", "bic": "MOCKNL2A"}
+# The same tests in either mode: ISO 20022 by default, or NACHA with
+# PAYMENT_RUN_FORMAT=nacha (#55), which is the 0.3 milestone's definition of
+# done. In NACHA mode ACME is a dollar account the bank knows by company
+# identification, and the suppliers are paid by routing and account number.
+MODE = os.environ.get("PAYMENT_RUN_FORMAT", "iso20022")
+NACHA = MODE == "nacha"
+CURRENCY = "USD" if NACHA else "EUR"
+CLOSED = "R02" if NACHA else "AC04"        # how the closed account is answered
+
+ACME = {"name": "ACME Corporation", "iban": "NL41MOCK0000000001", "bic": "MOCKNL2A",
+        "company_id": "0000000001", "routing": "999999992"}
 
 # mock-sap's seeded suppliers, which bank where mock-bank's seed says they do
 # (mock-sap 0.13.1). INITECH's account is closed at the bank, and SAP still
@@ -44,6 +54,12 @@ ACCOUNTS = {
     UMBRELLA: "NL30MOCK0000000005",     # at another bank: settles
     INITECH: "NL84MOCK0000000003",      # held by mock-bank, closed: AC04
 }
+# The same three in NACHA mode: routing and account number. GLOBEX and INITECH
+# at mock-bank's routing number with their account numbers there; Umbrella at
+# another bank.
+DOMESTIC = {GLOBEX: ("999999992", "0000000002"),
+            INITECH: ("999999992", "0000000003"),
+            UMBRELLA: ("021000021", "0000000005")}
 
 
 def closed_port():
@@ -81,13 +97,22 @@ class Sap(SapSession):
         receipt = self.write("POST", "/sap/bc/idoc/idoc_xml", """<?xml version="1.0"?>
 <INVOIC02><IDOC BEGIN="1">
 <EDI_DC40 SEGMENT="1"><IDOCTYP>INVOIC02</IDOCTYP><MESTYP>INVOIC</MESTYP></EDI_DC40>
-<E1EDK01 SEGMENT="1"><CURCY>EUR</CURCY><ZTERM>%s</ZTERM></E1EDK01>
+<E1EDK01 SEGMENT="1"><CURCY>%s</CURCY><ZTERM>%s</ZTERM></E1EDK01>
 <E1EDKA1 SEGMENT="1"><PARVW>LF</PARVW><PARTN>%s</PARTN></E1EDKA1>
 <E1EDK02 SEGMENT="1"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDK02>
 <E1EDK03 SEGMENT="1"><IDDAT>026</IDDAT><DATUM>%s</DATUM></E1EDK03>
 <E1EDS01 SEGMENT="1"><SUMID>010</SUMID><SUMME>%s</SUMME></E1EDS01>
-</IDOC></INVOIC02>""" % (terms, supplier, reference, dated, gross), "application/xml")
+</IDOC></INVOIC02>""" % (CURRENCY, terms, supplier, reference, dated, gross),
+            "application/xml")
         return json.loads(receipt)["APPLIED"][0]
+
+    def domestic_bank(self, supplier, routing, account):
+        """Give a supplier's account the US details a NACHA run pays to: the
+        vendor master, kept the way a real one is, through its API."""
+        self.write("PATCH", ODATA + "/API_BUSINESS_PARTNER_SRV/A_BusinessPartnerBank"
+                   "(BusinessPartner='%s',BankIdentification='0001')" % supplier,
+                   json.dumps({"BankNumber": routing, "BankAccount": account}),
+                   "application/json")
 
     def block(self, posted, reason="A"):
         """Block a posted invoice for payment, on the invoice, as SAP users do."""
@@ -105,7 +130,12 @@ class MocksCase(unittest.TestCase):
         control(BANK, "POST", "/_mock/reset")
         self.today = self.bank_today()
         self.sap = Sap(self.today)
-        self.payments = PaymentRun(SAP, BANK, ACME)
+        if NACHA:
+            control(BANK, "PATCH", "/_mock/accounts/ACME",
+                    {"format": "nacha", "currency": "USD"})
+            for supplier, (routing, account) in DOMESTIC.items():
+                self.sap.domestic_bank(supplier, routing, account)
+        self.payments = PaymentRun(SAP, BANK, ACME, MODE)
 
     def bank_today(self):
         return datetime.date.fromisoformat(
@@ -128,7 +158,7 @@ class PayingOpenItems(MocksCase):
         items = self.by_reference(run)
         self.assertEqual(set(items), {"GLX-4711", "UMB-0815", "INI-2026-17"})
         self.assertEqual((items["INI-2026-17"].status, items["INI-2026-17"].reason),
-                         ("rejected", "AC04"))
+                         ("rejected", CLOSED))
         self.assertEqual(items["GLX-4711"].status, "accepted")
         self.assertEqual(items["UMB-0815"].status, "accepted")
         # The EndToEndId the bank holds is the supplier's invoice number, and
@@ -282,7 +312,7 @@ class AReturnedPayment(StatementCase):
     def test_3_a_return_reopens_the_invoice_distinguishable_from_one_never_paid(self):
         control(BANK, "PATCH", "/_mock/accounts/ACME", {
             "behaviour": "return-later",
-            "parameters": {"end_to_end_id": "GLX-4711", "days": 3, "reason": "AC04"}})
+            "parameters": {"end_to_end_id": "GLX-4711", "days": 3, "reason": CLOSED}})
         self.post_three()
         run = self.pay_on_monday()               # INITECH is rejected AC04: never paid
         self.payments.reconcile(run)
@@ -324,12 +354,13 @@ class WhenSomethingAnswersBadly(MocksCase):
 
     def test_a_bank_that_answers_with_an_error_is_a_problem_not_silence(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
-        nowhere = PaymentRun(SAP, SAP, ACME)           # SAP is no bank: 404 throughout
+        nowhere = PaymentRun(SAP, SAP, ACME, MODE)           # SAP is no bank: 404 throughout
         run = nowhere.run(self.today, "RUN1")
         nowhere.reconcile(run)
         self.assertEqual(len(run.problems), 3, run.problems)
         self.assertIn("answered 404 to the payment file", run.problems[0])
-        self.assertIn("no status report was read", run.problems[1])
+        self.assertIn("no acknowledgement was read" if NACHA
+                      else "no status report was read", run.problems[1])
         self.assertIn("no statement was read", run.problems[2])
         self.assertEqual(run.items[0].status, "sent")
 
@@ -337,7 +368,7 @@ class WhenSomethingAnswersBadly(MocksCase):
         # A port nothing listens on: no HTTP status at all, which used to be an
         # exception that stopped the run half way (#88).
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
-        down = PaymentRun(SAP, closed_port(), ACME)
+        down = PaymentRun(SAP, closed_port(), ACME, MODE)
         run = down.run(self.today, "RUN1")
         down.reconcile(run)
         self.assertEqual(len(run.problems), 3, run.problems)
@@ -349,7 +380,7 @@ class WhenSomethingAnswersBadly(MocksCase):
         self.assertEqual([i.status for i in run.items], ["selected"])
 
     def test_sap_not_answering_the_selection_selects_nothing_and_says_so(self):
-        run = PaymentRun(closed_port(), BANK, ACME).run(self.today, "RUN1")
+        run = PaymentRun(closed_port(), BANK, ACME, MODE).run(self.today, "RUN1")
         self.assertEqual(run.items, [])
         self.assertEqual(len(run.problems), 1, run.problems)
         self.assertIn("SAP did not answer, so no open item was selected", run.problems[0])
