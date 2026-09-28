@@ -388,6 +388,29 @@ class ReleaseRefusesBeforeItDoesAnything(ReleaseToolCase):
         self.assertEqual(code, 1)
         self.assertIn("not clean", out)
 
+    def test_a_dated_section_with_nothing_under_it_refuses_before_the_tag(self):
+        # The whole point: `notes_for` used to run at the publish step, so this
+        # refusal arrived *after* the tag was created and pushed. Asserting the
+        # reason rather than the exit code, because every other check in this
+        # class also refuses on this tree and would make a bare exit 1 pass.
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            "### Added\n\n- **A thing.** It shipped.\n", ""))
+        self.commit_all("empty the section")
+        self.git("push", "-q", "origin", "main")
+        code, out = self.release("0.2.0")          # not --dry-run
+        self.assertEqual(code, 1)
+        self.assertIn("nothing under it", out)
+        self.assertIn("--assemble 0.2.0", out)
+        tags = subprocess.run(["git", "tag", "-l"], cwd=self.tree,
+                              stdout=subprocess.PIPE).stdout.decode().split()
+        self.assertEqual(tags, [])
+
+    def test_a_section_with_notes_gets_past_that_check(self):
+        # So the test above is not passing because every tree refuses here.
+        code, out = self.release("0.2.0", "--dry-run")
+        self.assertEqual(code, 1)
+        self.assertNotIn("nothing under it", out)
+
 
 class ReleaseOnAFinishedVersion(ReleaseToolCase):
     """A finished release stays finished however the working copy looks.
