@@ -31,7 +31,9 @@ model                       NACHA
                             a reference the sender did not give. The trace
                             number is the ODFI's, so it is not this
 ``Payment.instruction_id``  trace number
-``Payment.creditor_...``    DFI account number and individual name
+``Payment.creditor_...``    DFI account number and individual name, and
+                            the receiving DFI's routing number as
+                            ``creditor_clearing_id``
 ``Payment.remittance``      each addenda's payment related information
 ==========================  ==============================================
 
@@ -60,20 +62,22 @@ LINE = 94
 BLOCK = 10
 NOT_PROVIDED = messages.NOT_PROVIDED
 
-Field = namedtuple("Field", "name start width numeric")
+Field = namedtuple("Field", "name start width numeric optional")
 
 
 def _fields(*spec):
-    """Fields from (name, width, numeric), laid end to end from column 1."""
+    """Fields from (name, width, kind), laid end to end from column 1."""
     out, start = [], 1
-    for name, width, numeric in spec:
-        out.append(Field(name, start, width, numeric))
+    for name, width, kind in spec:
+        out.append(Field(name, start, width, kind in (N, OPTIONAL_N), kind == OPTIONAL_N))
         start += width
     assert start == LINE + 1, "a record declares %d columns" % (start - 1)
     return tuple(out)
 
 
-N, A = True, False
+# Numeric, alphanumeric, and numeric but allowed to be blank - which NACHA
+# says of a few fields, and a real file leaves them blank.
+N, A, OPTIONAL_N = "N", "A", "N?"
 
 # Every record type, by field position and width (NACHA Operating Rules,
 # Appendix Three). Numeric fields are digits, right-justified and zero-filled;
@@ -82,7 +86,7 @@ RECORDS = {
     "1": ("file header", _fields(
         ("record type code", 1, N), ("priority code", 2, N),
         ("immediate destination", 10, A), ("immediate origin", 10, A),
-        ("file creation date", 6, N), ("file creation time", 4, N),
+        ("file creation date", 6, N), ("file creation time", 4, OPTIONAL_N),
         ("file ID modifier", 1, A), ("record size", 3, N),
         ("blocking factor", 2, N), ("format code", 1, N),
         ("immediate destination name", 23, A), ("immediate origin name", 23, A),
@@ -181,6 +185,8 @@ class Payment(messages.Payment):
         self.creditor_name = entry.text("individual name")
         self.creditor_account = entry.text("DFI account number")
         self.creditor_bic = None
+        self.creditor_clearing_id = (entry.text("receiving DFI identification")
+                                     + entry.text("check digit"))
         self.remittance = [a.text("payment related information") for a in addenda]
         self.remittance_references = []
 
@@ -241,8 +247,13 @@ def _dollars(amounts) -> Decimal:
 
 # -- reading -----------------------------------------------------------------
 
-def inspect(data: bytes):
-    """``(PaymentFile or None, [Finding])`` for a NACHA file; never raises."""
+def inspect(data: bytes, today: Optional[datetime.date] = None):
+    """``(PaymentFile or None, [Finding])`` for a NACHA file; never raises.
+
+    ``today`` is the bank's, for the one warning that needs it: an effective
+    entry date in the past (``DT01``), executed on the next business day as a
+    ``pain.001``'s past requested date is.
+    """
     findings: List[Finding] = []
     records: List[Record] = []
     padding = 0
@@ -311,7 +322,38 @@ def inspect(data: bytes):
                              "%d, to ten digits")
         findings += _compare(control, "total credit entry dollar amount", credits, "AM10",
                              "its credit entries sum to %d cents")
-    return PaymentFile(header, batches), findings
+    payment_file = PaymentFile(header, batches)
+    findings += _as_a_pain001_would(payment_file, today)
+    return payment_file, findings
+
+
+def _as_a_pain001_would(payment_file, today) -> List[Finding]:
+    """The two checks a ``pain.001`` gets that NACHA has no rule of its own for.
+
+    A past effective date is a ``DT01`` warning, not a rejection. A repeated
+    individual identification number is ``AM05``, because it is the
+    ``EndToEndId`` and a status for one would be a status for both. A blank one
+    is ``NOTPROVIDED`` and is not compared: many entries may leave it blank.
+    """
+    out, seen = [], {}
+    for batch in payment_file.batches:
+        when = batch.requested_execution_date
+        if today is not None and when is not None and when < today:
+            out.append(Finding(
+                "warning", batch.path + "/effective entry date (columns 70-75)", "DT01",
+                "the effective entry date %s is in the past; the bank executes on "
+                "the next business day instead" % when.isoformat()))
+        for payment in batch.payments:
+            reference = payment.end_to_end_id
+            if reference == NOT_PROVIDED:
+                continue
+            if reference in seen:
+                out.append(_finding(
+                    payment.path + "/individual identification number (columns 40-54)",
+                    "AM05", "%s already appears at %s" % (reference, seen[reference])))
+            else:
+                seen[reference] = payment.path
+    return out
 
 
 def _batch(records, index, findings):
@@ -386,6 +428,8 @@ def _numeric(record: Record) -> List[Finding]:
     out = []
     for field in record.fields:
         value = record.values[field.name]
+        if field.optional and not value.strip():
+            continue
         if field.numeric and not value.isdigit():
             out.append(_finding(record.field_path(field.name), "FF01",
                                 "%r is not a number; the field is %d digits, zero-filled"

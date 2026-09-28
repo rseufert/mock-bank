@@ -189,8 +189,11 @@ error FF01 at /line 8 (batch control)/entry hash (columns 11-20): the entry hash
 A finding names the line, the record and the field with its columns. The file
 checks are a line that is not 94 characters, a routing number that fails its
 check digit (`RC01`), and an entry hash, block count, count (`AM18`) or credit
-total (`AM10`) that disagrees with the entries. Where NACHA has no ISO 20022
-equivalent, the mock makes these choices:
+total (`AM10`) that disagrees with the entries. Two checks come from the
+`pain.001` side, where NACHA has no rule of its own: a past effective entry date
+is a `DT01` warning, and an individual identification number used twice is
+`AM05`. A blank file creation time is allowed, as NACHA allows it. Where NACHA
+has no ISO 20022 equivalent, the mock makes these choices:
 
 - **`EndToEndId` is the individual identification number**, the originator's
   own reference for the payment (an invoice number, say), which the receiver
@@ -570,7 +573,7 @@ numbered as there, and what the rest of the suite adds to them:
 | `test_posting_the_same_statement_twice_clears_nothing_twice` | A client that retries a statement post does no harm |
 | `test_an_item_not_yet_due_is_not_selected` | An invoice on `NT30` terms is left for a later run |
 | `test_the_selection_asks_sap_to_leave_blocked_and_cleared_items_out` | The query SAP receives asks for supplier lines that are neither blocked nor cleared |
-| `test_a_blocked_invoice_is_never_selected` | **Skipped for now.** mock-sap cannot yet post a blocked supplier invoice ([mock-sap#62](https://github.com/rseufert/mock-sap/issues/62)); the test above is what holds this until it can |
+| `test_a_blocked_invoice_is_never_selected` | An invoice blocked for payment on the supplier invoice, as an SAP user blocks one, never reaches the bank; the unblocked one beside it is paid |
 | `test_sap_refusing_a_statement_is_recorded_against_it`, `test_a_bank_that_does_not_answer_is_a_problem_not_silence` | What goes into `run.problems`, and that nothing stops half way |
 | `test_two_payments_of_the_missing_amount_are_both_named` | A shortfall two payments could explain names both rather than guessing one |
 
@@ -590,11 +593,12 @@ mock-bank starts at `--clock 2026-10-02T16:00`, a Friday after the 15:00 cutoff:
 test 6 needs that moment, a reset returns to it, and the other tests advance to
 Monday morning first.
 
-mock-sap's seed has no supplier invoices and no supplier banks at the accounts
-mock-bank holds, so each test posts its own `INVOIC` IDocs and points three
-seeded suppliers at mock-bank's accounts through `A_BusinessPartnerBank`, the
-API a real vendor master is kept with. `SAP_URL` and `BANK_URL` point the tests
-at mocks running elsewhere. CI runs them against mock-sap from PyPI.
+mock-sap's seed has suppliers that bank where mock-bank's seed says they do
+(GLOBEX, INITECH, EURODIS and Umbrella Logistics), but no supplier invoices, so
+each test posts its own `INVOIC` IDocs. Nothing in the example or the tests
+writes to the open-item cube, which is read-only in SAP and, from mock-sap
+0.13.1, in the mock. `SAP_URL` and `BANK_URL` point the tests at mocks running
+elsewhere. CI runs them against mock-sap from PyPI.
 
 ## Docker
 
