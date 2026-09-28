@@ -355,7 +355,7 @@ class AReturnedPayment(StatementCase):
         self.payments.reconcile(run)
         items = self.by_reference(run)
         self.assertEqual(items["GLX-4711"].status, "returned")
-        self.assertTrue(items["GLX-4711"].reason.startswith("AC04"), items["GLX-4711"].reason)
+        self.assertTrue(items["GLX-4711"].reason.startswith(CLOSED), items["GLX-4711"].reason)
         self.assertEqual(items["UMB-0815"].status, "cleared")
         self.assertEqual(items["INI-2026-17"].status, "rejected")
         # In SAP: returned and never paid are both open, and only one was paid.

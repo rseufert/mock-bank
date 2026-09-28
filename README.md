@@ -678,7 +678,11 @@ a foreign-currency item is:
 - an account number over 17 characters;
 - a name that is not ASCII.
 
-Statements are still `camt.053`, so reconciling does not change. The same
+The statement may be BAI2, which is what a US bank sends an ACH account (#57),
+and `reconcile` reads it by hand into the same statement a `camt.053` gives:
+the balances, and each movement's direction from its type code's range, so no
+particular code has to be known. The reason an ACH payment came back is read
+from the bank's NACHA return file, where it is an `R` code. The same
 tests run in this mode too, which is 0.3's definition of done, with one more
 for what an entry cannot carry:
 
