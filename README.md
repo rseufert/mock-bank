@@ -57,9 +57,11 @@ By [Rick Seufert](https://rickseufert.com). The [projects page](https://rickseuf
 has this mock, [mock-sap](https://github.com/rseufert/mock-sap),
 [mock-edi](https://github.com/rseufert/mock-edi) and the worked examples that
 use them together. mock-bank is the third leg: `po_bridge` sends the order,
-`invoice_check` approves the invoice, and `payment_run` (coming in 0.2) moves
-the money. Until then, [`pay_invoices`](#worked-example-paying-the-suppliers-invoices)
-pays mock-edi's invoices through this mock directly.
+`invoice_check` approves the invoice, and
+[`payment_run`](#worked-example-a-payment-run-against-sap) moves the money and
+posts the statement back to SAP.
+[`pay_invoices`](#worked-example-paying-the-suppliers-invoices) pays mock-edi's
+invoices through this mock directly.
 
 ---
 
@@ -520,6 +522,80 @@ cd examples && python3 -m unittest -v test_pay_invoices
 switch mock-edi's `ACME` partner to EDIFACT `D:96A:UN`, which bills in euros,
 so the buyer is ACME in both mocks. CI runs them against mock-edi from PyPI.
 
+## Worked example: a payment run against SAP
+
+[`examples/payment_run.py`](examples/payment_run.py) is the other end of the
+same flow, joining this mock to [mock-sap](https://github.com/rseufert/mock-sap).
+The invoices are already posted in SAP. The run does what SAP's `F110` does:
+it selects the open supplier items that are due, pays each one, and posts every
+statement back so SAP clears what was paid and reopens what came back.
+
+```
+mock-sap  ──open items──▶  payment_run  ──pain.001──▶  mock-bank
+                                        ◀──pain.002──  accepted, or why not
+                                        ◀──camt.053──  what actually left, and came back
+mock-sap  ◀──FINSTA01─────  payment_run                clear what it paid, reopen returns
+```
+
+Standard library only, and it imports neither mock. The `EndToEndId` is the
+supplier's own invoice number (`SupplierInvoiceIDByInvcgParty`), so the bank's
+answers and SAP's clearing meet on the same reference. The `MsgId` is the run
+date and identification, as `F110`'s are, so the same run sent twice is `DUPL`.
+Each `camt.053` is checked (opening plus entries is closing) before it is
+converted, and the `FINSTA01` writes a debit the way SAP writes a negative
+number, with the minus after it, because nothing in the IDoc says which way a
+line goes. What it shares with `pay_invoices.py` is in
+[`examples/bank_messages.py`](examples/bank_messages.py), so a copy of either
+takes that one file with it.
+
+**Look at `run.problems` first.** An answer the run could not use goes there,
+in words: the bank answering anything but `202` or `422` to the payment file, a
+mailbox that does not answer, or SAP refusing a statement. It is not raised and
+it is not dropped. An empty list is what a clean run looks like. Each item's
+`status` and `reason` say the rest: `rejected` with the bank's code, `cleared`
+with SAP's clearing document, `unreconciled` when a statement does not add up,
+`returned` with the bank's reason.
+
+The six tests from the plan on [#16](https://github.com/rseufert/mock-bank/issues/16),
+numbered as there, and what the rest of the suite adds to them:
+
+| Test | What it proves |
+| --- | --- |
+| `test_1_a_clean_run_is_paid_matched_and_cleared` | Monday's statement adds up, every item is cleared in SAP with a clearing document, and the next run finds nothing to pay |
+| `test_a_closed_account_is_rejected_ac04_and_the_rest_accepted` (2) | The item paid to INITECH's closed account is rejected `AC04` from the `pain.002` and the rest are accepted; each payment went to the account its invoice names |
+| `test_3_a_return_reopens_the_invoice_distinguishable_from_one_never_paid` | Under `return-later` a paid invoice comes back three business days later and is reopened in SAP, open like one never paid but with `ClearingIsReversed` set, and the next run selects it |
+| `test_the_same_run_twice_is_dupl_and_pays_nothing_twice` (4) | The same run has the same `MsgId`; the bank refuses the copy with `DUPL`, nothing is paid twice, and the refusal leaves the first file's outcome alone |
+| `test_5_a_statement_gap_leaves_the_missing_payment_unreconciled_and_open` | Under `statement-gap` the statement does not add up, by exactly one payment: that payment is `unreconciled` and its item stays open, and SAP's own arithmetic check says so too |
+| `test_6_after_the_cutoff_it_waits_for_mondays_statement` | A run at 16:00 on a Friday settles on Monday; Friday's statement clears nothing and Monday's clears everything |
+| `test_posting_the_same_statement_twice_clears_nothing_twice` | A client that retries a statement post does no harm |
+| `test_an_item_not_yet_due_is_not_selected` | An invoice on `NT30` terms is left for a later run |
+| `test_the_selection_asks_sap_to_leave_blocked_and_cleared_items_out` | The query SAP receives asks for supplier lines that are neither blocked nor cleared |
+| `test_a_blocked_invoice_is_never_selected` | **Skipped for now.** mock-sap cannot yet post a blocked supplier invoice ([mock-sap#62](https://github.com/rseufert/mock-sap/issues/62)); the test above is what holds this until it can |
+| `test_sap_refusing_a_statement_is_recorded_against_it`, `test_a_bank_that_does_not_answer_is_a_problem_not_silence` | What goes into `run.problems`, and that nothing stops half way |
+| `test_two_payments_of_the_missing_amount_are_both_named` | A shortfall two payments could explain names both rather than guessing one |
+
+```bash
+pip install mock-sap
+mock-sap --port 8000 &
+python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
+cd examples && python3 -m unittest -v test_payment_run
+```
+
+**The example does not advance bank time; the tests do.** A client cannot move
+a real bank's clock. It sends its file and reads statements as they arrive, so
+`reconcile` posts whatever the bank has sent so far, and a payment not on a
+statement yet simply stays `accepted`. The tests move mock-bank's clock with
+`POST /_mock/advance` to make those statements arrive. That is also why
+mock-bank starts at `--clock 2026-10-02T16:00`, a Friday after the 15:00 cutoff:
+test 6 needs that moment, a reset returns to it, and the other tests advance to
+Monday morning first.
+
+mock-sap's seed has no supplier invoices and no supplier banks at the accounts
+mock-bank holds, so each test posts its own `INVOIC` IDocs and points three
+seeded suppliers at mock-bank's accounts through `A_BusinessPartnerBank`, the
+API a real vendor master is kept with. `SAP_URL` and `BANK_URL` point the tests
+at mocks running elsewhere. CI runs them against mock-sap from PyPI.
+
 ## Docker
 
 ```bash
@@ -560,7 +636,8 @@ mockbank/validate.py           findings about a payment file: refusals, structur
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
 HTTP; `tools/` holds the checks CI runs; `examples/demo.sh` is the curl tour, and
-`examples/pay_invoices.py` the worked integration with mock-edi.
+`examples/pay_invoices.py` and `examples/payment_run.py` the worked integrations
+with mock-edi and mock-sap.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says how the pieces are meant to
 fit, and [docs/FILES.md](docs/FILES.md) describes every file.
 
