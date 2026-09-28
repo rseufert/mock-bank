@@ -244,19 +244,51 @@ Releases are the maintainer's.
 `pyproject.toml` is the only place the version is written;
 `mockbank.__version__` reads it back from the installed package metadata.
 
+**The release pull request** assembles the entries and bumps the version, in one
+commit:
+
 ```bash
-# assemble the waiting entries into a release section, bump `version` in
-# pyproject.toml to match, commit both, then:
 python3 tools/check_changelog.py --assemble 0.2.0 --date 2026-10-01
-git tag v0.2.0 && git push origin v0.2.0
-gh release create v0.2.0 --generate-notes     # or write the notes by hand
+# then bump `version` in pyproject.toml to match, and commit both
 ```
 
 `--assemble` writes every file in `changelog.d/` into `## [VERSION] - DATE`,
-grouped by kind and ordered by issue number, fixes the two link references at
-the foot of the file, and deletes the fragments. It can be run twice without
-doing anything the second time, which is the property that matters on the one
-day nobody wants to guess.
+grouped by kind and ordered by issue number, fixes the two link references at the
+foot of the file, and deletes the fragments. It can be run twice without doing
+anything the second time — whatever date the second run is given — which is the
+property that matters on the one day nobody wants to guess.
+
+**That pull request is merged only by whoever is about to run the rest**, in the
+same sitting. This is the rule the tooling below cannot enforce and the one that
+actually failed: 0.1.0's release commit was merged by one session and stopped
+there, and `main` claimed 0.1.0 with no tag and no release until it was tagged by
+hand hours later. mock-edi had the same with 0.4.0, where PyPI served the
+previous version throughout.
+
+**Then, on a clean `main`, one command does the rest:**
+
+```bash
+python3 tools/release.py 0.2.0 --dry-run     # every step, and does none of them
+python3 tools/release.py 0.2.0
+```
+
+`tools/release.py` is the procedure; the steps below are what it does, not a
+second copy of it to follow by hand. It refuses before it touches anything, and
+each refusal is a thing that has gone wrong in a real release somewhere: a dirty
+working tree, a branch that is not `main` or a detached HEAD, a `main` that
+disagrees with `origin/main`, a `pyproject.toml` that does not say the version, a
+`CHANGELOG.md` with no dated section for it, fragments still waiting in
+`changelog.d/`, or CI that is not green on the commit about to be tagged. Then it
+creates the annotated tag, pushes it, and publishes the GitHub Release — last,
+because that is the irreversible step. Run on a version that is already tagged
+and published it says so and does nothing.
+
+`tools/check_release.py` asks the same question afterwards, and the
+**Release check** workflow asks it every morning and on demand. It passes when
+the version `main` claims has no dated section yet, which is the ordinary state
+between releases, and fails naming what is missing when `main` carries a dated
+release with no tag, or a tag with no published Release. It is not run on push,
+because on the release commit the tag cannot exist yet.
 
 Publishing the GitHub Release runs the tests, builds the distributions, checks
 that the tag, `pyproject.toml` and the built wheel agree, and uploads to PyPI
