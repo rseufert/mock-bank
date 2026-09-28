@@ -50,10 +50,12 @@ FRAGMENTS = "changelog.d"
 BRANCH = "main"
 CI_WORKFLOW = ".github/workflows/ci.yml"
 
-# What a CI run may conclude and still be a pass. `skipped` and `neutral` are
-# here because a job can legitimately skip; anything else - failure, cancelled,
-# timed_out, action_required, stale - is not a release.
-CONCLUDED_WELL = ("success", "skipped", "neutral")
+# What a CI *workflow run* may conclude and still be a pass: only success.
+# `skipped` and `neutral` belong to individual check runs, where a job may
+# legitimately skip - a whole workflow run that concluded `skipped` ran nothing
+# at all, which is not a commit that has been tested. Anything else - failure,
+# cancelled, timed_out, action_required, stale - is not a release either.
+CONCLUDED_WELL = ("success",)
 
 HEADING = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$", re.M)
 
@@ -271,10 +273,28 @@ def remote_tag_commit(tag: str) -> str:
     return peeled or direct
 
 
-def release_published(tag: str) -> bool:
-    return subprocess.run(["gh", "release", "view", tag], cwd=ROOT,
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode == 0
+def release_state(tag: str) -> str:
+    """"published", "draft" or "absent" for the GitHub Release on this tag.
+
+    A draft is neither of the other two, and calling it published was a bug: a
+    draft does not trigger the publish workflow, so PyPI keeps serving the
+    previous version while this said "nothing to do". Calling it absent is no
+    better - `gh release create` would fail on the name already existing, which
+    tells the reader nothing about what to do. `check_release.py` already drew
+    this distinction; this asks the same question the same way.
+    """
+    result = subprocess.run(
+        ["gh", "release", "view", tag, "--json", "isDraft,publishedAt"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if result.returncode != 0:
+        return "absent"
+    try:
+        answer = json.loads(result.stdout.decode("utf-8"))
+    except ValueError:
+        return "absent"
+    if answer.get("isDraft") or not answer.get("publishedAt"):
+        return "draft"
+    return "published"
 
 
 def main() -> int:
@@ -296,7 +316,15 @@ def main() -> int:
         # released one, and refusing there would make re-running this on an old
         # version report the wrong problem.
         remote_tag = remote_tag_commit(tag)
-        released = release_published(tag)
+        state = release_state(tag)
+        if state == "draft":
+            raise Refused(
+                "the GitHub Release for %s exists but is a draft, so it has not "
+                "published anything: PyPI is still serving the previous version. "
+                "Publish that draft - `gh release edit %s --draft=false` - rather "
+                "than running this again, which cannot create a Release whose "
+                "name is already taken." % (tag, tag))
+        released = state == "published"
         if remote_tag and released:
             print("%s is already tagged on origin and its GitHub Release is "
                   "published; there is nothing to do." % tag)

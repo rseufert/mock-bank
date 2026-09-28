@@ -131,6 +131,14 @@ class TheCIVerdict(unittest.TestCase):
         run.update(fields)
         return {"workflow_runs": [run]}
 
+    def test_the_recorded_skipped_run_is_refused(self):
+        # A whole ci.yml run that completed `skipped` ran nothing, so the commit
+        # has not been tested. Recorded as a fixture beside the green one so the
+        # difference is a payload rather than an argument.
+        ok, why = ci_verdict(self.fixture("actions-runs-skipped.json"))
+        self.assertFalse(ok)
+        self.assertIn("skipped", why)
+
     def test_the_recorded_green_answer_passes(self):
         ok, why = ci_verdict(self.fixture("actions-runs-green.json"))
         self.assertTrue(ok, why)
@@ -162,15 +170,18 @@ class TheCIVerdict(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("failure", why)
 
-    def test_a_cancelled_run_is_refused(self):
-        ok, _ = ci_verdict(self.run_of(conclusion="cancelled"))
-        self.assertFalse(ok)
-
-    def test_skipped_and_neutral_are_passes(self):
-        for conclusion in ("skipped", "neutral"):
+    def test_only_success_passes_at_the_workflow_level(self):
+        # `skipped` and `neutral` are check-run conclusions, where a single job
+        # may legitimately skip. A whole workflow run that concluded `skipped`
+        # ran nothing, so the commit has not been tested - and accepting it
+        # would be accepting exactly the untested commit this gate exists for.
+        for conclusion in ("skipped", "neutral", "failure", "cancelled",
+                           "timed_out", "action_required", "stale", None):
             with self.subTest(conclusion=conclusion):
-                ok, why = ci_verdict(self.run_of(conclusion=conclusion))
-                self.assertTrue(ok, why)
+                ok, _ = ci_verdict(self.run_of(conclusion=conclusion))
+                self.assertFalse(ok)
+        ok, why = ci_verdict(self.run_of(conclusion="success"))
+        self.assertTrue(ok, why)
 
     def test_no_run_at_all_is_refused(self):
         ok, why = ci_verdict({"workflow_runs": []})
