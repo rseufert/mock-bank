@@ -667,7 +667,8 @@ sent twice is still the same file and still `DUPL`. The bank tells NACHA files
 apart by origin, date, creation time and file ID modifier, and the run's
 identification goes into the last two exactly, which leaves room for one to
 three capital letters or digits. A longer identification is refused before
-anything is selected. If it were hashed instead, two runs that hashed alike
+anything is selected. SAP's `F110` identifications are five characters, so a
+caller with those keeps a mapping of its own to three. If it were hashed instead, two runs that hashed alike
 would be one file to the bank, and the second would be refused as a repeat and
 never paid. An item a NACHA entry cannot carry is skipped with the reason, as
 a foreign-currency item is:

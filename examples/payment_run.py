@@ -493,7 +493,8 @@ class PaymentRun:
             fields = {words[0]: words[1:] for words in lines if words}
             if fields.get("FILE") != [run.msg_id]:
                 continue
-            state = fields.get("STATUS", [""])
+            # `or`, not a default: a bare STATUS line is there and empty.
+            state = fields.get("STATUS") or [""]
             if state[:2] == ["RJCT", "DUPL"]:
                 run.duplicate = True
                 continue

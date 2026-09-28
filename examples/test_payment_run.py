@@ -22,6 +22,7 @@ import json
 import os
 import socket
 import unittest
+import unittest.mock
 import urllib.parse
 import urllib.request
 from decimal import Decimal
@@ -462,6 +463,15 @@ class TheNachaFileHeader(unittest.TestCase):
         run = PaymentRun(closed_port(), closed_port(), dict(ACME, company_id="0" * 11),
                          "nacha").run(datetime.date(2026, 10, 2), "R1")
         self.assertIn("company identification", run.problems[0])
+
+    def test_a_bare_status_line_is_read_as_no_status(self):
+        run = Run(datetime.date(2026, 10, 2), "R1", [
+            Item("1/2026/1", GLOBEX, "GLX-1", "10.00", status="sent")],
+            nacha_origin=ACME["company_id"])
+        ack = "ACKNOWLEDGEMENT A1\nFILE %s\nSTATUS\n" % run.msg_id
+        with unittest.mock.patch("payment_run.call", return_value=(200, ack.encode())):
+            PaymentRun(SAP, BANK, ACME, "nacha").read_status(run)
+        self.assertEqual((run.items[0].status, run.duplicate), ("sent", False))
 
     def test_an_unknown_file_format_is_an_error(self):
         with self.assertRaises(ValueError):
