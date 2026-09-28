@@ -28,7 +28,7 @@ from decimal import Decimal
 
 from bank_messages import call
 from payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
-                         SapSession, odata)
+                         SapSession, nacha_time_and_modifier, odata)
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
@@ -38,6 +38,9 @@ BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
 # done. In NACHA mode ACME is a dollar account the bank knows by company
 # identification, and the suppliers are paid by routing and account number.
 MODE = os.environ.get("PAYMENT_RUN_FORMAT", "iso20022")
+if MODE not in ("iso20022", "nacha"):
+    # A misspelt mode would otherwise run every test in ISO mode and pass.
+    raise ValueError("PAYMENT_RUN_FORMAT is iso20022 or nacha, not %r" % MODE)
 NACHA = MODE == "nacha"
 CURRENCY = "USD" if NACHA else "EUR"
 CLOSED = "R02" if NACHA else "AC04"        # how the closed account is answered
@@ -154,7 +157,7 @@ class PayingOpenItems(MocksCase):
 
     def test_a_closed_account_is_rejected_ac04_and_the_rest_accepted(self):
         self.post_three()
-        run = self.payments.run(self.today, "RUN1")
+        run = self.payments.run(self.today, "R1")
         items = self.by_reference(run)
         self.assertEqual(set(items), {"GLX-4711", "UMB-0815", "INI-2026-17"})
         self.assertEqual((items["INI-2026-17"].status, items["INI-2026-17"].reason),
@@ -169,12 +172,12 @@ class PayingOpenItems(MocksCase):
 
     def test_the_same_run_twice_is_dupl_and_pays_nothing_twice(self):
         self.post_three()
-        first = self.payments.run(self.today, "RUN1")
+        first = self.payments.run(self.today, "R1")
         paid = control(BANK, "GET", "/_mock/payments")
         balance = control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
         # Nothing clears an open item until the statement is posted back to
         # SAP (#47), so the same run selects the same items again.
-        again = self.payments.run(self.today, "RUN1")
+        again = self.payments.run(self.today, "R1")
         self.assertEqual(again.msg_id, first.msg_id)
         self.assertTrue(again.duplicate)
         self.assertEqual(control(BANK, "GET", "/_mock/payments"), paid)
@@ -184,10 +187,38 @@ class PayingOpenItems(MocksCase):
         self.assertNotIn("rejected", {i.status for i in again.items
                                       if i.reference != "INI-2026-17"})
 
+    def test_two_runs_on_one_day_are_two_files(self):
+        # R1 and H shared a NACHA file ID modifier before the header carried
+        # the identification exactly: the second run was refused as DUPL and
+        # its invoice never paid.
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        first = self.payments.run(self.today, "R1")
+        self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")
+        second = self.payments.run(self.today, "H")
+        self.assertNotEqual(second.msg_id, first.msg_id)
+        self.assertFalse(second.duplicate)
+        self.assertEqual(self.by_reference(second)["UMB-0815"].status, "accepted")
+        self.assertEqual(control(BANK, "GET", "/_mock/payments/UMB-0815")["amount"], 23800)
+
+    @unittest.skipUnless(NACHA, "what a NACHA entry cannot carry")
+    def test_what_a_nacha_entry_cannot_carry_is_skipped_and_the_rest_paid(self):
+        self.sap.invoice(GLOBEX, "GLX 4711", "10.00")          # a space
+        self.sap.invoice(GLOBEX, "GLX-BIG", "100000000.00")    # eleven digits of cents
+        self.sap.domestic_bank(UMBRELLA, "021000021", "1" * 18)
+        self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")       # eighteen-digit account
+        self.sap.invoice(GLOBEX, "GLX-4712", "5.00")
+        items = self.by_reference(self.payments.run(self.today, "R1"))
+        self.assertEqual({r: i.status for r, i in items.items()},
+                         {"GLX 4711": "skipped", "GLX-BIG": "skipped",
+                          "UMB-0815": "skipped", "GLX-4712": "accepted"})
+        self.assertIn("17 characters", items["UMB-0815"].reason)
+        status, _body = call(BANK, "GET", "/_mock/payments/UMB-0815")
+        self.assertEqual(status, 404)
+
     def test_an_item_not_yet_due_is_not_selected(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         self.sap.invoice(GLOBEX, "GLX-4712", "50.00", terms="NT30")
-        run = self.payments.run(self.today, "RUN1")
+        run = self.payments.run(self.today, "R1")
         self.assertEqual([i.reference for i in run.items], ["GLX-4711"])
         status, _body = call(BANK, "GET", "/_mock/payments/GLX-4712")
         self.assertEqual(status, 404)
@@ -202,7 +233,7 @@ class PayingOpenItems(MocksCase):
     def test_a_blocked_invoice_is_never_selected(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         self.sap.block(self.sap.invoice(UMBRELLA, "UMB-0815", "238.00"))
-        run = self.payments.run(self.today, "RUN1")
+        run = self.payments.run(self.today, "R1")
         self.assertEqual([i.reference for i in run.items], ["GLX-4711"])
         status, _body = call(BANK, "GET", "/_mock/payments/UMB-0815")
         self.assertEqual(status, 404)
@@ -239,7 +270,7 @@ class StatementCase(MocksCase):
     def pay_on_monday(self):
         """A run on Monday morning, before the cutoff: it settles that day."""
         self.advance(self.monday)
-        run = self.payments.run(self.monday, "RUN1")
+        run = self.payments.run(self.monday, "R1")
         self.advance(self.monday + datetime.timedelta(days=1))
         return run
 
@@ -280,7 +311,7 @@ class ReconcilingTheStatement(StatementCase):
 
     def test_6_after_the_cutoff_it_waits_for_mondays_statement(self):
         self.post_two()
-        run = self.payments.run(self.today, "RUN1")        # Friday, 16:00
+        run = self.payments.run(self.today, "R1")        # Friday, 16:00
         self.advance(self.today + datetime.timedelta(days=1))
         self.payments.reconcile(run)
         friday = [s for s in run.statements if s["date"] == self.today.isoformat()]
@@ -343,7 +374,7 @@ class WhenSomethingAnswersBadly(MocksCase):
 
     def test_sap_refusing_a_statement_is_recorded_against_it(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
-        run = self.payments.run(self.today, "RUN1")
+        run = self.payments.run(self.today, "R1")
         control(BANK, "POST", "/_mock/advance?to=%s"
                 % (self.today + datetime.timedelta(days=1)).isoformat())
         control(SAP, "POST", "/_mock/faults", {"method": "POST", "match": "/sap/bc/idoc",
@@ -355,7 +386,7 @@ class WhenSomethingAnswersBadly(MocksCase):
     def test_a_bank_that_answers_with_an_error_is_a_problem_not_silence(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         nowhere = PaymentRun(SAP, SAP, ACME, MODE)           # SAP is no bank: 404 throughout
-        run = nowhere.run(self.today, "RUN1")
+        run = nowhere.run(self.today, "R1")
         nowhere.reconcile(run)
         self.assertEqual(len(run.problems), 3, run.problems)
         self.assertIn("answered 404 to the payment file", run.problems[0])
@@ -369,7 +400,7 @@ class WhenSomethingAnswersBadly(MocksCase):
         # exception that stopped the run half way (#88).
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         down = PaymentRun(SAP, closed_port(), ACME, MODE)
-        run = down.run(self.today, "RUN1")
+        run = down.run(self.today, "R1")
         down.reconcile(run)
         self.assertEqual(len(run.problems), 3, run.problems)
         self.assertIn("the bank did not answer, so the payment file was not sent",
@@ -380,14 +411,14 @@ class WhenSomethingAnswersBadly(MocksCase):
         self.assertEqual([i.status for i in run.items], ["selected"])
 
     def test_sap_not_answering_the_selection_selects_nothing_and_says_so(self):
-        run = PaymentRun(closed_port(), BANK, ACME, MODE).run(self.today, "RUN1")
+        run = PaymentRun(closed_port(), BANK, ACME, MODE).run(self.today, "R1")
         self.assertEqual(run.items, [])
         self.assertEqual(len(run.problems), 1, run.problems)
         self.assertIn("SAP did not answer, so no open item was selected", run.problems[0])
 
     def test_sap_not_answering_a_statement_is_recorded_against_it(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
-        run = self.payments.run(self.today, "RUN1")
+        run = self.payments.run(self.today, "R1")
         control(BANK, "POST", "/_mock/advance?to=%s"
                 % (self.today + datetime.timedelta(days=1)).isoformat())
         self.payments.session = SapSession(closed_port())
@@ -396,7 +427,7 @@ class WhenSomethingAnswersBadly(MocksCase):
         self.assertEqual(run.problems, [run.statements[0]["error"]])
 
     def test_two_payments_of_the_missing_amount_are_both_named(self):
-        run = Run(self.today, "RUN1", [
+        run = Run(self.today, "R1", [
             Item("1/2026/1", GLOBEX, "GLX-1", "238.00", status="accepted"),
             Item("1/2026/2", UMBRELLA, "UMB-1", "238.00", status="accepted"),
             Item("1/2026/3", UMBRELLA, "UMB-2", "50.00", status="accepted")])
@@ -405,6 +436,36 @@ class WhenSomethingAnswersBadly(MocksCase):
                          ["unreconciled", "unreconciled", "accepted"])
         self.assertIn("GLX-1, UMB-1", run.items[0].reason)
         self.assertIn("cannot say which", run.items[0].reason)
+
+
+class TheNachaFileHeader(unittest.TestCase):
+    """What tells one run's NACHA file from another's. Needs neither mock."""
+
+    def test_every_identification_it_takes_has_its_own_time_and_modifier(self):
+        alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        identifications = [a + b + c for a in alphabet for b in [""] + list(alphabet)
+                           for c in ([""] if not b else [""] + list(alphabet))]
+        pairs = {nacha_time_and_modifier(i) for i in identifications}
+        self.assertEqual(len(pairs), len(identifications))
+        self.assertTrue(all(int(time[:2]) < 24 and int(time[2:]) < 60
+                            for time, _modifier in pairs))
+
+    def test_one_it_cannot_tell_apart_is_refused_before_anything_is_selected(self):
+        for identification in ("RUN1", "r1", "R-1", ""):
+            run = PaymentRun(closed_port(), closed_port(), ACME, "nacha").run(
+                datetime.date(2026, 10, 2), identification)
+            self.assertEqual(run.items, [])
+            self.assertEqual(len(run.problems), 1, run.problems)
+            self.assertIn("so no open item was selected", run.problems[0])
+
+    def test_a_company_identification_over_ten_characters_is_refused(self):
+        run = PaymentRun(closed_port(), closed_port(), dict(ACME, company_id="0" * 11),
+                         "nacha").run(datetime.date(2026, 10, 2), "R1")
+        self.assertIn("company identification", run.problems[0])
+
+    def test_an_unknown_file_format_is_an_error(self):
+        with self.assertRaises(ValueError):
+            PaymentRun(SAP, BANK, ACME, "NACHA")
 
 
 if __name__ == "__main__":
