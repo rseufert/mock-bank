@@ -189,8 +189,11 @@ error FF01 at /line 8 (batch control)/entry hash (columns 11-20): the entry hash
 A finding names the line, the record and the field with its columns. The file
 checks are a line that is not 94 characters, a routing number that fails its
 check digit (`RC01`), and an entry hash, block count, count (`AM18`) or credit
-total (`AM10`) that disagrees with the entries. Where NACHA has no ISO 20022
-equivalent, the mock makes these choices:
+total (`AM10`) that disagrees with the entries. Two checks come from the
+`pain.001` side, where NACHA has no rule of its own: a past effective entry date
+is a `DT01` warning, and an individual identification number used twice is
+`AM05`. A blank file creation time is allowed, as NACHA allows it. Where NACHA
+has no ISO 20022 equivalent, the mock makes these choices:
 
 - **`EndToEndId` is the individual identification number**, the originator's
   own reference for the payment (an invoice number, say), which the receiver

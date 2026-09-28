@@ -84,9 +84,15 @@ class TheCleanFile(NachaCase):
 class FilesWrittenElsewhere(NachaCase):
     """moov-io/ach's test files; tests/samples/external/SOURCES.md says where from."""
 
+    def errors(self, reading):
+        return [f for f in reading["findings"] if f["level"] == "error"]
+
     def test_a_credit_file_reads_clean_with_its_fields_where_moov_put_them(self):
         status, reading = self.reading(sample("external", "nacha-loan-credit.ach"))
-        self.assertEqual((status, reading["findings"]), (200, []))
+        self.assertEqual((status, self.errors(reading)), (200, []))
+        # Dated 2019, so a past effective date: a warning, as for a pain.001.
+        self.assertEqual([(f["level"], f["code"]) for f in reading["findings"]],
+                         [("warning", "DT01")])
         batch = reading["file"]["batches"][0]
         self.assertEqual((batch["debtor_name"], batch["requested_execution_date"]),
                          ("Name on Account", "2019-06-25"))
@@ -97,11 +103,13 @@ class FilesWrittenElsewhere(NachaCase):
         self.assertEqual(payment["instruction_id"], "121042880000001")
         # moov left the individual identification number blank
         self.assertEqual(payment["end_to_end_id"], "NOTPROVIDED")
+        # the receiving bank's routing number, check digit included
+        self.assertEqual(payment["creditor_clearing_id"], "231380104")
 
     def test_a_debit_in_a_mixed_file_is_the_one_finding(self):
         status, reading = self.reading(sample("external", "nacha-ppd-mixedDebitCredit.ach"))
         self.assertEqual(status, 422)
-        self.assertEqual([(f["code"], f["path"]) for f in reading["findings"]],
+        self.assertEqual([(f["code"], f["path"]) for f in self.errors(reading)],
                          [("FF01", "/line 3 (entry detail)/transaction code (columns 2-3)")])
         self.assertEqual(len(reading["file"]["batches"][0]["payments"]), 2)
 
@@ -139,6 +147,43 @@ class BrokenFiles(NachaCase):
         text = reading["findings"][0]["text"]
         self.assertIn("265100431", text)
         self.assertIn("26400041", text)
+
+
+class AsAPain001Would(NachaCase):
+    """The checks a pain.001 gets that NACHA has no rule of its own for (#71)."""
+
+    def clean(self):
+        return sample("nacha_four_payments.ach").decode("ascii")
+
+    def test_a_past_effective_date_is_a_dt01_warning(self):
+        status, reading = self.reading(self.clean().replace(
+            "SUPPLIERS       261001", "SUPPLIERS       260901"))
+        self.assertEqual(status, 200)
+        self.assertEqual([(f["level"], f["code"], f["path"]) for f in reading["findings"]],
+                         [("warning", "DT01",
+                           "/line 2 (batch header)/effective entry date (columns 70-75)")])
+
+    def test_a_repeated_identification_number_is_am05(self):
+        status, reading = self.reading(self.clean().replace("INV-2026-002  ", "INV-2026-001  "))
+        self.assertEqual(status, 422)
+        self.assertEqual([(f["code"], f["path"]) for f in reading["findings"]],
+                         [("AM05", "/line 4 (entry detail)/individual identification "
+                                   "number (columns 40-54)")])
+
+    def test_a_blank_file_creation_time_is_allowed(self):
+        text = self.clean()
+        header = text.splitlines()[0]
+        blanked = header[:29] + "    " + header[33:]
+        status, reading = self.reading(text.replace(header, blanked))
+        self.assertEqual((status, reading["findings"]), (200, []))
+
+    def test_both_readers_keep_the_creditors_routing_number(self):
+        _, ach = self.reading(sample("nacha_four_payments.ach"))
+        _, twin = self.reading(sample("pain001_four_payments_usd.xml"))
+        routing = [p["creditor_clearing_id"] for p in ach["file"]["batches"][0]["payments"]]
+        self.assertEqual(routing, ["021000021", "121000248", "011000138", "111000025"])
+        self.assertEqual(routing, [p["creditor_clearing_id"]
+                                   for p in twin["file"]["batches"][0]["payments"]])
 
 
 class ThePaymentsDoor(NachaCase):
