@@ -78,6 +78,12 @@ from typing import Dict, List, Optional, Sequence
 
 NAME = "BAI2"
 VERSION = 2
+
+# The mailbox type and the pickup extension for a statement written this way.
+# A NACHA-format account is sent this instead of a camt.053 (#57), numbered from
+# the same counter, so a format change does not restart a statement's numbering.
+STATEMENT = "bai2.statement"
+TEXT_TYPES = {STATEMENT: "bai2"}
 TERMINATOR = "/"
 SEPARATOR = ","
 
@@ -179,7 +185,24 @@ def _field_count_problem(code: str, values) -> str:
     return ""
 
 
-class Unreadable(ValueError):
+class Wrong(ValueError):
+    """Base of the two below, so a caller may catch either."""
+
+
+class Unwritable(Wrong):
+    """This statement cannot be written as BAI2, and saying so beats guessing.
+
+    Raised by the writer: a record that does not fit its declaration, an amount
+    whose sign contradicts its type code, a credit that is not a return. Each is
+    a bug in the caller rather than a fact about somebody else's file, so it
+    stops here instead of producing a file two readers would disagree about.
+
+    Separate from `Unreadable` because an earlier version raised that from the
+    writer, which reads as though something had been parsed.
+    """
+
+
+class Unreadable(Wrong):
     """A file that is not BAI2 at all, named rather than guessed at.
 
     A findings list is what `validate` produces for a payment file the bank was
@@ -212,7 +235,7 @@ def _movement(minor: int) -> str:
     about.
     """
     if minor < 0:
-        raise Unreadable(
+        raise Unwritable(
             "a movement of %d cannot be written: a 16 record carries the size of "
             "the movement and its type code carries the direction, so a negative "
             "amount would contradict the code and lower the control total" % minor)
@@ -227,11 +250,11 @@ def _record(code: str, *values) -> str:
     parser to reject.
     """
     if code not in RECORDS:
-        raise Unreadable("no record type %r is declared" % code)
+        raise Unwritable("no record type %r is declared" % code)
     name, fields = RECORDS[code]
     expected = len(fields) - 1                      # the record code itself
     if len(values) != expected:
-        raise Unreadable(
+        raise Unwritable(
             "a %s (%s) takes %d field(s) after the code, not %d"
             % (name, code, expected, len(values)))
     # Every alphanumeric field is made safe here rather than at the call sites.
@@ -345,7 +368,7 @@ def _transaction(payment: Dict) -> str:
         # unexplained credit stops here instead of being mislabelled. Whichever
         # of #56 and #96 lands second adds the received-credit code.
         if not payment.get("return_reason"):
-            raise Unreadable(
+            raise Unwritable(
                 "a credit with no return reason is not a return, and BAI2 has "
                 "no code here for one yet: %r would be written as %s, which "
                 "says the payment came back. A received credit needs its own "
@@ -365,8 +388,14 @@ def _transaction(payment: Dict) -> str:
 # split too, so a creditor name carrying one wrote a record across two lines and
 # `read` then raised on the half of it. The trailers counted it once either way,
 # which is what made the file wrong rather than merely unreadable.
-UNSAFE = (SEPARATOR, TERMINATOR, "\r", "\n", "\u2028", "\u2029", "\x0b",
-          "\x0c", "\x1c", "\x1d", "\x1e", "\u0085")
+UNSAFE = (SEPARATOR, TERMINATOR, "\u2028", "\u2029", "\u0085")
+
+# Every C0 control, rather than the line breaks among them. An earlier version
+# listed CR, LF and the separators it could think of, which left tab and \x01 to
+# pass through - harmless to the field boundaries and still junk in a file a bank
+# parses. A list of the dangerous ones is a list somebody has to keep complete;
+# "no control characters" is not.
+CONTROLS = tuple(chr(code) for code in range(0x20)) + ("\x7f",)
 
 
 def _safe(text) -> str:
@@ -380,7 +409,7 @@ def _safe(text) -> str:
     if text is None:
         return ""
     out = str(text)
-    for bad in UNSAFE:
+    for bad in UNSAFE + CONTROLS:
         out = out.replace(bad, " ")
     return out.strip()
 
