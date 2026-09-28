@@ -106,7 +106,7 @@ def _inspect(data, content_type, today, nacha_too=False):
                                % ", ".join(messages.READABLE))]
     if nacha.recognise(data):
         if nacha_too:
-            return nacha.inspect(data)
+            return nacha.inspect(data, today)
         return None, [_refusal("the file is a NACHA file; so far the mock reads NACHA at "
                                "POST /_mock/validate only, and takes a pain.001 here (%s)"
                                % ", ".join(messages.READABLE))]

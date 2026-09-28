@@ -334,7 +334,13 @@ class ExternalSamples(unittest.TestCase):
     def test_every_sample_is_accounted_for(self):
         with open(os.path.join(EXTERNAL, "SOURCES.md"), encoding="utf-8") as handle:
             sources = handle.read()
-        for path in glob.glob(os.path.join(EXTERNAL, "**", "*.xml"), recursive=True):
+        # Every sample, whatever its format: a NACHA file from outside the
+        # project is ground truth just as an XML one is, and was missed while
+        # this looked for `*.xml` only.
+        paths = [p for p in glob.glob(os.path.join(EXTERNAL, "**", "*"), recursive=True)
+                 if os.path.isfile(p) and os.path.splitext(p)[1] in (".xml", ".ach")]
+        self.assertTrue(any(p.endswith(".ach") for p in paths), "no NACHA sample found")
+        for path in paths:
             relative = os.path.relpath(path, EXTERNAL).replace(os.sep, "/")
             self.assertIn("`%s`" % relative, sources, "no source recorded for " + relative)
 
