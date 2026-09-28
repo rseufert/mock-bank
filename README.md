@@ -664,7 +664,7 @@ than half-supporting it.
 | Release | Scope | Done when |
 | --- | --- | --- |
 | 0.1 | ISO 20022 credit transfers: `pain.001` in; `pain.002`, `camt.054`, `camt.053` out; accounts, balances, cutoff, holidays, clock; every behaviour above except `return-later`; HTTP only | **Done.** Every message the mock writes validates against its own dictionary and against the published XSDs; the tour and the example client run in CI |
-| 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
+| 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | The same `payment_run` tests pass in NACHA mode |
 
 ## Contributing
