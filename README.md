@@ -57,9 +57,11 @@ By [Rick Seufert](https://rickseufert.com). The [projects page](https://rickseuf
 has this mock, [mock-sap](https://github.com/rseufert/mock-sap),
 [mock-edi](https://github.com/rseufert/mock-edi) and the worked examples that
 use them together. mock-bank is the third leg: `po_bridge` sends the order,
-`invoice_check` approves the invoice, and `payment_run` (coming in 0.2) moves
-the money. Until then, [`pay_invoices`](#worked-example-paying-the-suppliers-invoices)
-pays mock-edi's invoices through this mock directly.
+`invoice_check` approves the invoice, and
+[`payment_run`](#worked-example-a-payment-run-against-sap) moves the money and
+posts the statement back to SAP.
+[`pay_invoices`](#worked-example-paying-the-suppliers-invoices) pays mock-edi's
+invoices through this mock directly.
 
 ---
 
@@ -110,7 +112,7 @@ sends them.
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
 | `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
-| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(not yet — 0.3)** |
+| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(0.3; so far a NACHA file is read and checked by `POST /_mock/validate`)** |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
@@ -173,6 +175,36 @@ currency that is not the debtor account's (or a request to convert one),
 and DTDs are refused by name. A requested execution date in the past is a
 `DT01` *warning*, not a rejection: banks differ, and the mock follows the
 common SEPA profile of executing on the next business day.
+
+**A NACHA file** is read by the same endpoint. The mock recognises one by its
+first line, a file header starting `101`, and reads it into the same payments
+a `pain.001` becomes:
+
+```
+$ curl -s --data-binary @tests/samples/nacha_broken_entry_hash.ach http://127.0.0.1:8080/_mock/validate
+NACHA 1234567890-2610010900A: 1 batch, 4 payments, 1 finding
+error FF01 at /line 8 (batch control)/entry hash (columns 11-20): the entry hash says 265100431, but the batch's receiving DFI identifications sum to 26400041, to ten digits
+```
+
+A finding names the line, the record and the field with its columns. The file
+checks are a line that is not 94 characters, a routing number that fails its
+check digit (`RC01`), and an entry hash, block count, count (`AM18`) or credit
+total (`AM10`) that disagrees with the entries. Where NACHA has no ISO 20022
+equivalent, the mock makes these choices:
+
+- **`EndToEndId` is the individual identification number**, the originator's
+  own reference for the payment (an invoice number, say), which the receiver
+  also sees. `NOTPROVIDED` when it is blank. The trace number is assigned by
+  the originating bank, so it becomes the `InstrId` instead.
+- **The debtor account is the company identification.** A NACHA file carries
+  no originator account: the originating bank knows its customer by that id.
+- **The file's identity**, where a `pain.001` has a `MsgId`, is the immediate
+  origin with the creation date, time and file ID modifier. Those are the
+  fields a bank tells two files apart by.
+- **Only credit entries are payments.** A debit, a prenote or a return entry
+  is an `FF01` finding, because this bank sends money and does not collect it.
+
+`POST /payments` does not take a NACHA file yet (0.3): it refuses one by name.
 
 A `camt.053` closes each business day for every open account the bank holds,
 in order, as the clock passes the day's end - a day with no entries still gets
@@ -320,7 +352,7 @@ like mock-edi's so the two feel the same.
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
-| Validate only | `POST /_mock/validate` | Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
+| Validate only | `POST /_mock/validate` | A `pain.001` or a NACHA file. Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
 | Folder in and out | `--drop-dir`, `--pickup-dir`, `GET /_mock/drop`, `POST /_mock/drop/scan` | Most bank connections are still SFTP folders, so the bank reads one directory and writes another |
 
 `GET /_mock/mailbox?raw` returns the message bodies one after another, each
@@ -490,6 +522,80 @@ cd examples && python3 -m unittest -v test_pay_invoices
 switch mock-edi's `ACME` partner to EDIFACT `D:96A:UN`, which bills in euros,
 so the buyer is ACME in both mocks. CI runs them against mock-edi from PyPI.
 
+## Worked example: a payment run against SAP
+
+[`examples/payment_run.py`](examples/payment_run.py) is the other end of the
+same flow, joining this mock to [mock-sap](https://github.com/rseufert/mock-sap).
+The invoices are already posted in SAP. The run does what SAP's `F110` does:
+it selects the open supplier items that are due, pays each one, and posts every
+statement back so SAP clears what was paid and reopens what came back.
+
+```
+mock-sap  ──open items──▶  payment_run  ──pain.001──▶  mock-bank
+                                        ◀──pain.002──  accepted, or why not
+                                        ◀──camt.053──  what actually left, and came back
+mock-sap  ◀──FINSTA01─────  payment_run                clear what it paid, reopen returns
+```
+
+Standard library only, and it imports neither mock. The `EndToEndId` is the
+supplier's own invoice number (`SupplierInvoiceIDByInvcgParty`), so the bank's
+answers and SAP's clearing meet on the same reference. The `MsgId` is the run
+date and identification, as `F110`'s are, so the same run sent twice is `DUPL`.
+Each `camt.053` is checked (opening plus entries is closing) before it is
+converted, and the `FINSTA01` writes a debit the way SAP writes a negative
+number, with the minus after it, because nothing in the IDoc says which way a
+line goes. What it shares with `pay_invoices.py` is in
+[`examples/bank_messages.py`](examples/bank_messages.py), so a copy of either
+takes that one file with it.
+
+**Look at `run.problems` first.** An answer the run could not use goes there,
+in words: the bank answering anything but `202` or `422` to the payment file, a
+mailbox that does not answer, or SAP refusing a statement. It is not raised and
+it is not dropped. An empty list is what a clean run looks like. Each item's
+`status` and `reason` say the rest: `rejected` with the bank's code, `cleared`
+with SAP's clearing document, `unreconciled` when a statement does not add up,
+`returned` with the bank's reason.
+
+The six tests from the plan on [#16](https://github.com/rseufert/mock-bank/issues/16),
+numbered as there, and what the rest of the suite adds to them:
+
+| Test | What it proves |
+| --- | --- |
+| `test_1_a_clean_run_is_paid_matched_and_cleared` | Monday's statement adds up, every item is cleared in SAP with a clearing document, and the next run finds nothing to pay |
+| `test_a_closed_account_is_rejected_ac04_and_the_rest_accepted` (2) | The item paid to INITECH's closed account is rejected `AC04` from the `pain.002` and the rest are accepted; each payment went to the account its invoice names |
+| `test_3_a_return_reopens_the_invoice_distinguishable_from_one_never_paid` | Under `return-later` a paid invoice comes back three business days later and is reopened in SAP, open like one never paid but with `ClearingIsReversed` set, and the next run selects it |
+| `test_the_same_run_twice_is_dupl_and_pays_nothing_twice` (4) | The same run has the same `MsgId`; the bank refuses the copy with `DUPL`, nothing is paid twice, and the refusal leaves the first file's outcome alone |
+| `test_5_a_statement_gap_leaves_the_missing_payment_unreconciled_and_open` | Under `statement-gap` the statement does not add up, by exactly one payment: that payment is `unreconciled` and its item stays open, and SAP's own arithmetic check says so too |
+| `test_6_after_the_cutoff_it_waits_for_mondays_statement` | A run at 16:00 on a Friday settles on Monday; Friday's statement clears nothing and Monday's clears everything |
+| `test_posting_the_same_statement_twice_clears_nothing_twice` | A client that retries a statement post does no harm |
+| `test_an_item_not_yet_due_is_not_selected` | An invoice on `NT30` terms is left for a later run |
+| `test_the_selection_asks_sap_to_leave_blocked_and_cleared_items_out` | The query SAP receives asks for supplier lines that are neither blocked nor cleared |
+| `test_a_blocked_invoice_is_never_selected` | **Skipped for now.** mock-sap cannot yet post a blocked supplier invoice ([mock-sap#62](https://github.com/rseufert/mock-sap/issues/62)); the test above is what holds this until it can |
+| `test_sap_refusing_a_statement_is_recorded_against_it`, `test_a_bank_that_does_not_answer_is_a_problem_not_silence` | What goes into `run.problems`, and that nothing stops half way |
+| `test_two_payments_of_the_missing_amount_are_both_named` | A shortfall two payments could explain names both rather than guessing one |
+
+```bash
+pip install mock-sap
+mock-sap --port 8000 &
+python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
+cd examples && python3 -m unittest -v test_payment_run
+```
+
+**The example does not advance bank time; the tests do.** A client cannot move
+a real bank's clock. It sends its file and reads statements as they arrive, so
+`reconcile` posts whatever the bank has sent so far, and a payment not on a
+statement yet simply stays `accepted`. The tests move mock-bank's clock with
+`POST /_mock/advance` to make those statements arrive. That is also why
+mock-bank starts at `--clock 2026-10-02T16:00`, a Friday after the 15:00 cutoff:
+test 6 needs that moment, a reset returns to it, and the other tests advance to
+Monday morning first.
+
+mock-sap's seed has no supplier invoices and no supplier banks at the accounts
+mock-bank holds, so each test posts its own `INVOIC` IDocs and points three
+seeded suppliers at mock-bank's accounts through `A_BusinessPartnerBank`, the
+API a real vendor master is kept with. `SAP_URL` and `BANK_URL` point the tests
+at mocks running elsewhere. CI runs them against mock-sap from PyPI.
+
 ## Docker
 
 ```bash
@@ -512,6 +618,7 @@ mockbank/drop.py               the second door: a directory watched, and one wri
 mockbank/db.py                 the schema, the upgrade, and the seeded accounts
 mockbank/handler.py            the request handler: authentication, the body, the request log, and the lookup in the route table
 mockbank/messages.py           reading a pain.001 into a PaymentFile, and writing the pain.002, camt.054 and camt.053 the bank sends back
+mockbank/nacha.py              NACHA: the record declarations, and a reader into the same payments as a pain.001
 mockbank/outbox.py             what the bank sends and when: the message queue, release as the clock moves, the mailbox
 mockbank/routes/__init__.py    the route table: each surface registers method, path pattern and function
 mockbank/routes/control.py     health, state, reset, behaviours, the dictionary and the index page
@@ -529,7 +636,8 @@ mockbank/validate.py           findings about a payment file: refusals, structur
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
 HTTP; `tools/` holds the checks CI runs; `examples/demo.sh` is the curl tour, and
-`examples/pay_invoices.py` the worked integration with mock-edi.
+`examples/pay_invoices.py` and `examples/payment_run.py` the worked integrations
+with mock-edi and mock-sap.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says how the pieces are meant to
 fit, and [docs/FILES.md](docs/FILES.md) describes every file.
 

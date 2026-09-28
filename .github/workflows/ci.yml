@@ -137,7 +137,9 @@ jobs:
           python -m pip install mock-sap
           mock-sap --port 8000 -q &
           SAP_PID=$!
-          python -m mockbank --port 8090 -q &
+          # A Friday after the cutoff, which test 6 needs; the others move on
+          # to Monday morning themselves.
+          python -m mockbank --port 8090 -q --clock 2026-10-02T16:00 &
           BANK_PID=$!
           trap 'kill $SAP_PID $BANK_PID 2>/dev/null || true' EXIT
           for _ in $(seq 1 40); do

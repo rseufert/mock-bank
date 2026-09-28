@@ -6,12 +6,16 @@ from . import route
 
 
 @route("POST", "/_mock/validate",
-       note=("send a pain.001, get its findings as prose, one line each; "
-            "nothing is stored"))
+       note=("send a pain.001 or a NACHA file, get its findings as prose, "
+            "one line each; nothing is stored"))
 def validate_file(h) -> None:
-    """The findings as prose, one line each, or as JSON when asked for."""
+    """The findings as prose, one line each, or as JSON when asked for.
+
+    A pain.001, or a NACHA file: this door reads both, and says which in the
+    first line (the JSON's `file.message`).
+    """
     payment_file, findings = validate.inspect(
-        h.body, h.headers.get("Content-Type"), h.state.clock.today())
+        h.body, h.headers.get("Content-Type"), h.state.clock.today(), nacha_too=True)
     status = 422 if validate.errors(findings) else 200
     if "application/json" in (h.headers.get("Accept") or ""):
         return h.json(status, {
