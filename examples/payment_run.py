@@ -189,7 +189,9 @@ class PaymentRun:
     paid to the routing and account numbers SAP holds for them (`BankNumber`,
     `BankAccount`). `company` then also carries `company_id`, the company
     identification the bank knows the account by, and `routing`, the bank's.
-    Statements are still `camt.053`, so reconciling does not change.
+    A NACHA account's statement may be BAI2 rather than a `camt.053`, and the
+    reason an ACH payment came back is in the bank's NACHA return file:
+    `reconcile` reads all three into the same statement (#57).
     """
 
     def __init__(self, sap: str, bank: str, company: Dict[str, str],
