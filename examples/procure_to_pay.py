@@ -50,6 +50,18 @@ SUPPLIER_INVOICES = ("/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
                      "/A_SupplierInvoice")
 
 
+def odata_string(value: str) -> str:
+    """A string for an OData `$filter` literal, with its quotes doubled.
+
+    A supplier's invoice number is the supplier's, not ours. `O'BRIEN-014` would
+    close the literal early and the filter becomes a different question - or a
+    syntax error, if you are lucky enough to notice. OData escapes a quote by
+    doubling it, and `urlencode` then percent-encodes the result as the value it
+    is rather than as syntax.
+    """
+    return str(value).replace("'", "''")
+
+
 class DurableInvoiceCheck(invoice_check.InvoiceCheck):
     """The same match, but the duplicate question is asked of SAP.
 
@@ -90,7 +102,8 @@ class DurableInvoiceCheck(invoice_check.InvoiceCheck):
     def already_posted(self, reference: str, supplier: str) -> bool:
         query = urllib.parse.urlencode({"$filter": (
             "SupplierInvoiceIDByInvcgParty eq '%s' and InvoicingParty eq '%s'"
-            % (reference, supplier)), "$format": "json"})
+            % (odata_string(reference), odata_string(supplier))),
+            "$format": "json"})
         found = self.sap.request("GET", "%s?%s" % (SUPPLIER_INVOICES, query))
         return bool(found["d"]["results"])
 

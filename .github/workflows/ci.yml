@@ -134,6 +134,11 @@ jobs:
       - name: Run the procure_to_pay example against all three mocks from PyPI
         run: |
           set -euo pipefail
+          # mock-sap 0.13.2 is a real floor: before it the INVOIC this example
+          # sends created no payable and the order's currency was not declared.
+          # mock-edi carries no floor - the example was run against every
+          # published version back to 0.2.1, the oldest on PyPI, and all pass -
+          # so CI takes the latest, which is what CI is for.
           python -m pip install "mock-sap>=0.13.2" mock-edi
           mock-sap --port 8000 -q &
           SAP_PID=$!
