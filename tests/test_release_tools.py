@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-from release import ci_verdict                                     # noqa: E402
+from release import ci_verdict, notes_for                          # noqa: E402
 
 CHANGELOG = """# Changelog
 
@@ -54,6 +54,53 @@ Entries for the next release are one file each in `changelog.d/`.
 [0.2.0]: https://example.invalid/x/compare/v0.1.0...v0.2.0
 [0.1.0]: https://example.invalid/x/releases/tag/v0.1.0
 """
+
+
+class TheReleaseNotes(unittest.TestCase):
+    """`notes_for`, which publishes the changelog section instead of generated notes.
+
+    On a squash-merged repository `--generate-notes` restates the commit titles.
+    The changelog says the same things better and has been reviewed, so it is
+    what goes out.
+
+    Both edges are tested because only one of them is obvious. A section in the
+    middle of the file ends at the next `## [` heading; the *oldest* section ends
+    at the link references, which follow it directly and read as a stray
+    `[0.1.0]: https://...` in the middle of release notes. Stopping only at the
+    next heading passes every middle-of-file test there is.
+    """
+
+    def test_a_section_in_the_middle_stops_at_the_next_heading(self):
+        notes = notes_for(CHANGELOG, "0.2.0")
+        self.assertIn("**A thing.** It shipped.", notes)
+        self.assertNotIn("0.1.0", notes)
+        self.assertNotIn("The first one", notes)
+        self.assertFalse([l for l in notes.splitlines() if l.startswith("## ")])
+
+    def test_the_oldest_section_stops_before_the_link_references(self):
+        notes = notes_for(CHANGELOG, "0.1.0")
+        self.assertIn("**The first one.** It shipped too.", notes)
+        self.assertNotIn("https://example.invalid", notes)
+        self.assertNotIn("[Unreleased]:", notes)
+
+    def test_it_is_exactly_the_section(self):
+        self.assertEqual(notes_for(CHANGELOG, "0.2.0"),
+                         "### Added\n\n- **A thing.** It shipped.\n")
+
+    def test_the_unreleased_pointer_is_not_release_notes(self):
+        # Asked of [Unreleased] it returns the pointer, which is correct as an
+        # extraction and would be wrong as notes. release.py never asks for it -
+        # it asks for a dated version - and this records that the guard is there
+        # rather than here.
+        notes = notes_for(CHANGELOG, "Unreleased")
+        self.assertIn("changelog.d", notes)
+
+    def test_a_version_with_no_section_gives_nothing(self):
+        self.assertEqual(notes_for(CHANGELOG, "9.9.9"), "")
+
+    def test_a_heading_that_merely_starts_the_same_is_not_a_match(self):
+        # `[0.2.0]` must not be found by looking for `[0.2]`, nor the reverse.
+        self.assertEqual(notes_for(CHANGELOG, "0.2"), "")
 
 
 class ReleaseToolCase(unittest.TestCase):
@@ -322,6 +369,24 @@ class ReleaseRefusesBeforeItDoesAnything(ReleaseToolCase):
         tags = subprocess.run(["git", "tag", "-l"], cwd=self.tree,
                               stdout=subprocess.PIPE).stdout.decode().split()
         self.assertEqual(tags, [])
+
+    def test_gh_being_unable_to_resolve_the_repo_is_refused_not_assumed(self):
+        # The throwaway repo's remote is a bare directory, so `gh` cannot say
+        # what GitHub repository this is. Answering `absent` would have it tag
+        # and publish without knowing what is already there.
+        code, out = self.release("0.2.0", "--dry-run")
+        self.assertEqual(code, 1)
+        # The specific reason, not just any refusal: without this the test
+        # passes on the CI check failing for its own reasons a step later.
+        self.assertIn("cannot work out which GitHub repository", out)
+
+    def test_the_local_checks_speak_before_the_github_one(self):
+        # A dirty tree is cheaper to discover and likelier to be the real
+        # problem, so it must not be hidden behind a GitHub failure.
+        self.write("pyproject.toml", 'version = "0.2.0"\n# edited\n')
+        code, out = self.release("0.2.0", "--dry-run")
+        self.assertEqual(code, 1)
+        self.assertIn("not clean", out)
 
 
 class ReleaseOnAFinishedVersion(ReleaseToolCase):
