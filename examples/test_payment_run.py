@@ -23,9 +23,11 @@ import os
 import unittest
 import urllib.parse
 import urllib.request
+from decimal import Decimal
 
 from bank_messages import call
-from payment_run import ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, PaymentRun, SapSession, odata
+from payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
+                         SapSession, odata)
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
@@ -161,8 +163,8 @@ class PayingOpenItems(MocksCase):
                       "(rseufert/mock-sap#62)")
 
 
-class ReconcilingTheStatement(MocksCase):
-    """#47: each camt.053 posted to SAP as a FINSTA01, clearing what it paid."""
+class StatementCase(MocksCase):
+    """Bank time pinned to a Friday after the cutoff, and SAP's items to look at."""
 
     def setUp(self):
         super().setUp()
@@ -177,14 +179,17 @@ class ReconcilingTheStatement(MocksCase):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         self.sap.invoice(ELSEWHERE, "ELS-0815", "238.00")
 
-    def clearing(self, reference):
-        """The clearing document on the open item for a supplier invoice number."""
+    def cube_item(self, reference):
+        """SAP's open-item line for a supplier invoice number."""
         invoice = odata(SAP, ODATA + "/API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice",
                         **{"$filter": "SupplierInvoiceIDByInvcgParty eq '%s'" % reference})[0]
-        items = odata(SAP, ITEMS, **{"$filter": (
+        return odata(SAP, ITEMS, **{"$filter": (
             "AccountingDocument eq '%s' and AccountingDocumentItemType eq 'K'"
-            % invoice["AccountingDocument"])})
-        return items[0]["ClearingAccountingDocument"]
+            % invoice["AccountingDocument"])})[0]
+
+    def clearing(self, reference):
+        """The clearing document on that line; "" while it is open."""
+        return self.cube_item(reference)["ClearingAccountingDocument"]
 
     def pay_on_monday(self):
         """A run on Monday morning, before the cutoff: it settles that day."""
@@ -192,6 +197,10 @@ class ReconcilingTheStatement(MocksCase):
         run = self.payments.run(self.monday, "RUN1")
         self.advance(self.monday + datetime.timedelta(days=1))
         return run
+
+
+class ReconcilingTheStatement(StatementCase):
+    """#47: each camt.053 posted to SAP as a FINSTA01, clearing what it paid."""
 
     def test_1_a_clean_run_is_paid_matched_and_cleared(self):
         self.post_two()
@@ -250,6 +259,75 @@ class ReconcilingTheStatement(MocksCase):
         self.assertEqual(again.get("CLEARED"), [])
         self.assertEqual(again.get("REOPENED"), [])
         self.assertEqual({r: self.clearing(r) for r in before}, before)
+
+
+class AReturnedPayment(StatementCase):
+    """#48: a return on a later statement reopens the invoice it paid."""
+
+    def test_3_a_return_reopens_the_invoice_distinguishable_from_one_never_paid(self):
+        control(BANK, "PATCH", "/_mock/accounts/ACME", {
+            "behaviour": "return-later",
+            "parameters": {"end_to_end_id": "GLX-4711", "days": 3, "reason": "AC04"}})
+        self.post_three()
+        run = self.pay_on_monday()               # INITECH is rejected AC04: never paid
+        self.payments.reconcile(run)
+        self.assertEqual(self.by_reference(run)["GLX-4711"].status, "cleared")
+        # Three business days after Monday's settlement is Thursday; Friday
+        # morning, Thursday's statement is in.
+        self.advance(self.monday + datetime.timedelta(days=4))
+        self.payments.reconcile(run)
+        items = self.by_reference(run)
+        self.assertEqual(items["GLX-4711"].status, "returned")
+        self.assertTrue(items["GLX-4711"].reason.startswith("AC04"), items["GLX-4711"].reason)
+        self.assertEqual(items["ELS-0815"].status, "cleared")
+        self.assertEqual(items["INI-2026-17"].status, "rejected")
+        # In SAP: returned and never paid are both open, and only one was paid.
+        returned, never = self.cube_item("GLX-4711"), self.cube_item("INI-2026-17")
+        self.assertEqual((returned["ClearingAccountingDocument"], never["ClearingAccountingDocument"]),
+                         ("", ""))
+        self.assertEqual((returned["ClearingIsReversed"], never["ClearingIsReversed"]),
+                         (True, False))
+        self.assertNotEqual(self.cube_item("ELS-0815")["ClearingAccountingDocument"], "")
+        # Owed again, so the next run selects it with the one never paid.
+        self.assertEqual(sorted(i.reference for i in self.payments.select(self.bank_today())),
+                         ["GLX-4711", "INI-2026-17"])
+
+
+class WhenSomethingAnswersBadly(MocksCase):
+    """#73's notes: say what went wrong rather than stop or stay silent."""
+
+    def test_sap_refusing_a_statement_is_recorded_against_it(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        run = self.payments.run(self.today, "RUN1")
+        control(BANK, "POST", "/_mock/advance?to=%s"
+                % (self.today + datetime.timedelta(days=1)).isoformat())
+        control(SAP, "POST", "/_mock/faults", {"method": "POST", "match": "/sap/bc/idoc",
+                                               "status": 503, "count": 1})
+        self.payments.reconcile(run)
+        self.assertIn("503", run.statements[0]["error"])
+        self.assertEqual(run.problems, [run.statements[0]["error"]])
+
+    def test_a_bank_that_does_not_answer_is_a_problem_not_silence(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        nowhere = PaymentRun(SAP, SAP, ACME)           # SAP is no bank: 404 throughout
+        run = nowhere.run(self.today, "RUN1")
+        nowhere.reconcile(run)
+        self.assertEqual(len(run.problems), 3, run.problems)
+        self.assertIn("answered 404 to the payment file", run.problems[0])
+        self.assertIn("no status report was read", run.problems[1])
+        self.assertIn("no statement was read", run.problems[2])
+        self.assertEqual(run.items[0].status, "sent")
+
+    def test_two_payments_of_the_missing_amount_are_both_named(self):
+        run = Run(self.today, "RUN1", [
+            Item("1/2026/1", GLOBEX, "GLX-1", "238.00", status="accepted"),
+            Item("1/2026/2", ELSEWHERE, "ELS-1", "238.00", status="accepted"),
+            Item("1/2026/3", ELSEWHERE, "ELS-2", "50.00", status="accepted")])
+        self.payments.name_the_shortfall(run, "7", "2026-10-05", Decimal("238"))
+        self.assertEqual([i.status for i in run.items],
+                         ["unreconciled", "unreconciled", "accepted"])
+        self.assertIn("GLX-1, ELS-1", run.items[0].reason)
+        self.assertIn("cannot say which", run.items[0].reason)
 
 
 if __name__ == "__main__":
