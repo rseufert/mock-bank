@@ -29,10 +29,13 @@ FRIDAY = "2026-10-02"
 
 
 def by_position(case, text, label):
-    """What NACHA says of any file, read off the characters, not the declaration."""
-    lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines = lines[:-1]
+    """What NACHA says of any file, read off the characters, not the declaration.
+
+    A line is measured without its terminator, which NACHA leaves to the
+    platform: a file with CRLF line ends is as good as one with LF, and a
+    Windows checkout of the sample has them.
+    """
+    lines = text.splitlines()
     case.assertTrue(lines, label)
     for number, line in enumerate(lines, start=1):
         case.assertEqual(len(line), 94, "%s line %d" % (label, number))
@@ -62,6 +65,16 @@ class FilesWrittenElsewhere(MockServerCase):
                            r.original_receiving_dfi, r.amount) for r in read.returns],
                          [("26", "R01", "091400600000001", "09100001", 12354),
                           ("21", "R03", "091400600000003", "02100002", 4565)])
+
+    def test_crlf_line_ends_are_as_good_as_lf(self):
+        # A Windows checkout of the sample has CRLF, and so do many real files:
+        # a line is 94 characters without its terminator, and the reader agrees.
+        text, _ = self.read("nacha-return-WEB.ach")
+        crlf = text.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        by_position(self, crlf.decode("ascii"), "return-WEB.ach with CRLF")
+        read, findings = nacha.inspect(crlf, datetime.date(2026, 9, 28))
+        self.assertEqual([f for f in findings if f.level == "error"], [])
+        self.assertEqual(len(read.returns), 2)
 
     def test_a_return_of_a_debit_counts_as_a_debit(self):
         # moov's first batch returns a debit (26) and totals it as a debit; the
