@@ -61,13 +61,29 @@ FIELDS = {
     "behaviour": DEFAULT_BEHAVIOUR,
     "parameters": {},
     "closed": 0,
+    "format": "iso20022",
+    "account_number": "",
 }
+
+# What the bank can write for an account (#53): ISO 20022 throughout, or a
+# NACHA account, which is sent a plain acknowledgement where the other gets a
+# pain.002. Statements stay camt.053 until BAI2.
+FORMATS = ("iso20022", "nacha")
+
+# The bank's ABA routing number, which a NACHA file names it by. Fictional on
+# purpose: it passes the check digit, and no Federal Reserve district starts
+# with 99, so it cannot be mistaken for a real bank's.
+ROUTING = "999999992"
+
+# A US domestic account number: digits, at most the 17 a NACHA entry holds.
+ACCOUNT_NUMBER_PATTERN = re.compile(r"^\d{1,17}$")
 
 # The fields that are text. A JSON client can plausibly send a number, an
 # object or a list for any of them, and every one of those used to reach
 # sqlite3 and come back as a 500 with a traceback - which tells the caller
 # nothing about which field they got wrong.
-TEXT_FIELDS = ("name", "iban", "bic", "currency", "behaviour")
+TEXT_FIELDS = ("name", "iban", "bic", "currency", "behaviour", "format",
+               "account_number")
 
 # 4 letters of institution, 2 of country, 2 of location, and an optional
 # 3-character branch: ISO 9362. The mock checks the shape, not whether the
@@ -141,6 +157,15 @@ def check(fields: Dict[str, Any]) -> Dict[str, Any]:
             raise Invalid("currency %r is not a three-letter ISO 4217 code, "
                           "as in EUR or USD" % out["currency"])
         out["currency"] = value
+
+    if "format" in out and out["format"] not in FORMATS:
+        raise Invalid("format %r is not one the bank writes; it is one of: %s"
+                      % (out["format"], ", ".join(FORMATS)))
+
+    if out.get("account_number") and not ACCOUNT_NUMBER_PATTERN.match(out["account_number"]):
+        raise Invalid("account_number %r is not a domestic account number: up to "
+                      "17 digits, as a NACHA entry holds it, or \"\" for none"
+                      % out["account_number"])
 
     if "balance" in out:
         out["balance"] = _minor_units(out["balance"])
@@ -230,6 +255,50 @@ def by_iban(conn, value: str) -> Optional[Dict[str, Any]]:
     return row(found) if found else None
 
 
+def by_account_number(conn, value: str) -> Optional[Dict[str, Any]]:
+    """The account with this domestic account number, or None; never for ""."""
+    if not value:
+        return None
+    found = db.one(conn, "SELECT * FROM account WHERE account_number = ?", (value,))
+    return row(found) if found else None
+
+
+def _number_taken(number: str, other: Dict[str, Any]) -> str:
+    return ("account_number %s is already account %r; two accounts with one "
+            "number would leave a NACHA payment matching either" % (number, other["id"]))
+
+
+def resolve(conn, payment_file) -> None:
+    """Name the accounts the bank holds by IBAN, whatever the file named them by.
+
+    The one step between reading a file and deciding it (#53). `decide` looks
+    accounts up by IBAN, and a NACHA file has none: it names a creditor by
+    routing and account number, and the account paying by its company
+    identification. A `pain.001` can do the same, with `Othr/Id` and
+    `ClrSysMmbId`. So:
+
+    - a creditor whose bank is this one (`ROUTING`) and whose account number
+      is a held account's is that account;
+    - a debtor account whose identifier is a held account's number is that
+      account.
+
+    Anything else is left as it was, which already means what it should: a
+    creditor at another bank, or a debtor the bank does not hold (`AC02`).
+    Changes the model in place; nothing is stored here.
+    """
+    for batch in (payment_file.batches if payment_file else []):
+        if batch.debtor_account and by_iban(conn, batch.debtor_account) is None:
+            held = by_account_number(conn, batch.debtor_account)
+            if held is not None:
+                batch.debtor_account = held["iban"]
+        for payment in batch.payments:
+            if (payment.creditor_clearing_id == ROUTING and payment.creditor_account
+                    and by_iban(conn, payment.creditor_account) is None):
+                held = by_account_number(conn, payment.creditor_account)
+                if held is not None:
+                    payment.creditor_account = held["iban"]
+
+
 def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     """Register an account, refusing anything the mock could not then act on."""
     _check_id(identifier)
@@ -258,6 +327,9 @@ def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
                      % (", ".join(keys), ", ".join("?" * len(keys))), values)
     except sqlite3.IntegrityError:
         conn.rollback()
+        clash = by_account_number(conn, columns["account_number"])
+        if clash is not None:
+            raise Invalid(_number_taken(columns["account_number"], clash)) from None
         raise Invalid("iban %s is already account %r; two accounts with one "
                       "IBAN would leave an arriving payment matching either"
                       % (columns["iban"],
@@ -286,6 +358,9 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
                      list(changes.values()) + [identifier])
     except sqlite3.IntegrityError:
         conn.rollback()
+        clash = by_account_number(conn, changes.get("account_number", ""))
+        if clash is not None and clash["id"] != identifier:
+            raise Invalid(_number_taken(changes["account_number"], clash)) from None
         raise Invalid("iban %s belongs to another account already"
                       % changes.get("iban")) from None
     conn.commit()
@@ -569,11 +644,12 @@ def book(conn, decision):
         conn.execute(
             "INSERT INTO payment (file_id, pmt_inf_id, end_to_end_id, instruction_id,"
             " account_id, debtor_iban, amount, currency, creditor_name, creditor_iban,"
-            " creditor_bic, status, reason, reason_text, settlement_date)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " creditor_bic, creditor_clearing_id, status, reason, reason_text,"
+            " settlement_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (file_id, d.batch.pmt_inf_id, p.end_to_end_id, p.instruction_id,
              d.account["id"] if d.account else None, d.batch.debtor_account,
              p.amount, p.currency, p.creditor_name, p.creditor_account, p.creditor_bic,
+             getattr(p, "creditor_clearing_id", None),
              d.outcome, d.reason, d.reason_text,
              d.settlement_date.isoformat() if d.settlement_date else None))
     conn.commit()

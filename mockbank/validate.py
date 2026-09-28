@@ -38,10 +38,8 @@ executed on the next execution date, and the warning says so. "Today" is the
 bank's today, passed in by the server from the clock; alone, it is the host's date.
 
 A body whose first line is a NACHA file header (``101``) is read by
-``nacha.inspect`` instead, into the same model, when the caller takes NACHA:
-``POST /_mock/validate`` does, and ``POST /payments`` will with #53. Until
-then the payments door refuses one by name rather than as XML that is not
-well formed.
+``nacha.inspect`` instead, into the same model, at every door: ``POST
+/_mock/validate``, ``POST /payments`` and the drop directory (#53).
 
 ``validate`` never raises: whatever the body, the answer is a list of
 findings.
@@ -64,16 +62,15 @@ XMLDSIG = "http://www.w3.org/2000/09/xmldsig#"
 XMLENC = "http://www.w3.org/2001/04/xmlenc#"
 
 
-def validate(data, content_type=None, today=None, nacha_too=False):
+def validate(data, content_type=None, today=None):
     """Every finding about ``data``; never raises."""
-    return inspect(data, content_type, today, nacha_too)[1]
+    return inspect(data, content_type, today)[1]
 
 
-def inspect(data, content_type=None, today=None, nacha_too=False):
-    """``(PaymentFile or None, [Finding])``; never raises. ``nacha_too`` reads
-    a NACHA file rather than refusing it."""
+def inspect(data, content_type=None, today=None):
+    """``(PaymentFile or None, [Finding])``; never raises."""
     try:
-        return _inspect(data, content_type, today or datetime.date.today(), nacha_too)
+        return _inspect(data, content_type, today or datetime.date.today())
     except Exception as exc:  # the promise is findings, never a traceback
         return None, [Finding("error", FILE, schema.STRUCTURAL,
                               "the mock could not read this file (%s: %s); that is a "
@@ -93,7 +90,7 @@ def _refusal(text):
     return Finding("error", FILE, schema.STRUCTURAL, text)
 
 
-def _inspect(data, content_type, today, nacha_too=False):
+def _inspect(data, content_type, today):
     if isinstance(data, str):
         data = data.encode("utf-8")
     kind = (content_type or "").split(";")[0].strip().lower()
@@ -105,11 +102,7 @@ def _inspect(data, content_type, today, nacha_too=False):
         return None, [_refusal("the body is empty; send a pain.001 (%s)"
                                % ", ".join(messages.READABLE))]
     if nacha.recognise(data):
-        if nacha_too:
-            return nacha.inspect(data, today)
-        return None, [_refusal("the file is a NACHA file; so far the mock reads NACHA at "
-                               "POST /_mock/validate only, and takes a pain.001 here (%s)"
-                               % ", ".join(messages.READABLE))]
+        return nacha.inspect(data, today)
     if data.lstrip().startswith(b"-----BEGIN PGP"):
         return None, [_refusal("the file is PGP-armoured; the mock accepts plain XML only")]
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
