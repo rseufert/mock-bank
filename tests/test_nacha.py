@@ -114,6 +114,59 @@ class FilesWrittenElsewhere(NachaCase):
         self.assertEqual(len(reading["file"]["batches"][0]["payments"]), 2)
 
 
+class WhichSideACodeCountsOn(unittest.TestCase):
+    """`side` used to put a blank or one-character code on the credit side.
+
+    `code[1:2] in "1234"` is a substring test, and `"" in "1234"` is True, so a
+    code with no second digit came back a credit. It landed on the side the
+    mock's own writer computes the same way, which is the side where a wrong
+    answer cannot be caught by the two disagreeing (#102).
+    """
+
+    def test_a_blank_code_is_not_a_credit(self):
+        self.assertEqual(nacha.side(""), "debit")
+
+    def test_a_one_character_code_is_not_a_credit(self):
+        # It has no second digit at all: `"2"[1:2]` is `""`.
+        self.assertEqual(nacha.side("2"), "debit")
+
+    def test_the_real_codes_still_land_where_they_did(self):
+        for code, expected in (("22", "credit"), ("32", "credit"),
+                               ("42", "credit"), ("52", "credit"),
+                               ("21", "credit"), ("31", "credit"),
+                               ("27", "debit"), ("37", "debit"),
+                               ("26", "debit"), ("36", "debit"),
+                               ("46", "debit"), ("56", "debit")):
+            with self.subTest(code=code):
+                self.assertEqual(nacha.side(code), expected)
+
+    def test_the_credit_digits_are_a_tuple_not_a_string(self):
+        # The fix is the type: `in` on a string is a substring test, so any
+        # future edit back to a string reintroduces the bug for a blank.
+        self.assertIsInstance(nacha.CREDIT_DIGITS, tuple)
+
+
+class EveryReturnedDebitIsRead(unittest.TestCase):
+
+    def test_the_four_returned_debits_are_all_there(self):
+        # 26, 36, 46 and 56 are the automated returns of debits to checking,
+        # savings, the general ledger and a loan, as 21, 31, 41 and 51 are of
+        # the credits. Three of the four were there, which was an asymmetry
+        # rather than a decision (#102).
+        for code in ("26", "36", "46", "56"):
+            with self.subTest(code=code):
+                self.assertIn(code, nacha.RETURNS)
+
+    def test_every_credit_has_its_return_and_every_return_a_side(self):
+        for credit, returned in nacha.RETURN_OF.items():
+            with self.subTest(credit=credit):
+                self.assertIn(returned, nacha.RETURNS)
+                self.assertEqual(nacha.side(credit), "credit")
+        for code in nacha.RETURNS:
+            with self.subTest(code=code):
+                self.assertIn(nacha.side(code), ("credit", "debit"))
+
+
 class BrokenFiles(NachaCase):
     # sample -> (code, path) of the one finding its name promises
     PROMISED = {
@@ -126,6 +179,19 @@ class BrokenFiles(NachaCase):
             ("AM10", "/line 8 (batch control)/total credit entry dollar amount (columns 33-44)"),
         "nacha_broken_file_total.ach":
             ("AM10", "/line 9 (file control)/total credit entry dollar amount (columns 44-55)"),
+        # The debit pair. Before #102 the debit totals were never compared, so
+        # deleting either check left every NACHA test green; these are the
+        # samples that make that a failure. The clean file is all credits, so
+        # its debit totals are zero and claiming one cent of debits is a total
+        # no entry accounts for - which needs no debit entry and no outside
+        # file. A first attempt derived them from moov-io/ach's return-WEB.ach,
+        # which has a real returned debit and is dated 2017, so each sample
+        # carried a second finding about a past effective date and could not
+        # promise exactly one.
+        "nacha_broken_batch_debit_total.ach":
+            ("AM10", "/line 8 (batch control)/total debit entry dollar amount (columns 21-32)"),
+        "nacha_broken_file_debit_total.ach":
+            ("AM10", "/line 9 (file control)/total debit entry dollar amount (columns 32-43)"),
         "nacha_broken_block_count.ach":
             ("FF01", "/line 9 (file control)/block count (columns 8-13)"),
     }

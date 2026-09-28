@@ -28,23 +28,50 @@ EXTERNAL = os.path.join(HERE, "samples", "external")
 FRIDAY = "2026-10-02"
 
 
-def by_position(case, text, label):
-    """What NACHA says of any file, read off the characters, not the declaration.
+# One rule per function (#99's shape, folded in per #102). Each is applied on its
+# own by a named test below, so a shape failure says which rule broke without
+# anyone reading a label; and all five together by `by_position`, so the loop over
+# every behaviour keeps exactly the coverage it had.
+#
+# A line is measured without its terminator, which NACHA leaves to the platform:
+# a file with CRLF line ends is as good as one with LF, and a Windows checkout of
+# the sample has them.
 
-    A line is measured without its terminator, which NACHA leaves to the
-    platform: a file with CRLF line ends is as good as one with LF, and a
-    Windows checkout of the sample has them.
-    """
-    lines = text.splitlines()
-    case.assertTrue(lines, label)
+def every_line_is_94(case, lines, label=""):
     for number, line in enumerate(lines, start=1):
         case.assertEqual(len(line), 94, "%s line %d" % (label, number))
+
+
+def column_1_is_a_record_type(case, lines, label=""):
+    for number, line in enumerate(lines, start=1):
         case.assertIn(line[0], "156789", "%s line %d" % (label, number))
-    case.assertEqual(len(lines) % 10, 0, "%s is not a whole number of blocks" % label)
+
+
+def whole_blocks_of_ten(case, lines, label=""):
+    case.assertEqual(len(lines) % 10, 0,
+                     "%s is not a whole number of blocks" % label)
+
+
+def it_opens_with_a_file_header(case, lines, label=""):
     case.assertEqual((lines[0][0], lines[0][:3]), ("1", "101"), label)
-    # After the file control, only lines of nines, to fill the last block.
-    control = max(i for i, line in enumerate(lines) if line[0] == "9" and line != "9" * 94)
+
+
+def only_nines_after_the_file_control(case, lines, label=""):
+    control = max(i for i, line in enumerate(lines)
+                  if line[0] == "9" and line != "9" * 94)
     case.assertTrue(all(line == "9" * 94 for line in lines[control + 1:]), label)
+
+
+RULES = (every_line_is_94, column_1_is_a_record_type, whole_blocks_of_ten,
+         it_opens_with_a_file_header, only_nines_after_the_file_control)
+
+
+def by_position(case, text, label):
+    """What NACHA says of any file, read off the characters, not the declaration."""
+    lines = text.splitlines()
+    case.assertTrue(lines, label)
+    for rule in RULES:
+        rule(case, lines, label)
 
 
 class FilesWrittenElsewhere(MockServerCase):
@@ -83,6 +110,55 @@ class FilesWrittenElsewhere(MockServerCase):
         self.assertEqual((nacha.side("26"), nacha.side("21")), ("debit", "credit"))
         text, (read, findings) = self.read("nacha-return-WEB.ach")
         self.assertNotIn("AM10", [f.code for f in findings])
+
+
+class EachShapeRuleOnItsOwn(MockServerCase):
+    """#99's shape, one rule per named test (#102 item 5).
+
+    `by_position` applies all five to every behaviour's file, which is the
+    coverage; these apply one each to a representative file, which is the
+    diagnosis. A bundled assertion tells you a file is malformed and leaves you
+    to read the label and count characters to work out how.
+    """
+
+    config_kwargs = {"clock": BANK_START}
+    FRIDAY = "2026-10-02"
+
+    def a_written_return_file(self):
+        self.post("/_mock/reset")
+        resp = self.request("PATCH", "/_mock/accounts/ACME",
+                            body={"format": "nacha", "currency": "USD",
+                                  "behaviour": "return-later",
+                                  "parameters": {"days": 1}})
+        self.assertEqual(resp.status, 200, resp.body)
+        with open(TWIN, "rb") as handle:
+            self.post("/payments", body=handle.read())
+        self.assertEqual(self.post("/_mock/advance?to=" + self.FRIDAY).status, 200)
+        written = [m for m in self.get("/_mock/mailbox").json()
+                   if m["type"] == nacha.RETURN]
+        self.assertEqual(len(written), 1, "no return file to check the shape of")
+        return written[0]["body"].splitlines()
+
+    def test_every_line_is_94_characters(self):
+        every_line_is_94(self, self.a_written_return_file())
+
+    def test_column_1_is_always_a_record_type(self):
+        column_1_is_a_record_type(self, self.a_written_return_file())
+
+    def test_the_file_is_a_whole_number_of_ten_line_blocks(self):
+        whole_blocks_of_ten(self, self.a_written_return_file())
+
+    def test_it_opens_with_a_file_header(self):
+        it_opens_with_a_file_header(self, self.a_written_return_file())
+
+    def test_only_lines_of_nines_follow_the_file_control(self):
+        only_nines_after_the_file_control(self, self.a_written_return_file())
+
+    def test_every_rule_is_one_of_these_tests(self):
+        # So a rule added to RULES without a test of its own is a failure rather
+        # than coverage that quietly only runs inside the behaviour loop.
+        named = {name for name in dir(self) if name.startswith("test_")}
+        self.assertEqual(len(RULES), len(named) - 1, sorted(named))
 
 
 class EveryFileTheMockWrites(MockServerCase):
