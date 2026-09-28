@@ -55,14 +55,23 @@ did not write. `tests/test_bai2_external.py` reads it.
 | File | Source | Path at that commit | What it exercises |
 | --- | --- | --- | --- |
 | `bai2-sample1.txt` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `d3e11b628d3d59fd6911836b9ca328cb8b7621f2` | `test/testdata/sample1.txt` | Two account sections in one group, each with an `88` continuation carrying credit and debit summaries, eleven and six `16` details, and every amount on a `V` (value-dated) funds type. It settles what the writer's record counts and control totals mean, and it is the file that showed the reader cannot read real BAI2 at all |
+| `bai2-sample2.txt` | same | `test/testdata/sample2.txt` | Four groups, five accounts, and the file that settled how continuations work (#114). `88` follows an `03`, a `16` and another `88`; a summary group **splits across the boundary**, its type code ending one record and its amount beginning the next; funds types `S`, `V`, `1` and blank appear, and `D` with its (days, amount) pairs; balances are written `+4350000`, `2830000` and `-500000`, so signed and bare amounts sit in one file |
 
 moov-io/bai2 is **Apache License 2.0**. Its `LICENSE` at that commit is
 byte-for-byte the copy already here as `LICENSE-Apache-2.0.txt`, so no second
 copy is kept. It has **no `NOTICE` file** - `NOTICE-moov-ach.txt` is
 moov-io/ach's and does not cover it. Copyright The Moov Authors.
 
-SHA-256 of the file as fetched, so a re-pin is a visible change:
-`0150331e6118e9fc6a1a10871f739b2d317c5cca5159c007622cffbbb64fe00c`.
+SHA-256 of each file as fetched, so a re-pin is a visible change:
+
+| File | SHA-256 |
+| --- | --- |
+| `bai2-sample1.txt` | `0150331e6118e9fc6a1a10871f739b2d317c5cca5159c007622cffbbb64fe00c` |
+| `bai2-sample2.txt` | `34ccf04a37e44353e5aac16981201239ae90102c12806aaa739a2e13ae3aee6b` |
+
+`.gitattributes` declares this directory `-text` so a Windows checkout does not
+rewrite these line endings; without it `bai2-sample1.txt` hashes to
+`0258766c...` there and the digest above is wrong on one platform only.
 
 ### What it found
 
@@ -94,13 +103,33 @@ Every number below was computed from the file, not read off it.
   it said a reader reconciling the total against the entries would have to know
   to halve it. A BAI2 reader does know that, because this is what BAI2 does.
 
-**Found here, not asked about:** the reader cannot read this file, in three
-ways. `88` is not declared; a `16` on a `V` funds type carries eight fields
-where the declaration allows six, because `V` is followed by a date and a time;
-and a summary group on a `V` funds type is six fields rather than four, which
-makes `_amounts_in` raise a bare `ValueError` instead of a refusal. See #114.
-`tests/test_bai2_external.py` pins all three, so they cannot be fixed silently
-or left to rot.
+**Found here, not asked about:** the reader could not read this file at all, in
+three ways - an undeclared `88`, a `V` funds type two fields wider than declared,
+and a summary group whose sixth field made `_amounts_in` raise a bare
+`ValueError` rather than refuse. #114 fixed all three, and `sample2.txt` is what
+made the fix evidence rather than a guess:
+
+- a **continuation continues the field stream** of the record before it, so it is
+  folded in before anything is parsed. It follows any record, it chains, and a
+  group may split across it.
+- a **funds type carries its own width**: one field for blank, `Z` or a digit,
+  three for `V` (date and time), four for `S` (three availability amounts), and
+  2 + 2n for `D` (a count, then that many pairs).
+- a **record count counts physical records** including continuations, while a
+  **control total sums the logical record**. Both are right in every file this
+  mock writes and only a file with an `88` in it can tell them apart.
+
+The check worth having is not that either file reads. It is that
+`trailers_agree` finds nothing in either: every control total and every record
+count recomputed from the records it covers. A wrong fold or a wrong funds-type
+width changes one of those numbers.
+
+**Still not read**, each needing a sample this directory does not hold yet: a
+`16` whose text field contains commas and runs to the end of the record
+(`sample4`), several records packed onto one line separated by `/` (`sample3`),
+and records with no `/` at all, where the newline terminates (`sample4`,
+`sample5`). `WhatIsStillNotRead` in `tests/test_bai2_external.py` pins those
+three.
 
 ## Invalid: the XSD rejects them, and so must the mock
 

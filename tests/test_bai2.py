@@ -385,13 +385,37 @@ class TheReaderCountsFields(unittest.TestCase):
             bai2.read("\n".join(lines) + "\n")
         self.assertIn("account trailer", str(refused.exception))
 
-    def test_the_summary_must_repeat_in_fours(self):
+    def test_a_summary_group_that_stops_part_way_is_refused(self):
+        # This asserted the summary "repeats in fours" until #114. It does not:
+        # a group is a type code, an amount, an item count and a funds type, and
+        # the funds type carries its own width, so the stride is four *or more*.
+        # What is still true is that a group cannot stop in the middle, which is
+        # what dropping a field from the last one does.
         lines = self.clean().splitlines()
         account = [i for i, l in enumerate(lines) if l.startswith("03,")][0]
         lines[account] = lines[account].rstrip("/")[:-2] + "/"      # drop one field
         with self.assertRaises(bai2.Unreadable) as refused:
             bai2.read("\n".join(lines) + "\n")
-        self.assertIn("fours", str(refused.exception))
+        self.assertIn("part-way through a summary group", str(refused.exception))
+
+    def test_a_group_whose_funds_type_runs_off_the_end_is_refused(self):
+        # The refusal that replaces the arithmetic one: a distributed funds type
+        # says how many (days, amount) pairs follow, and a record that does not
+        # carry them is refused rather than read short.
+        lines = self.clean().splitlines()
+        account = [i for i, l in enumerate(lines) if l.startswith("03,")][0]
+        lines[account] = "03,NL41MOCK0000000001,EUR,010,1000,,D,9/"
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read("\n".join(lines) + "\n")
+        self.assertIn("runs past the end", str(refused.exception))
+
+    def test_a_distributed_funds_type_without_its_count_is_refused(self):
+        lines = self.clean().splitlines()
+        account = [i for i, l in enumerate(lines) if l.startswith("03,")][0]
+        lines[account] = "03,NL41MOCK0000000001,EUR,010,1000,,D,x,1/"
+        with self.assertRaises(bai2.Unreadable) as refused:
+            bai2.read("\n".join(lines) + "\n")
+        self.assertIn("how many", str(refused.exception))
 
     def test_a_clean_file_still_reads(self):
         self.assertEqual(len(bai2.read(self.clean())), 7)

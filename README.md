@@ -280,16 +280,27 @@ reason in ISO 20022's words (`R01` is `AM04`, `R02` is `AC04`, `R03` is
 `AC01`). A BAI2 statement carries no reason at all; the `R` code is in the
 return file.
 
-**What the BAI2 statement does not yet settle.** It is held to a file from
+**What the BAI2 statement does not yet settle.** It is held to files from
 outside the project, which fixed who the `02` names as originator, what a record
-count covers and that balances and control totals state their sign. It could not
-settle the transaction type codes on the `16` records: `495` for a payment and
+count covers, and that a balance or a control total may state its sign - though
+most real files do not, so signing is this mock's choice rather than the format's
+requirement. They could not settle the transaction type codes on the `16`
+records: `495` for a payment and
 `165` for one coming back are placeholders, and a reader should take a
 movement's direction from the code's range, 100 to 399 a credit and 400 to 699 a
-debit, as `examples/payment_run.py` does. The mock writes BAI2 and does not
-claim to read it: `mockbank.bai2.read` reads what the mock wrote and refuses a
-real bank's file
-([#114](https://github.com/rseufert/mock-bank/issues/114)).
+debit, as `examples/payment_run.py` does.
+
+`mockbank.bai2.read` reads a real bank's file as well as the mock's own
+([#114](https://github.com/rseufert/mock-bank/issues/114)). A `88` continuation
+is folded into the record it continues, because it continues that record's
+comma-separated field stream rather than carrying fields of its own; a funds type
+occupies one field, or three when it is value-dated, or four when availability is
+distributed over three periods, or 2 + 2n when it is distributed over named days;
+and an amount may carry an explicit sign or not. Two files from moov-io/bai2 are
+held to that, and the check worth naming is that every control total and record
+count in both, recomputed from the records it covers, comes out as stated. Three
+things it still does not read: a text field containing commas, several records
+packed onto one line, and a record with no `/` where the newline terminates.
 
 In the mailbox an acknowledgement's type is `nacha.ack`, a return file's
 `nacha.return` and a BAI2 statement's `bai2.statement`; `GET
