@@ -70,13 +70,13 @@ class TheDeclaration(unittest.TestCase):
         # The writer is built from the declaration, so a caller that forgets a
         # field is a bug here rather than a short line somebody else's parser
         # rejects days later.
-        with self.assertRaises(bai2.Unreadable) as refused:
+        with self.assertRaises(bai2.Unwritable) as refused:
             bai2._record("49", 100)              # a 49 takes a total and a count
         self.assertIn("account trailer", str(refused.exception))
         self.assertIn("49", str(refused.exception))
 
     def test_an_undeclared_record_code_is_refused(self):
-        with self.assertRaises(bai2.Unreadable):
+        with self.assertRaises(bai2.Unwritable):
             bai2._record("88", 1, 2)
 
 
@@ -148,7 +148,7 @@ class TheTypeCodes(unittest.TestCase):
         # a cosmetic slip, so an unexplained credit stops here.
         arriving = payment(9, "CUSTOMER-1", 50000, credit=True)
         arriving["return_reason"] = ""
-        with self.assertRaises(bai2.Unreadable) as refused:
+        with self.assertRaises(bai2.Unwritable) as refused:
             bai2.write_statement(ACCOUNT, DAY, 7, 0, 50000, [arriving],
                                  created_at=AT)
         self.assertIn("CUSTOMER-1", str(refused.exception))
@@ -347,7 +347,7 @@ class OnlyABalanceMayBeNegative(unittest.TestCase):
     def test_a_negative_movement_is_refused_rather_than_written(self):
         # It would contradict its own type code and lower the control total.
         row = dict(THREE[0], amount=-1000)
-        with self.assertRaises(bai2.Unreadable) as refused:
+        with self.assertRaises(bai2.Unwritable) as refused:
             bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, [row],
                                  created_at=AT)
         self.assertIn("direction", str(refused.exception))
@@ -367,6 +367,63 @@ class TheFileHeaderDate(unittest.TestCase):
         header = [l for l in text.splitlines() if l.startswith("01,")][0]
         self.assertEqual(header.split(",")[3], "261006")        # AT, not DAY
         self.assertNotEqual(header.split(",")[3], "261005")
+
+
+class ControlCharactersAndWhichErrorIsWhich(unittest.TestCase):
+    """Two things inherited from #95's review, fixed here because #95 had merged.
+
+    `_safe` listed the line breaks it could think of, which left tab and `\x01`
+    to pass through: harmless to the field boundaries and still junk in a file a
+    bank parses. A list of the dangerous ones is a list somebody has to keep
+    complete; "no control characters" is not.
+
+    And the writer raised `Unreadable`, which reads as though something had been
+    parsed. The writer's refusals are `Unwritable` now, both under `Wrong` so a
+    caller that does not care can still catch one thing.
+    """
+
+    def with_name(self, name):
+        return bai2.write_statement(dict(ACCOUNT, name=name), DAY, 7, 2000, 1000,
+                                    THREE[:1], created_at=AT)
+
+    def test_every_c0_control_and_del_is_replaced(self):
+        for code in list(range(0x20)) + [0x7f]:
+            with self.subTest(code=hex(code)):
+                text = self.with_name("ACME" + chr(code) + "Inc.")
+                # Per record, not per file: the file is newline-separated, so
+                # asserting the character is absent from the whole text is a
+                # test that can never pass for 0x0a. What matters is that no
+                # record carries it.
+                for line in text.splitlines():
+                    self.assertNotIn(chr(code), line)
+                self.assertEqual(len(bai2.read(text)), 7)
+                self.assertEqual(bai2.trailers_agree(text), [])
+
+    def test_a_tab_no_longer_survives(self):
+        # The one the earlier list missed that a human would actually paste.
+        self.assertIn("ACME Inc.", self.with_name("ACME\tInc."))
+
+    def test_printable_punctuation_is_left_alone(self):
+        # Only what would break a field or a parser: a name is not sanitised
+        # beyond that, because a statement should say who was paid.
+        text = self.with_name("Acção & Cia. (S.A.) – #1")
+        self.assertIn("Acção & Cia. (S.A.) – #1", text)
+
+    def test_the_writer_and_the_reader_raise_different_errors(self):
+        self.assertTrue(issubclass(bai2.Unwritable, bai2.Wrong))
+        self.assertTrue(issubclass(bai2.Unreadable, bai2.Wrong))
+        self.assertFalse(issubclass(bai2.Unwritable, bai2.Unreadable))
+        with self.assertRaises(bai2.Unwritable):
+            bai2._record("49", 100)
+        with self.assertRaises(bai2.Unreadable):
+            bai2.read("77,nothing/\n")
+
+    def test_either_can_be_caught_as_one_thing(self):
+        for call in (lambda: bai2._record("49", 100),
+                     lambda: bai2.read("77,nothing/\n")):
+            with self.subTest():
+                with self.assertRaises(bai2.Wrong):
+                    call()
 
 
 class ReadingBackWhatIsNotBai2(unittest.TestCase):
