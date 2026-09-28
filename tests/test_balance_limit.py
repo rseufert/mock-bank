@@ -61,7 +61,7 @@ class RaisedByAReturnStillToCome(PipelineCase):
         too_much = self.request("PATCH", "/_mock/accounts/ACME",
                                 body={"balance": MAX - 50000 + 1})
         self.assertEqual(too_much.status, 400, too_much.body)
-        self.assertIn("still to be returned", too_much.json()["error"])
+        self.assertIn("returns due back", too_much.json()["error"])
         self.patch_account("ACME", balance=MAX - 50000)
         resp = self.post("/_mock/advance?days=7")
         self.assertEqual(resp.status, 200, resp.body)
@@ -95,3 +95,40 @@ class LoweredByADebit(PipelineCase):
         self.assertEqual(self.outcomes(first), [("L1", "accepted", None)])
         second = self.send(pain001("OD-4", ACME, [("L2", 100, UMBRELLA)])).json()
         self.assertEqual(self.outcomes(second), [("L2", "rejected", "AM02")])
+
+
+class RaisedByACredit(PipelineCase):
+    """Money arriving (#91) is the other thing booked on top of a balance."""
+
+    def credit(self, amount, value_date=None):
+        body = {"account": "ACME", "amount": amount}
+        if value_date:
+            body["value_date"] = value_date.isoformat()
+        return self.post("/_mock/credits", body=body)
+
+    def test_a_credit_counts_a_return_still_to_come(self):
+        # The issue's second route: a return booked after a maximum credit.
+        self.patch_account("ACME", balance=100000, behaviour="return-later",
+                           parameters={"days": 3})
+        self.send(pain001("RL-2", ACME, [("R1", 50000, UMBRELLA)]))
+        self.post("/_mock/advance?days=0")
+        room = MAX - self.balance("ACME") - 50000
+        refused = self.credit(room + 1)
+        self.assertEqual(refused.status, 400, refused.body)
+        self.assertIn("18 digits", refused.json()["error"])
+        self.assertEqual(self.credit(room).status, 201)
+        resp = self.post("/_mock/advance?days=7")
+        self.assertEqual(resp.status, 200, resp.body)
+        self.assertEqual(self.balance("ACME"), MAX)
+
+    def test_a_patch_counts_a_credit_waiting_to_book(self):
+        later = TODAY + datetime.timedelta(days=1)
+        self.assertEqual(self.credit(70000, value_date=later).status, 201)
+        too_much = self.request("PATCH", "/_mock/accounts/ACME",
+                                body={"balance": MAX - 70000 + 1})
+        self.assertEqual(too_much.status, 400, too_much.body)
+        self.assertIn("credits waiting", too_much.json()["error"])
+        self.patch_account("ACME", balance=MAX - 70000)
+        resp = self.post("/_mock/advance?days=2")
+        self.assertEqual(resp.status, 200, resp.body)
+        self.assertEqual(self.balance("ACME"), MAX)

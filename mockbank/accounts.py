@@ -190,6 +190,19 @@ def check(fields: Dict[str, Any]) -> Dict[str, Any]:
 MAX_BALANCE = 10 ** 18 - 1
 
 
+def still_to_arrive(conn, account_id: str) -> int:
+    """What will be credited to an account without anyone asking again, in minor
+    units: payments due back under ``return-later``, and money arriving (#91)
+    that has not booked yet. A balance is only safe if it has room for these."""
+    returns = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                           " WHERE account_id = ? AND return_due IS NOT NULL"
+                           " AND returned_at IS NULL", (account_id,))["total"]
+    credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM credit"
+                           " WHERE account_id = ? AND booked_at IS NULL",
+                     (account_id,))["total"]
+    return int(returns) + int(credits)
+
+
 def _minor_units(value: Any) -> int:
     """A balance, as the whole number of minor units it has to be.
 
@@ -362,15 +375,13 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
         return existing
     changes = check(fields)
     if "balance" in changes:
-        # Returns still to come are credited back on top of whatever is set
-        # now, so the balance they will make has to fit as well (#106).
-        coming = int(db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total"
-                                  " FROM payment WHERE account_id = ? AND"
-                                  " return_due IS NOT NULL AND returned_at IS NULL",
-                            (identifier,))["total"])
+        # Returns and credits still to come are booked on top of whatever is
+        # set now, so the balance they will make has to fit as well (#106).
+        coming = still_to_arrive(conn, identifier)
         if changes["balance"] + coming > MAX_BALANCE:
-            raise Invalid("balance %d and the %d still to be returned to the account "
-                          "would be more than the 18 digits a statement can write"
+            raise Invalid("balance %d and the %d still to arrive in the account - "
+                          "returns due back and credits waiting to book - would be "
+                          "more than the 18 digits a statement can write"
                           % (changes["balance"], coming))
     # Checked against the format it will have, so that switching an account to
     # NACHA with an ISO 20022 return reason already set is refused too (#54).
