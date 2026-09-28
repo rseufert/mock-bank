@@ -448,5 +448,195 @@ class TwoPullRequestsEachAddingAnEntry(ToolCase):
                     self.git("branch", "-q", "-D", "branch-" + name)
 
 
+class OneIssueInTwoPullRequests(ToolCase):
+    """#116: the case the scheme had no name for, and the mistake it allowed.
+
+    Rule 11 splits a large issue into steps, so an issue's second pull request
+    needs a second entry - and until #116 the only names available were the ones
+    its first pull request had already used. #57 shipped in two parts; part a had
+    `57.added.md` and `57.fixed.md`; part b needed both kinds and overwrote them,
+    deleting twenty lines describing the feature.
+
+    It passed the check, which is the part worth a test. Rule 5 asks whether a
+    *filename* is new, and no filename had changed.
+    """
+
+    PART_A = ("**A NACHA account's statement is BAI2.** The choice is per\n"
+              "account, so one payment file produces both.\n"
+              "The statement counter is shared between the formats.\n")
+    PART_B = "**The 02 names the bank as originator.** Part b, written later.\n"
+
+    def test_a_step_may_carry_its_own_entry(self):
+        self.fragment("57.added.md", self.PART_A)
+        base = self.base_commit()
+        self.fragment("57.added.part-b.md", self.PART_B)
+        self.write("mockbank/thing.py", "# changed\n")
+        # Committed, not merely written: `_changed_in_package` is a
+        # three-dot `git diff base...HEAD`, so an uncommitted change to
+        # `mockbank/` is invisible to it and the rule this exercises would
+        # not run at all.
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base)
+        self.assertEqual(code, 0, out)
+        self.assertIn("nothing lost", out)
+
+    def test_overwriting_the_first_step_is_caught(self):
+        # The actual mistake, end to end. Before #116 this exited 0.
+        self.fragment("57.added.md", self.PART_A)
+        base = self.base_commit()
+        self.fragment("57.added.md", self.PART_B)
+        self.write("mockbank/thing.py", "# changed\n")
+        # Committed, not merely written: `_changed_in_package` is a
+        # three-dot `git diff base...HEAD`, so an uncommitted change to
+        # `mockbank/` is invisible to it and the rule this exercises would
+        # not run at all.
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base)
+        self.assertEqual(code, 1, out)
+        self.assertIn("changelog.d/57.added.md", out)
+        self.assertIn("drops 3 line(s)", out)
+        # The advice has to name the way out, or it is a wall.
+        self.assertIn("<issue>.<kind>.<step>.md", out)
+        # And the first line that went, so the author can see whose text it was.
+        self.assertIn("A NACHA account's statement is BAI2", out)
+
+    def test_appending_to_the_first_step_is_allowed(self):
+        # Nothing is lost by it, so it is not reported - and it satisfies the
+        # rule that a package change brings an entry, which a name comparison
+        # could not see because the directory listing does not change.
+        self.fragment("57.added.md", self.PART_A)
+        base = self.base_commit()
+        self.fragment("57.added.md", self.PART_A + "\n" + self.PART_B)
+        self.write("mockbank/thing.py", "# changed\n")
+        # Committed, not merely written: `_changed_in_package` is a
+        # three-dot `git diff base...HEAD`, so an uncommitted change to
+        # `mockbank/` is invisible to it and the rule this exercises would
+        # not run at all.
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base)
+        self.assertEqual(code, 0, out)
+
+    def test_a_changed_body_alone_counts_as_an_entry(self):
+        # The other half of rule 5. No new filename, and the advice it used to
+        # print named a file that already existed.
+        self.fragment("57.added.md", self.PART_A)
+        base = self.base_commit()
+        self.fragment("57.added.md", self.PART_A + "One more line.\n")
+        self.write("mockbank/thing.py", "# changed\n")
+        # Committed, not merely written: `_changed_in_package` is a
+        # three-dot `git diff base...HEAD`, so an uncommitted change to
+        # `mockbank/` is invisible to it and the rule this exercises would
+        # not run at all.
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("changed without an entry", out)
+
+    def rewrite_over_part_a(self):
+        """A pull request that replaces part a's entry, as #57 part b did."""
+        self.fragment("57.added.md", self.PART_A)
+        base = self.base_commit()
+        self.fragment("57.added.md", self.PART_B)
+        self.write("mockbank/thing.py", "# changed\n")
+        self.commit_all("change the package")
+        return base
+
+    def test_the_maintainer_may_allow_a_rewrite(self):
+        # Both halves, or this passes on a tool that never reports a rewrite at
+        # all - which is the tool this change replaces.
+        base = self.rewrite_over_part_a()
+        refused, out = self.run_tool("--base", base)
+        self.assertEqual(refused, 1, out)
+        # *Why* it refused, not only that it did. On the tool this replaces the
+        # exit code was also 1 here - for the other reason, that no fragment
+        # filename was new - so an exit code alone let this pass for free.
+        self.assertIn("already had", out)
+        self.assertIn("drops", out)
+        allowed, out = self.run_tool("--base", base,
+                                     "--labels", "changelog rewrite")
+        self.assertEqual(allowed, 0, out)
+
+    def test_no_changelog_alone_does_not_allow_a_rewrite(self):
+        """The two labels are separate, and this is why.
+
+        `no changelog` says a change needs no entry - a comment, a rename, a pure
+        refactor. A refactor is also the pull request where a stray edit to
+        somebody else's waiting entry is least expected, so the label that covers
+        refactors must not be the one that waves a rewrite through. Sharing one
+        label was my first draft and the senior was right to refuse it.
+        """
+        base = self.rewrite_over_part_a()
+        code, out = self.run_tool("--base", base, "--labels", "no changelog")
+        self.assertEqual(code, 1, out)
+        self.assertIn("57.added.md", out)
+        self.assertIn("drops", out)
+        # And it says which label does apply, rather than only that this one does
+        # not - a refusal that names no way forward is a wall.
+        self.assertIn("changelog rewrite", out)
+
+    def test_the_rewrite_label_does_not_lift_the_entry_rule(self):
+        # The other direction: `changelog rewrite` is not a licence to touch the
+        # package with no entry at all.
+        base = self.base_commit()
+        self.write("mockbank/thing.py", "# changed\n")
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base, "--labels", "changelog rewrite")
+        self.assertEqual(code, 1, out)
+        self.assertIn("changed without an entry", out)
+
+    def test_reordering_and_re_indenting_are_not_losses(self):
+        # A loss is counted as a multiset of stripped lines, so moving a
+        # paragraph or changing its indentation is not one. Without this the
+        # check would report every reflow as an overwrite.
+        self.fragment("57.added.md", self.PART_A)
+        base = self.base_commit()
+        lines = self.PART_A.strip().splitlines()
+        self.fragment("57.added.md",
+                      "\n".join(["  " + lines[2]] + lines[:2]) + "\n")
+        self.write("mockbank/thing.py", "# changed\n")
+        # Committed, not merely written: `_changed_in_package` is a
+        # three-dot `git diff base...HEAD`, so an uncommitted change to
+        # `mockbank/` is invisible to it and the rule this exercises would
+        # not run at all.
+        self.commit_all("change the package")
+        code, out = self.run_tool("--base", base)
+        self.assertEqual(code, 0, out)
+
+    def test_a_step_is_refused_if_it_is_not_a_step(self):
+        self.fragment("57.added.Part B.md", "**Spaces and capitals.**\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1, out)
+        self.assertIn("<issue>.<kind>.<step>.md", out)
+
+    def test_a_steps_kind_is_still_checked(self):
+        self.fragment("57.improved.part-b.md", "**Not a kind.**\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1, out)
+        self.assertIn("`improved`", out)
+
+    def test_an_issues_steps_assemble_in_the_order_they_were_written(self):
+        # Two bullets under one heading, in order, and #9 still before #10.
+        #
+        # The step named `a` is the case that needs the sort key rather than the
+        # directory listing: `57.added.a.md` sorts *before* `57.added.md` as a
+        # filename, because `a` < `m`, while the entry with no step is the issue's
+        # first part and belongs first. Without `a` here, dropping the step from
+        # the key changed nothing and this test passed anyway - which it did until
+        # a mutation said so.
+        self.fragment("57.added.part-b.md", "**Part c.** Written third.\n")
+        self.fragment("57.added.a.md", "**Part b.** Written second.\n")
+        self.fragment("57.added.md", "**Part a.** Written first.\n")
+        self.fragment("9.added.md", "**Nine.** Before ten.\n")
+        self.fragment("10.added.md", "**Ten.** After nine.\n")
+        code, out = self.run_tool("--assemble", "9.9.9", "--date", "2026-10-01")
+        self.assertEqual(code, 0, out)
+        body = self.read("CHANGELOG.md")
+        order = [body.index(x) for x in
+                 ("**Nine.**", "**Ten.**", "**Part a.**", "**Part b.**",
+                  "**Part c.**")]
+        self.assertEqual(order, sorted(order), body)
+        self.assertEqual(os.listdir(os.path.join(self.tree, "changelog.d")), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

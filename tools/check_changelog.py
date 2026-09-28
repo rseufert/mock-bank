@@ -31,15 +31,36 @@ What is checked:
    because both sides were right on their own. So it is asked directly, and the
    answer names the fragment file the entry belongs in.
 4. **Fragments are well formed.** The name carries an issue number and one of
-   the kinds Keep a Changelog defines; the body is not empty. A fragment named
-   wrongly is refused by name rather than silently left out of the release,
-   which is the failure that matters: it looks like an entry, it sits in the
-   right directory, and it would vanish at assembly.
+   the kinds Keep a Changelog defines, and optionally a step - `42.added.md` or
+   `42.added.part-b.md` - so an issue that ships in more than one pull request
+   has somewhere to write its second entry. The body is not empty. A fragment
+   named wrongly is refused by name rather than silently left out of the
+   release, which is the failure that matters: it looks like an entry, it sits
+   in the right directory, and it would vanish at assembly.
 5. **A change to the package brings a fragment.** A pull request that touches
-   `mockbank/` adds at least one file under `changelog.d/`, or cuts a release.
-   A change that genuinely needs none - a comment, a rename, a pure refactor -
-   carries the `no changelog` label, which lifts this rule and leaves the
-   others standing.
+   `mockbank/` adds at least one entry under `changelog.d/`, or cuts a release.
+   An entry counts as added when its file is new **or its body changed**, so
+   appending to an existing fragment satisfies this too.
+6. **An entry already waiting for a release does not lose text.** A fragment
+   `--base` already had, whose body no longer carries lines it used to, is
+   reported with what went. Appending to one, reordering it or re-indenting it
+   is not a loss and is not reported.
+
+   (5) and (6) are two halves of one mistake, and #116 exists because (5)
+   without (6) let it through. #57 shipped in two parts; part a had taken
+   `57.added.md` and `57.fixed.md`; part b needed both kinds, found both names
+   in use, and overwrote them. That deleted twenty lines describing the feature
+   and **passed this check**, because (5) asked whether a filename was new and
+   the filenames had not changed. The step in (4) is what part b should have
+   used, and (6) is what would have said so.
+
+Each has its own label, and only the maintainer applies either. `no changelog`
+lifts (5), for a change that genuinely needs no entry - a comment, a rename, a
+pure refactor. `changelog rewrite` lifts (6), for a deliberate rewrite of an
+entry already waiting for a release. They are deliberately not one label: a
+rewrite *is* a changelog change, and a refactor is the pull request where a
+stray fragment edit would be least expected, so the label that covers refactors
+is the last one that should also wave a rewrite through.
 
 (2) and (5) need something to compare against, so they run only when `--base`
 names a revision this checkout has; CI passes the pull request's base. Run it
@@ -52,6 +73,7 @@ with no arguments and you get (1), (3) and (4).
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime
 import os
 import re
@@ -63,6 +85,14 @@ CHANGELOG = "CHANGELOG.md"
 PYPROJECT = "pyproject.toml"
 PACKAGE = "mockbank/"
 ESCAPE_HATCH = "no changelog"
+
+# A second label, for the other rule. `no changelog` says a change needs no
+# entry - a comment, a rename, a pure refactor - and a rewrite of an entry that
+# is already waiting for a release is not that: it is a changelog change. Sharing
+# one label would also have put the escape on exactly the pull requests where a
+# stray fragment edit is least expected, since a refactor is what carries
+# `no changelog`. So the loss rule has its own.
+REWRITE_HATCH = "changelog rewrite"
 FRAGMENTS = "changelog.d"
 
 # What `## [Unreleased]` holds, exactly. Kept here rather than inferred, so the
@@ -81,7 +111,20 @@ writes them into this section at release time. Nothing is added here by hand."""
 # has not needed yet, because adding one later is free but a contributor who
 # reached for `security` and was refused would have written it as `fixed`.
 KINDS = ("added", "changed", "deprecated", "removed", "fixed", "security")
-FRAGMENT_NAME = re.compile(r"^(\d+)\.([a-z]+)\.md$")
+
+# `<issue>.<kind>.md`, and optionally `<issue>.<kind>.<step>.md`.
+#
+# The step exists because an issue large enough for rule 11 to split is an issue
+# whose second pull request needs somewhere to write. #57 shipped in two parts;
+# part a had taken `57.added.md` and `57.fixed.md`, part b needed both kinds, and
+# the only names available were the ones already in use. Overwriting them deleted
+# twenty lines of part a's entry, and nothing objected - rule 5 asks whether a
+# *filename* is new, so a replaced body reads to it as no entry at all.
+#
+# So `57.added.part-b.md` is issue 57, kind `added`, step `part-b`. A step is
+# lowercase letters, digits and hyphens: enough to say which step, not enough to
+# hide a kind or an issue number in.
+FRAGMENT_NAME = re.compile(r"^(\d+)\.([a-z]+)(?:\.([a-z0-9][a-z0-9-]*))?\.md$")
 
 HEADING = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$")
 LINK = re.compile(r"^\[([^\]]+)\]:\s*(\S+)\s*$")
@@ -108,8 +151,11 @@ def fragment_dir() -> str:
 def fragments():
     """Every fragment as (issue, kind, body, name), ordered as a release lists it.
 
-    Grouped by kind in the order `KINDS` gives and then by issue number as a
-    number, so #9 comes before #10 rather than after it.
+    Grouped by kind in the order `KINDS` gives, then by issue number as a number
+    so #9 comes before #10 rather than after it, then by step so an issue's parts
+    read in the order they were written. A fragment with no step comes before its
+    issue's steps, which is what an issue split after the fact looks like: the
+    first part took the bare name.
     """
     out = []
     directory = fragment_dir()
@@ -124,9 +170,15 @@ def fragments():
         with open(os.path.join(directory, name), encoding="utf-8") as handle:
             body = handle.read().strip()
         out.append((int(found.group(1)), found.group(2), body, name))
-    return sorted(out, key=lambda row: (KINDS.index(row[1])
-                                        if row[1] in KINDS else len(KINDS),
-                                        row[0]))
+    return sorted(out, key=_order)
+
+
+def _order(row):
+    """(kind, issue, step) - the order a release section lists entries in."""
+    issue, kind, _, name = row
+    found = FRAGMENT_NAME.match(name)
+    step = found.group(3) or ""
+    return (KINDS.index(kind) if kind in KINDS else len(KINDS), issue, step)
 
 
 def check_fragments():
@@ -142,9 +194,12 @@ def check_fragments():
         found = FRAGMENT_NAME.match(name)
         if not found:
             problems.append(
-                "%s is not a fragment name; it is `<issue>.<kind>.md`, where kind "
-                "is one of %s - for example `%s/42.added.md`"
-                % (path, ", ".join(KINDS), FRAGMENTS))
+                "%s is not a fragment name; it is `<issue>.<kind>.md`, or "
+                "`<issue>.<kind>.<step>.md` when an issue ships in more than one "
+                "pull request, where kind is one of %s and a step is lowercase "
+                "letters, digits and hyphens - for example `%s/42.added.md` or "
+                "`%s/42.added.part-b.md`"
+                % (path, ", ".join(KINDS), FRAGMENTS, FRAGMENTS))
             continue
         if found.group(2) not in KINDS:
             problems.append(
@@ -347,9 +402,38 @@ def check_against_base(text: str, before: str, base: str, labels=()):
                 "%s/%s was waiting for a release and is gone; only --assemble "
                 "removes a fragment" % (FRAGMENTS, name))
 
+    # An entry that main already had and whose text has been replaced. Rule 5
+    # asks whether a *filename* is new, so a replaced body reads to it as no
+    # entry at all - which is how #57 part b passed this check while deleting
+    # twenty lines of part a's entry. Appending is allowed and is not reported,
+    # because nothing is lost by it; what is reported is text that went.
+    before, after = _bodies_at(base), _bodies_now()
+    if REWRITE_HATCH not in labels:
+        for name in sorted(set(before) & set(after)):
+            lost = _lines_lost(before[name], after[name])
+            if not lost:
+                continue
+            problems.append(
+                "%s/%s is an entry %s already had, and this drops %d line(s) of "
+                "it, beginning:\n      %s\n    If this is a second entry for the "
+                "same issue - the issue shipped in steps - give it its own file, "
+                "`<issue>.<kind>.<step>.md`, and leave that one alone. If you do "
+                "mean to rewrite an entry that is already waiting for a release, "
+                "that is somebody else's paragraph and the `%s` label is what "
+                "allows it - not `%s`, which says a change needs no entry at all."
+                % (FRAGMENTS, name, _named(base), len(lost), _short(lost[0]),
+                   REWRITE_HATCH, ESCAPE_HATCH))
+
     package = _changed_in_package(base)
     if package and ESCAPE_HATCH not in labels:
-        added = _fragments_now() - _fragments_at(base)
+        # A fragment counts as added when its *name* is new or its *body*
+        # changed, so appending a step's entry to an existing file satisfies this
+        # even though the directory listing is unchanged. Before #116 it did not,
+        # and the advice it printed - "add a file named `<issue>.<kind>.md`" -
+        # named a file that already existed.
+        added = (_fragments_now() - _fragments_at(base)
+                 | {name for name in set(before) & set(after)
+                    if before[name] != after[name]})
         if not added and not cut:
             problems.append(
                 "%s changed without an entry in %s/:\n%s\n    Add a file named "
@@ -367,6 +451,24 @@ def _fragments_now():
     return {name for _, _, _, name in fragments()}
 
 
+def _bodies_now():
+    return {name: body for _, _, body, name in fragments()}
+
+
+def _bodies_at(rev: str):
+    """{fragment name: body} at `rev`, for the two checks that compare content.
+
+    Names alone cannot see a fragment whose text was replaced, which is the whole
+    of what #57 part b did wrong and what rule 5 could not notice.
+    """
+    out = {}
+    for name in _fragments_at(rev):
+        body = _read("%s/%s" % (FRAGMENTS, name), rev).strip()
+        if body:
+            out[name] = body
+    return out
+
+
 def _fragments_at(rev: str):
     """The fragment file names present at `rev`."""
     try:
@@ -380,6 +482,38 @@ def _fragments_at(rev: str):
 
 def _short(entry: str, width: int = 70) -> str:
     return entry if len(entry) <= width else entry[:width - 1] + "…"
+
+
+def _lines_lost(before: str, after: str):
+    """The non-blank lines of `before` that `after` no longer has.
+
+    A multiset of stripped lines rather than a positional diff, so reordering an
+    entry or re-indenting it is not a loss and appending to it is not either.
+    Reflowing a paragraph *is* a loss by this measure, and that is the right
+    answer for text somebody else wrote: from the outside it cannot be told apart
+    from replacing it, and the label is there for when it is deliberate.
+    """
+    gone = collections.Counter(_lines(before))
+    gone.subtract(collections.Counter(_lines(after)))
+    lost = []
+    for line in _lines(before):
+        if gone[line] > 0:
+            gone[line] -= 1
+            lost.append(line)
+    return lost
+
+
+def _lines(text: str):
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _named(rev: str) -> str:
+    """`rev` as something to read in a sentence.
+
+    A branch name stays as it is; a 40-character SHA becomes seven characters,
+    because the message it lands in is prose and the full hash reads as noise.
+    """
+    return "`%s`" % (rev[:7] if re.match(r"^[0-9a-f]{40}$", rev) else rev)
 
 
 def assemble(version: str, date: str) -> int:

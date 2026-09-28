@@ -210,6 +210,26 @@ If a change touches more than one of these, it is usually two changes.
   happened, in a sibling project. Two pull requests now add two different files
   and there is nothing to resolve.
 
+  **An issue that ships in steps takes a step in the name**:
+  `changelog.d/<issue>.<kind>.<step>.md`, so `57.added.part-b.md` is a second
+  `added` entry for issue 57. Rule 11 of the working agreement splits a large
+  issue, and until #116 the second pull request had nowhere to write: both names
+  for that issue and kind were already in use. #57 shipped in two parts and part
+  b overwrote part a's two fragments, deleting twenty lines describing the
+  feature — and the check passed, because it asked whether a *filename* was new.
+  It now also refuses a fragment that loses text somebody else's pull request had
+  already written. Adding to one is fine; replacing it is what gets reported, and
+  so is re-wrapping it, because from outside those two cannot be told apart.
+
+  **Two labels, and they are not interchangeable.** `no changelog` says a change
+  needs no entry at all — a comment, a rename, a pure refactor. `changelog
+  rewrite` says this pull request rewrites or removes an entry that is waiting
+  for a release, on purpose. Only the maintainer applies either. They are
+  separate because a rewrite *is* a changelog change, and because a refactor is
+  the pull request where a stray edit to somebody else's waiting entry would be
+  least expected — so the label that covers refactors is the last one that should
+  also wave a rewrite through.
+
   `tools/check_changelog.py` fails a pull request that touches `mockbank/` and
   adds no fragment, and refuses a fragment with an unknown kind, no issue number
   or an empty body by name, rather than letting it look like an entry and vanish
