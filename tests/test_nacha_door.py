@@ -138,6 +138,26 @@ class Resolution(DoorCase):
         self.assertEqual([r for _, _, r, _ in self.decisions(answer)], ["AC02"])
 
 
+class WhatThePaymentRecords(DoorCase):
+    """GET /_mock/payments/<id> for an entry named by number (#82's review)."""
+
+    def test_a_held_creditor_is_its_iban_and_another_banks_is_its_number(self):
+        self.nacha_acme()
+        self.post("/payments", body=sample(TWIN))
+        held = self.get("/_mock/payments/INV-2026-0101").json()
+        other = self.get("/_mock/payments/INV-2026-0104").json()
+        self.assertEqual((held["creditor_iban"], held["creditor_clearing_id"]),
+                         ("NL14MOCK0000000002", "999999992"))
+        # Not held: kept as the file named it, and its bank by routing number.
+        self.assertEqual((other["creditor_iban"], other["creditor_clearing_id"]),
+                         ("0000000005", "999999992"))
+
+    def test_a_pain001_by_iban_and_bic_has_no_clearing_id(self):
+        self.post("/payments", body=sample("pain001_four_payments.xml"))
+        self.assertIsNone(self.get("/_mock/payments/INV-2026-0101").json()
+                          ["creditor_clearing_id"])
+
+
 class TheAccountNumber(DoorCase):
 
     def test_the_seed_gives_each_account_its_number_and_format(self):

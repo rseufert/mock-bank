@@ -644,11 +644,12 @@ def book(conn, decision):
         conn.execute(
             "INSERT INTO payment (file_id, pmt_inf_id, end_to_end_id, instruction_id,"
             " account_id, debtor_iban, amount, currency, creditor_name, creditor_iban,"
-            " creditor_bic, status, reason, reason_text, settlement_date)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " creditor_bic, creditor_clearing_id, status, reason, reason_text,"
+            " settlement_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (file_id, d.batch.pmt_inf_id, p.end_to_end_id, p.instruction_id,
              d.account["id"] if d.account else None, d.batch.debtor_account,
              p.amount, p.currency, p.creditor_name, p.creditor_account, p.creditor_bic,
+             getattr(p, "creditor_clearing_id", None),
              d.outcome, d.reason, d.reason_text,
              d.settlement_date.isoformat() if d.settlement_date else None))
     conn.commit()

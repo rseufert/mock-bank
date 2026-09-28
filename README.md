@@ -217,12 +217,17 @@ bank finds the ones it holds before deciding:
 - **Each account has an `account_number`**, its domestic account number, up to
   17 digits and unique. The seed gives the four accounts the account part of
   their IBANs, `0000000001` to `0000000004`; an account you create or `PATCH`
-  has one only if you give it one.
+  has one only if you give it one. **A `--db` file from before 0.3 has no
+  account numbers at all** after the upgrade, seeded accounts included: set them
+  by `PATCH` before sending a NACHA file that names them.
 - A creditor at `999999992` whose account number is a held account's **is that
   account**; so is a debtor whose company identification is one. Anything else
   is an account at another bank, or a debtor the bank does not hold (`AC02`).
   A `pain.001` naming accounts by `Othr/Id` and `ClrSysMmbId` is found the same
-  way.
+  way. `GET /_mock/payments/<EndToEndId>` shows a held creditor by its IBAN
+  whatever the file named it by, one at another bank by what the file gave (a
+  NACHA entry's account number), and the creditor's bank as
+  `creditor_clearing_id`.
 
 A NACHA file is in dollars, so an account that sends one is set up for it:
 

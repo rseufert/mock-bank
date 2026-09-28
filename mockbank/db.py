@@ -120,8 +120,16 @@ SCHEMA = [
         amount           INTEGER,
         currency         TEXT,
         creditor_name    TEXT,
+        -- What the file named the creditor's account by: its IBAN, or for an
+        -- account the bank does not hold, whatever else the file gave - a
+        -- NACHA entry's DFI account number, say. A held account is always
+        -- its IBAN here, whatever the file named it by (#53).
         creditor_iban    TEXT,
         creditor_bic     TEXT,
+        -- The creditor's bank by clearing member id: a NACHA entry's
+        -- receiving DFI, or a pain.001's ClrSysMmbId. What a NACHA return's
+        -- addenda names as the original receiving bank (#54).
+        creditor_clearing_id TEXT,
         -- accepted or rejected, and for rejected the ISO 20022 reason code
         status           TEXT NOT NULL,
         reason           TEXT,
