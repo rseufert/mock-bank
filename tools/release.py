@@ -37,6 +37,7 @@ Standard library, `git` and `gh`. Nothing else.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -47,6 +48,12 @@ CHANGELOG = "CHANGELOG.md"
 PYPROJECT = "pyproject.toml"
 FRAGMENTS = "changelog.d"
 BRANCH = "main"
+CI_WORKFLOW = ".github/workflows/ci.yml"
+
+# What a CI run may conclude and still be a pass. `skipped` and `neutral` are
+# here because a job can legitimately skip; anything else - failure, cancelled,
+# timed_out, action_required, stale - is not a release.
+CONCLUDED_WELL = ("success", "skipped", "neutral")
 
 HEADING = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$", re.M)
 
@@ -93,7 +100,13 @@ def check_tree_is_releasable(version: str):
             "pull request has merged."
             % ("detached" if branch == "HEAD" else "`%s`" % branch, BRANCH, BRANCH))
 
-    git("fetch", "--quiet", "origin", BRANCH)
+    fetched = git("fetch", "--quiet", "origin", BRANCH)
+    if fetched.returncode != 0:
+        raise Refused(
+            "could not fetch origin/%s: %s\n    Without it, `%s is level with "
+            "origin/%s` would be answered from a stale copy."
+            % (BRANCH, fetched.stderr.decode("utf-8").strip() or "no reason given",
+               BRANCH, BRANCH))
     local = out("rev-parse", "HEAD")
     try:
         remote = out("rev-parse", "origin/%s" % BRANCH)
@@ -141,48 +154,79 @@ def check_tree_is_releasable(version: str):
     return local, dated[0]
 
 
-def check_ci_is_green(commit: str):
-    """Refuse a tag on a commit CI has not passed. Raises Refused."""
+def ci_verdict(answer, workflow: str = CI_WORKFLOW):
+    """(ok, reason) for one commit, from the Actions workflow-runs answer.
+
+    Pure, and separate from the fetching, because deciding *is* the logic here
+    and the first version of it refused every release this repository could
+    ever cut. It asked the combined-status API, which reports `pending` with
+    zero statuses on a repository whose checks are all Actions - not "" or
+    null, which is what the fallback to check runs was waiting for. So the
+    fallback never fired and every commit read as pending. `main` at 2d1d812
+    answers `{"state": "pending", "total_count": 0}` with thirteen successful
+    check runs; that payload is a fixture beside this, and the test named for
+    it is the one I should have had first.
+
+    Two further things this has to get right, both of which the earlier version
+    did not:
+
+    - **Only the CI workflow counts.** The scheduled `Release check` workflow
+      attaches to `main`'s head commit too, and between the release merge and
+      this script running it is *correctly* failing - there is no tag yet.
+      Reading every check on the commit therefore made that correct failure
+      refuse the release it was waiting for.
+    - **A run in progress is not a pass.** An unfinished run has a null
+      conclusion, and filtering conclusions rather than checking `status`
+      first let twelve finished and one running read as twelve passed.
+    """
+    runs = [run for run in (answer or {}).get("workflow_runs", [])
+            if run.get("path") == workflow]
+    if not runs:
+        return False, (
+            "GitHub reports no %s run on this commit. A release is tagged on a "
+            "commit CI has passed, and this one has not been tested." % workflow)
+
+    # The newest run is the answer: a re-run keeps its id and updates in place,
+    # but a `workflow_dispatch` makes a new one beside the old.
+    newest = max(runs, key=lambda run: run.get("id") or 0)
+    status = newest.get("status")
+    if status != "completed":
+        return False, (
+            "the %s run on this commit is `%s`, not `completed`. A run still "
+            "going is not a pass; wait for it and try again."
+            % (workflow, status))
+    conclusion = newest.get("conclusion")
+    if conclusion not in CONCLUDED_WELL:
+        return False, (
+            "the %s run on this commit concluded `%s`. Tagging it would publish "
+            "something the tests did not pass." % (workflow, conclusion))
+    return True, ("the %s run on this commit passed (attempt %s)"
+                  % (workflow, newest.get("run_attempt") or 1))
+
+
+def ci_answer(commit: str):
+    """Ask GitHub for the workflow runs on this commit. Raises Refused."""
     result = subprocess.run(
-        ["gh", "api", "repos/{owner}/{repo}/commits/%s/status" % commit,
-         "--jq", ".state"],
+        ["gh", "api", "repos/{owner}/{repo}/actions/runs"
+                      "?head_sha=%s&per_page=100" % commit],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         raise Refused(
-            "could not ask GitHub whether CI is green on %s: %s\n    Releasing "
-            "without knowing is not better than not releasing."
+            "could not ask GitHub which workflows ran on %s: %s\n    Releasing "
+            "without knowing whether CI passed is not better than not releasing."
             % (commit[:8], result.stderr.decode("utf-8").strip()))
-    state = result.stdout.decode("utf-8").strip()
+    try:
+        return json.loads(result.stdout.decode("utf-8"))
+    except ValueError:
+        raise Refused("GitHub's answer about the workflows on %s was not JSON."
+                      % commit[:8])
 
-    # A repository whose checks are all Actions reports "" here, because the
-    # combined-status API only knows about commit statuses. Ask the check runs.
-    if state in ("", "null"):
-        runs = subprocess.run(
-            ["gh", "api", "repos/{owner}/{repo}/commits/%s/check-runs" % commit,
-             "--jq", "[.check_runs[] | .conclusion] | @csv"],
-            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if runs.returncode != 0:
-            raise Refused("could not ask GitHub for the check runs on %s: %s"
-                          % (commit[:8], runs.stderr.decode("utf-8").strip()))
-        listed = [c.strip('"') for c in
-                  runs.stdout.decode("utf-8").strip().split(",") if c.strip('"')]
-        if not listed:
-            raise Refused(
-                "GitHub reports no checks at all on %s. A release is tagged on a "
-                "commit CI has passed, and this one has not been tested."
-                % commit[:8])
-        bad = sorted({c for c in listed if c != "success"})
-        if bad:
-            raise Refused(
-                "CI on %s is not green: %s. Tagging it would publish something "
-                "the tests did not pass." % (commit[:8], ", ".join(bad)))
-        return "%d check(s) passed" % len(listed)
 
-    if state != "success":
-        raise Refused(
-            "CI on %s is `%s`, not `success`. Tagging it would publish "
-            "something the tests did not pass." % (commit[:8], state))
-    return "commit status is success"
+def check_ci_is_green(commit: str) -> str:
+    ok, reason = ci_verdict(ci_answer(commit))
+    if not ok:
+        raise Refused(reason)
+    return reason
 
 
 def run(step: str, command, dry_run: bool):
@@ -196,14 +240,41 @@ def run(step: str, command, dry_run: bool):
                       % " ".join(command))
 
 
-def already_done(tag: str):
-    """(tagged, released) for this tag, so a finished release is a no-op."""
-    tagged = git("rev-parse", "-q", "--verify",
-                 "refs/tags/%s" % tag).returncode == 0
-    released = subprocess.run(["gh", "release", "view", tag], cwd=ROOT,
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL).returncode == 0
-    return tagged, released
+def remote_tag_commit(tag: str) -> str:
+    """The commit the *remote's* tag points at, or "" when it has no such tag.
+
+    Asked of the remote, not of this clone, because the two disagree in exactly
+    the case that matters. If `git push origin <tag>` fails - a network blip, a
+    protected ref - the local tag exists and the remote's does not. Reading the
+    local one, the next run skipped the push as already done and went straight
+    to `gh release create`, which creates its own tag on the remote from
+    whatever the default branch points at. That is how a release ends up tagged
+    at the wrong commit, and it is silent.
+
+    `--verify-tag` on the create is the second half of the same guard: it makes
+    `gh` refuse to invent a tag rather than doing it helpfully.
+    """
+    result = git("ls-remote", "--tags", "origin",
+                 "refs/tags/%s" % tag, "refs/tags/%s^{}" % tag)
+    if result.returncode != 0:
+        raise Refused("could not ask origin about the tag %s: %s"
+                      % (tag, result.stderr.decode("utf-8").strip()))
+    peeled, direct = "", ""
+    for line in result.stdout.decode("utf-8").splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.endswith("^{}"):
+            peeled = sha.strip()
+        elif ref.strip():
+            direct = sha.strip()
+    # An annotated tag lists the tag object and then the commit it peels to; the
+    # commit is the one worth comparing.
+    return peeled or direct
+
+
+def release_published(tag: str) -> bool:
+    return subprocess.run(["gh", "release", "view", tag], cwd=ROOT,
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
 
 
 def main() -> int:
@@ -224,13 +295,32 @@ def main() -> int:
         # waiting for the *next* version are not a reason to re-examine a
         # released one, and refusing there would make re-running this on an old
         # version report the wrong problem.
-        tagged, released = already_done(tag)
-        if tagged and released:
-            print("%s is already tagged and its GitHub Release is published; "
-                  "there is nothing to do." % tag)
+        remote_tag = remote_tag_commit(tag)
+        released = release_published(tag)
+        if remote_tag and released:
+            print("%s is already tagged on origin and its GitHub Release is "
+                  "published; there is nothing to do." % tag)
             return 0
 
         commit, date = check_tree_is_releasable(version)
+
+        # A tag already on the remote must name the commit being released. If it
+        # names another, something has gone wrong that this script must not paper
+        # over by publishing a Release against it.
+        if remote_tag and remote_tag != commit:
+            raise Refused(
+                "origin already has the tag %s and it points at %s, not the %s "
+                "being released. Work out which is right before going further; "
+                "moving a published tag breaks every checkout that has it."
+                % (tag, remote_tag[:8], commit[:8]))
+
+        local_tag = git("rev-parse", "-q", "--verify", "refs/tags/%s^{commit}" % tag)
+        local = local_tag.stdout.decode("utf-8").strip() if local_tag.returncode == 0 else ""
+        if local and local != commit:
+            raise Refused(
+                "this clone has the tag %s pointing at %s, not the %s being "
+                "released. Delete it (`git tag -d %s`) if it is a leftover."
+                % (tag, local[:8], commit[:8], tag))
         print("releasing %s (%s), dated %s in %s%s"
               % (version, commit[:8], date, CHANGELOG,
                  " - dry run, nothing will change" if args.dry_run else ""))
@@ -239,19 +329,26 @@ def main() -> int:
               % (BRANCH, BRANCH, PYPROJECT, version, version))
         print("  checked: %s" % check_ci_is_green(commit))
 
-        if tagged:
-            print("  %s already exists; not writing it again." % tag)
+        if local == commit:
+            print("  the tag %s is already here and points at %s." % (tag, commit[:8]))
         else:
             run("create the annotated tag", ["git", "tag", "-a", tag, "-m",
                                              "mock-bank %s" % version],
                 args.dry_run)
-            run("push the tag", ["git", "push", "origin", tag], args.dry_run)
+        if remote_tag:
+            print("  origin already has %s at the same commit; not pushing again." % tag)
+        else:
+            # Pushed even when the tag was already local: the previous run may
+            # have created it and failed here, which is the case that used to
+            # end with `gh` inventing a tag of its own.
+            run("push the tag to origin", ["git", "push", "origin", tag],
+                args.dry_run)
         if released:
             print("  the GitHub Release for %s already exists; leaving it." % tag)
         else:
             run("publish the GitHub Release, which uploads to PyPI",
-                ["gh", "release", "create", tag, "--title", version,
-                 "--generate-notes"], args.dry_run)
+                ["gh", "release", "create", tag, "--verify-tag",
+                 "--title", version, "--generate-notes"], args.dry_run)
     except Refused as refusal:
         print("not releasing %s:\n\n  - %s" % (version, refusal))
         return 1

@@ -398,9 +398,23 @@ def assemble(version: str, date: str) -> int:
     # with a different date look like a fresh release with no fragments, which
     # reported "nothing to release" and exited 1 - so a release script calling
     # this twice could not tell "already done" from "something is wrong".
-    written = next((date for version_seen, date, _ in sections(text)
-                    if version_seen == version), None)
-    already = written is not None
+    # `seen_date`, not `date`: the parameter is in scope here and naming the
+    # generator's variable after it reads as a rebinding even though a genexp
+    # has its own scope.
+    present = [seen_date for seen, seen_date, _ in sections(text) if seen == version]
+    already = bool(present)
+    written = present[0] if already else None
+
+    # A heading for this version with no date is not an assembled release and is
+    # not a blank slate either. Treating it as absent wrote a second [VERSION]
+    # section above the first, which the structure check then failed on with a
+    # message about link references - two steps away from the actual problem.
+    if already and not written:
+        print("%s already has a `## [%s]` heading with no date, so this would "
+              "write a second section for the same version. Give that one a date "
+              "(`## [%s] - YYYY-MM-DD`) or remove it, then assemble."
+              % (CHANGELOG, version, version))
+        return 1
 
     if not waiting:
         if already:

@@ -16,6 +16,7 @@ before it asks GitHub anything, which is deliberate in the tool: the cheap
 questions come first. `already_done` does shell out to `gh`, which in a
 repository with no remote fails immediately and is read as "not released".
 """
+import json
 import os
 import shutil
 import subprocess
@@ -25,6 +26,9 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+from release import ci_verdict                                     # noqa: E402
 
 CHANGELOG = """# Changelog
 
@@ -101,6 +105,128 @@ class ReleaseToolCase(unittest.TestCase):
     def release(self, *args):
         return self.run_tool("release.py", *args)
 
+
+class TheCIVerdict(unittest.TestCase):
+    """`ci_verdict` on recorded answers, which is where the real bug lived.
+
+    The first version of this asked the combined-status API and fell back to
+    check runs when it answered "" or null. It never answers either on a
+    repository whose checks are all GitHub Actions: it answers `pending` with
+    zero statuses. So the fallback never fired and every commit read as pending,
+    which would have refused every release this project could ever cut - and the
+    tests all passed, because every one of them refused earlier for another
+    reason and never reached the function.
+
+    `tests/fixtures/commit-status-pending-zero.json` is that real answer, kept
+    so the shape cannot be misremembered again.
+    """
+
+    def fixture(self, name):
+        with open(os.path.join(HERE, "fixtures", name), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def run_of(self, **fields):
+        run = {"id": 1, "path": ".github/workflows/ci.yml",
+               "status": "completed", "conclusion": "success", "run_attempt": 1}
+        run.update(fields)
+        return {"workflow_runs": [run]}
+
+    def test_the_recorded_green_answer_passes(self):
+        ok, why = ci_verdict(self.fixture("actions-runs-green.json"))
+        self.assertTrue(ok, why)
+
+    def test_the_recorded_combined_status_is_pending_with_no_statuses(self):
+        # The payload that broke it. Not an input to ci_verdict any more - which
+        # is the fix - so what this pins is the fact that made the old code
+        # wrong, so nobody reintroduces a fallback waiting for "" or null.
+        status = self.fixture("commit-status-pending-zero.json")
+        self.assertEqual(status["state"], "pending")
+        self.assertEqual(status["total_count"], 0)
+        self.assertEqual(status["statuses"], [])
+
+    def test_a_run_still_going_is_not_a_pass(self):
+        ok, why = ci_verdict(self.run_of(status="in_progress", conclusion=None))
+        self.assertFalse(ok)
+        self.assertIn("in_progress", why)
+
+    def test_a_queued_run_is_refused_for_being_queued(self):
+        # Asserting the reason, not just the refusal: a null conclusion would be
+        # refused anyway, so without this the status check could be deleted and
+        # this test would still pass.
+        ok, why = ci_verdict(self.run_of(status="queued", conclusion=None))
+        self.assertFalse(ok)
+        self.assertIn("queued", why)
+
+    def test_a_failure_is_refused(self):
+        ok, why = ci_verdict(self.run_of(conclusion="failure"))
+        self.assertFalse(ok)
+        self.assertIn("failure", why)
+
+    def test_a_cancelled_run_is_refused(self):
+        ok, _ = ci_verdict(self.run_of(conclusion="cancelled"))
+        self.assertFalse(ok)
+
+    def test_skipped_and_neutral_are_passes(self):
+        for conclusion in ("skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                ok, why = ci_verdict(self.run_of(conclusion=conclusion))
+                self.assertTrue(ok, why)
+
+    def test_no_run_at_all_is_refused(self):
+        ok, why = ci_verdict({"workflow_runs": []})
+        self.assertFalse(ok)
+        self.assertIn("no", why)
+
+    def test_an_empty_answer_is_refused_rather_than_crashing(self):
+        for answer in ({}, None):
+            with self.subTest(answer=answer):
+                ok, _ = ci_verdict(answer)
+                self.assertFalse(ok)
+
+    def test_another_workflow_failing_does_not_refuse_the_release(self):
+        # The scheduled Release check attaches to main's head too, and between
+        # the release merge and this script it is *correctly* failing: there is
+        # no tag yet. Reading every check on the commit made that correct
+        # failure refuse the release it was waiting for.
+        answer = {"workflow_runs": [
+            {"id": 1, "path": ".github/workflows/ci.yml",
+             "status": "completed", "conclusion": "success", "run_attempt": 1},
+            {"id": 2, "path": ".github/workflows/release-check.yml",
+             "status": "completed", "conclusion": "failure", "run_attempt": 1},
+        ]}
+        ok, why = ci_verdict(answer)
+        self.assertTrue(ok, why)
+
+    def test_only_the_release_check_ran_is_still_refused(self):
+        # The converse: CI itself has to have run. A commit with only the
+        # watchdog on it has not been tested.
+        answer = {"workflow_runs": [
+            {"id": 2, "path": ".github/workflows/release-check.yml",
+             "status": "completed", "conclusion": "success", "run_attempt": 1}]}
+        ok, _ = ci_verdict(answer)
+        self.assertFalse(ok)
+
+    def test_the_newest_run_is_the_answer(self):
+        # A workflow_dispatch makes a new run beside the old one; a re-run
+        # updates in place. Either way the latest is what the commit's CI says.
+        answer = {"workflow_runs": [
+            {"id": 10, "path": ".github/workflows/ci.yml",
+             "status": "completed", "conclusion": "failure", "run_attempt": 1},
+            {"id": 20, "path": ".github/workflows/ci.yml",
+             "status": "completed", "conclusion": "success", "run_attempt": 1},
+        ]}
+        ok, why = ci_verdict(answer)
+        self.assertTrue(ok, why)
+
+    def test_a_newer_failure_beats_an_older_success(self):
+        answer = {"workflow_runs": [
+            {"id": 20, "path": ".github/workflows/ci.yml",
+             "status": "completed", "conclusion": "success", "run_attempt": 1},
+            {"id": 30, "path": ".github/workflows/ci.yml",
+             "status": "completed", "conclusion": "failure", "run_attempt": 1},
+        ]}
+        ok, _ = ci_verdict(answer)
+        self.assertFalse(ok)
 
 class ReleaseRefusesBeforeItDoesAnything(ReleaseToolCase):
     """Each of these is a thing that has gone wrong in a real release somewhere."""
