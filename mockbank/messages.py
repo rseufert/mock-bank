@@ -51,6 +51,10 @@ class Payment:
         self.creditor_name = _text(creditor.get("Nm"))
         self.creditor_account = _account_id(node.get("CdtrAcct"))
         self.creditor_bic = _bic(node.get("CdtrAgt"))
+        # The creditor's bank by clearing system member id, where a BIC is not
+        # how it is known: an ABA routing number for a US account. NACHA fills
+        # the same field from the entry's receiving DFI.
+        self.creditor_clearing_id = _clearing_id(node.get("CdtrAgt"))
         remittance = node.get("RmtInf", {})
         self.remittance = [_text(line) for line in remittance.get("Ustrd", [])]
         self.remittance_references = []
@@ -70,7 +74,9 @@ class Payment:
         return {"end_to_end_id": self.end_to_end_id, "instruction_id": self.instruction_id,
                 "amount": self.amount, "currency": self.currency,
                 "creditor_name": self.creditor_name, "creditor_account": self.creditor_account,
-                "creditor_bic": self.creditor_bic, "remittance": self.remittance,
+                "creditor_bic": self.creditor_bic,
+                "creditor_clearing_id": self.creditor_clearing_id,
+                "remittance": self.remittance,
                 "remittance_references": self.remittance_references}
 
     def __repr__(self):
@@ -172,6 +178,11 @@ def _account_id(account) -> Optional[str]:
 
 def _bic(agent) -> Optional[str]:
     return _text((agent or {}).get("FinInstnId", {}).get("BICFI"))
+
+
+def _clearing_id(agent) -> Optional[str]:
+    member = (agent or {}).get("FinInstnId", {}).get("ClrSysMmbId", {})
+    return _text(member.get("MmbId"))
 
 
 def _count(value) -> Optional[int]:
