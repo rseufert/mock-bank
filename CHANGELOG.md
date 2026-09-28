@@ -13,6 +13,181 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.3.0] - 2026-09-28
+
+### Added
+
+- **NACHA files at both doors** (#53). `POST /payments` and the drop directory
+  take a NACHA file as well as a `pain.001`, decide it with the same engine, and
+  say which they saw in the answer's `format`. An account has a `format`,
+  `iso20022` by default or `nacha` by `PATCH`, which decides what the bank writes
+  for it: a NACHA account is sent a plain-text acknowledgement (`nacha.ack`) where
+  another gets a `pain.002`, one fact to a line, which is the mock's own shape
+  because NACHA specifies none. In the mailbox it is `text/plain`, in the pickup
+  directory a `.txt` file, and `?raw` refuses with `409` to mix it into a
+  sequence of XML documents. The bank's routing number is the fictional
+  `999999992`, and an account has a domestic `account_number`, unique, which the
+  seed gives the four accounts (`0000000001` to `0000000004`). Schema version 7
+  adds both columns; a version 6 file's accounts become `iso20022` accounts with
+  no number. A payment now records its
+  creditor's bank by clearing member id, `creditor_clearing_id`, beside the
+  account it named.
+
+- **NACHA returns** (#54). A NACHA account is sent a NACHA return file where an
+  ISO 20022 account gets a `pacs.004`: one return entry per payment, with its
+  addenda 99 naming the reason, the original trace number and the original
+  receiving bank, and every count, hash, total and block computed so that it
+  reads back through the reader with no finding. What the three behaviours reject
+  is `R01` (`insufficient-funds`), `R02` (`closed-account`) or `R03`
+  (`bad-bank-id`) in the acknowledgement, and comes back as a return entry the
+  next business day as well, with nothing credited because nothing was debited.
+  `return-later` on a NACHA account comes back as a return entry, and its reason
+  is an `R` code, `R02` by default, refused at `PATCH` otherwise. The
+  `camt.054` and `camt.053` still say it in ISO 20022, where `AM04` is now in the
+  dictionary's return reasons for `R01`. A return file sent to `POST /payments` is
+  refused by name.
+
+- **The payment run pays by ACH too** (#55). `examples/payment_run.py` takes
+  `file_format="nacha"`: it writes the run as a NACHA file instead of a
+  `pain.001`, reads the bank's acknowledgement instead of the `pain.002`, and pays
+  each supplier to the routing and account number SAP holds for it. Every
+  `payment_run` test passes in that mode, against mock-sap from PyPI, and CI runs
+  them both ways: the 0.3 milestone's definition of done. In that mode:
+  - The run's identification is carried exactly in the file creation time and
+    modifier, so two runs on one day are never taken for one file. It can be one
+    to three letters or digits.
+  - An item a NACHA entry cannot carry is skipped with the reason, never cut
+    short.
+
+- **BAI2 statements, the records and the writer** (#56), the first step of the US
+  statement format. `mockbank/bai2.py` declares the 01, 02, 03, 16, 49, 98 and 99
+  records by field position and derives both a writer and a reader from the
+  declaration, so nothing builds a line by hand. `write_statement` takes exactly
+  the arguments the `camt.053` writer takes, because the two are two renderings of
+  one statement: the balances are `010` and `015` on the account record, each
+  movement is a `16` with the `EndToEndId` in the bank reference number that a
+  treasury system reconciles on, a debit and a payment that came back get different type codes — both
+  **placeholders** until #57 settles them against a file from outside the
+  project — and the `49`, `98` and `99` trailers are computed from the records they
+  cover. BAI2 has no escape character, so every alphanumeric field is made safe
+  where the record is built: a comma in an account name would shift every field
+  after it, and a line break would split one record into two that the trailers
+  still counted once. The reader counts each record's fields against the
+  declaration, so neither can pass unnoticed. Nothing is wired to an endpoint yet and no schema changed. Two readings
+  of the format the published specification would settle - whether a control total
+  sums signed amounts, and whether a record count includes its own trailer - are
+  named as constants and asserted in the tests rather than left implicit, so #57
+  can hold them against a file from outside the project.
+
+- **A NACHA account's statement is BAI2** (#57). An account whose `format` is
+  `nacha` is sent its end-of-day statement as a BAI2 file rather than a
+  `camt.053`: the same clock hook, the same balances and entries, numbered from the
+  same counter, reaching `GET /_mock/mailbox` as `bai2.statement` and the pickup
+  directory as `.bai2`. The choice is per account, so one payment file produces a
+  BAI2 statement for a NACHA debtor and `camt.053` for everyone else in it.
+  `statement-gap` leaves one detail record out and keeps the balances true, exactly
+  as it does for `camt.053`, so the file is a bank that left an entry off rather
+  than a bank that wrote a broken file. The statement counter is deliberately
+  shared between the formats: an account that changes format keeps counting where
+  it left off instead of restarting at 1 and colliding with statements it has
+  already been sent.
+
+- **The example copies are checked against their originals** (#100).
+  `examples/invoice_check.py` is mock-sap's file, byte-for-byte, because example
+  code is not importable across repositories - no wheel carries `examples` - and
+  the alternative is forking logic that is tested over there.
+  `tools/check_examples.py` fails if a copy stops matching, with a unified diff,
+  and `--update` takes the other repository's version. It compares against the
+  tip of the source repository's default branch rather than a pinned commit,
+  which is the opposite of `check_xsd.py` and deliberate: the drift comes from
+  another repository, so a run that passes today and fails tomorrow with nothing
+  changed here is the point. `--require` turns a fetch it could not make into a
+  failure, as the other checks do, so a contributor with no network skips while
+  CI stays strict; a `404` is refused at once rather than retried, because an
+  original that moved needs a new path and not another attempt. It runs in its
+  own workflow on push and pull request and daily, because per-push alone would
+  never notice mock-sap moving for a fortnight.
+
+### Changed
+
+- **A held account can be named by number, not only by IBAN** (#53): a creditor
+  at the bank's routing number whose account number is a held account's is that
+  account, and so is a debtor whose identifier is one. This reaches the
+  `pain.001` path too, where `Othr/Id` and `ClrSysMmbId` name an account that
+  way; one that names no held account is decided as before.
+
+- **A BAI2 statement names its two parties the way a real BAI2 file does, and
+  signs its balances** (#57). Two changes to the bytes the mock writes.
+
+  The `02` group header gave `ultimate receiver` as the account's *name* and
+  `originator` as its id - both the customer, with the bank named nowhere - so
+  every statement claimed the account had originated its own statement. In BAI2
+  **the originator of a group is the bank that produced the file**, which reads
+  oddly beside ISO 20022, where an originator is whoever started a payment. The
+  two parties are derived once now and handed to both headers, so they cannot
+  drift apart again.
+
+  **Balances and control totals carry an explicit sign**, where they wrote `-`
+  when negative and nothing when positive: `49,+25125000,5/` for what used to be
+  `49,25125000,5/`. Movement amounts stay unsigned, because a `16`'s direction is
+  in its type code.
+
+  Both are settled against `tests/samples/external/bai2-sample1.txt`, a statement
+  from [moov-io/bai2](https://github.com/moov-io/bai2) vendored at a pinned commit
+  - the first BAI2 file this project has been shown that it did not write. It also
+  confirmed two readings the module had flagged as guesses, that record counts
+  include the trailer stating them and that control totals are signed; corrected
+  the reason recorded for keeping movement totals off the `03`; and showed that
+  `mockbank.bai2.read` cannot parse a real BAI2 file, which is #114. It could not
+  settle the two placeholder transaction codes, which stay marked. The pull request
+  has the arithmetic for each.
+
+### Fixed
+
+- **A NACHA file's controls are read by each entry's side** (#55). The reader
+  counted every return as a credit and never checked the batch or file debit
+  totals, and the mock's own return writer agreed with it, so nothing noticed.
+  Held to a return file from outside the project (moov-io/ach's `return-WEB.ach`),
+  a return of a debit (code `26`) is a debit: each entry now counts in its
+  control total by its transaction code, and both the credit and the debit total
+  are checked. Returns of debits (`26`, `36`, `46`) are read too.
+
+- **A control character in an account name no longer reaches a BAI2 file** (#57).
+  `_safe` replaced the line breaks it had been given a list of, which left a tab
+  and other C0 controls to pass through - harmless to the field boundaries and
+  still junk in a file a bank parses. It replaces every C0 control and DEL now,
+  because a list of the dangerous ones is a list somebody has to keep complete.
+  The writer also raised `Unreadable`, which reads as though something had been
+  parsed; its refusals are `Unwritable`, with both under one base so a caller that
+  does not care can catch either.
+
+- **`payment_run` names a bank or SAP that does not answer, instead of stopping**
+  (#88). An error answer from either side was already a line in `run.problems`,
+  but a host that did not answer at all - down, refusing the connection - raised
+  `URLError` and ended the run with a traceback. Now it is a problem too, naming
+  which side did not answer and what that left undone, and a payment file the
+  bank never received leaves every item `selected`, to send again.
+
+- **A NACHA entry counts on the side its transaction code says** (#102). `side`
+  asked whether a code's second digit was `in "1234"`, which is a substring test,
+  so `"" in "1234"` was true and a blank or one-character code counted as a
+  credit - silently, and on the side the mock's own writer computes the same way,
+  which is the side where a wrong answer cannot be caught by the two disagreeing.
+  It compares against the four digits themselves now. The visible change is
+  exactly that: a code with no second digit no longer lands in the credit total.
+  Every two-character code keeps the side it had, so nothing a well-formed file
+  can carry moves - such a code reaches `side` only from a malformed line, which
+  is a finding of its own. `RETURNS` also gains `56`, the automated return of a
+  loan debit: `26`, `36` and `46` were already read, and the fourth was an
+  asymmetry rather than a decision.
+
+- **The copy of mock-sap's `invoice_check` is current again** (#108). mock-sap
+  0.13.2 taught it to declare its purchase order's currency in the `850` and to
+  block an invoice billed in a different currency from the order
+  (rseufert/mock-sap#74), so this repository's checked copy stopped matching and
+  `tools/check_examples.py` failed on every open pull request. Taken with
+  `--update`, which is what that flag is for.
+
 ## [0.2.0] - 2026-09-28
 
 ### Added
@@ -356,6 +531,7 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rseufert/mock-bank/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rseufert/mock-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rseufert/mock-bank/releases/tag/v0.1.0
