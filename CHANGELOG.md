@@ -13,6 +13,108 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.4.0] - 2026-09-28
+
+### Added
+
+- **Money can arrive** (#91). `POST /_mock/credits` makes a credit arrive in an
+  account the bank holds, from a payer the test describes: the amount, the value
+  date, the payer's name, account and bank, a structured reference, and the note
+  to payee. It books on its value date, or the next business day for a weekend,
+  a holiday or a missed cutoff, and it is reported like everything else: a
+  `camt.054` as it books, and an entry on the day's `camt.053`, which still
+  reconciles. That entry is a received transfer, `CRDT` under
+  `PMNT`/`RCDT`/`ESCT`, with the payer as `Dbtr`, the note in `RmtInf/Ustrd`, and
+  the structured reference apart from it in `RmtInf/Strd/CdtrRefInf`. `wrap`
+  re-cuts the note at 35 or 70 characters wherever the cut falls, invoice numbers
+  included, as a bank reformatting remittance does. So a short payment, a payment
+  that names no invoice, one that settles several, and a reference split across
+  lines are each one request away, and cash application can be tested against the
+  mock at last. `GET /_mock/credits` lists them. Schema version 8 adds the table.
+
+  What the bank could not report is refused with a reason when it is sent, never
+  stored. In a BAI2 statement, money arriving is type code `195`, a received
+  transfer, which is a placeholder like the other two until #57 settles them. An
+  account closed while a credit waits does not book it. If the
+  account is reopened, the credit books on the next business day.
+
+  **Changed for `statement-gap`:** credits come after a day's debits, and the gap
+  leaves off the day's last entry. On a day money arrives, the entry left off is
+  now that credit, where it used to be the last debit. Exactly one entry is still
+  missing.
+
+- **A worked example using all three mocks** (#93). `examples/procure_to_pay.py`
+  carries one purchase from a purchase order in SAP to a cleared payment at the
+  bank: an `850` out, the supplier's `855`/`856`/`810` back, a three-way match, an
+  `INVOIC` posted as an open payable, a payment run, and the statement that clears
+  it. The other examples each use two mocks, and this exists for what only appears
+  between them - each pair can be correct while the chain is broken, because each
+  pair's tests assert what the *next* system received rather than what it could do
+  with it. Three bugs in mock-sap's `invoice_check` were found this way and none
+  was visible to its own green tests: an `INVOIC` naming no supplier that created
+  no payable, a mock reporting status 53 for having posted nothing, and an order
+  placed in one currency that came back invoiced in another
+  (rseufert/mock-sap#68, #67, #74). The match is a checked copy of mock-sap's
+  example and the payment run is this repository's, composed rather than
+  reimplemented; the only new logic is `DurableInvoiceCheck`, which asks SAP
+  whether a supplier invoice is already there instead of remembering in a `set`.
+  It does not tell the supplier what was paid - that needs a remittance advice,
+  which mock-edi does not speak yet (rseufert/mock-edi#149).
+
+### Fixed
+
+- **A balance a statement cannot write is refused where it would arise** (#106).
+  A camt amount has 18 digits, so a balance past that made every statement for its
+  account a 500, and `POST /_mock/advance` answered 500 until a reset. A `PATCH` or
+  a new account with such a balance is now refused with a 400. So is a `PATCH` or a
+  credit that would leave no room for the returns due back and the credits waiting
+  to book. A payment that would overdraw past the limit is rejected with `AM02`,
+  under every behaviour.
+
+- **A holiday declared after something was due on it no longer loses it** (#107).
+  A settlement, a return and a credit have their date fixed when the bank accepts
+  them. Declaring that day a holiday afterwards left them booking on it, but no
+  statement is issued for a holiday, so the entries appeared on none. The next
+  statement then opened at a balance the one before had not closed at. Whatever is
+  still due on a newly declared holiday now moves to the next business day,
+  payments and credits by the same rule. Declaring today a holiday is refused with
+  a 409 once something has booked on it, because that cannot move.
+
+- **`mockbank.bai2.read` reads a real bank's BAI2 file** (#114). It refused any
+  file containing an `88`, and would have misread two more things had it got past
+  that. All three were one wrong assumption - that a record's width is a constant.
+
+  **A continuation continues a field stream, not a record.** `88` is folded into
+  the record above before anything is parsed. It may follow any record and it
+  chains, and a summary group can split straight across the boundary, its type code
+  ending one record and its amount beginning the next - which is why declaring it
+  with fields of its own would also have been wrong.
+
+  **A funds type carries its own width**: one field for blank, `Z` or a digit;
+  three for `V`, followed by an availability date and time; four for `S`, followed
+  by three availability amounts; and 2 + 2n for `D`, followed by a count and that
+  many (days, amount) pairs. The old reader assumed one, which made a value-dated
+  `16` too wide to accept and made a summary group pass the "repeats in fours"
+  check whenever a `V` group appeared in pairs - then read every amount out of the
+  wrong slot and raised a bare `ValueError` rather than refusing. `statements` was
+  reading a value-dated entry's availability date as its bank reference for the
+  same reason.
+
+  **An amount may be signed or bare**, which corrects what #57 recorded here: that
+  sample settled *a* notation, not the notation. Most real files write control
+  totals bare. The mock still signs what it writes, as a choice rather than the
+  format's requirement.
+
+  `statements` is narrower than `read` now, and says so: it needs the two ledger
+  balances, and a file that reports available balances instead reads fine and
+  cannot be reduced to what a `camt.053` asserts.
+
+  Settled against `tests/samples/external/bai2-sample2.txt`, vendored from
+  [moov-io/bai2](https://github.com/moov-io/bai2) at the same pinned commit as
+  `sample1.txt`. Three things it still does not read, each pinned by a passing
+  test: a `16` whose text field contains commas, several records packed onto one
+  line, and a record with no `/` where the newline terminates.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added
@@ -531,7 +633,8 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/rseufert/mock-bank/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rseufert/mock-bank/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rseufert/mock-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rseufert/mock-bank/releases/tag/v0.1.0
