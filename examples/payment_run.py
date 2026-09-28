@@ -31,7 +31,10 @@ What it gets right that is easy to get wrong:
 - **The run is its own identity.** `MsgId` is made of the run date and the
   run's identification, as `F110`'s are, so running the same run again sends
   a file the bank has already seen. The bank refuses it with `DUPL`, and that
-  refusal must not undo what the first file did.
+  refusal must not undo what the first file did. A NACHA header has no
+  `MsgId`, so there the identification goes into the file creation time and
+  modifier, which hold one to three letters or digits exactly. Two runs on one
+  day are then never one file, and a longer identification is refused.
 - **A statement is checked before it is believed.** Opening balance plus the
   entries must be the closing balance, to the cent. When it is not, the
   difference is a payment the statement left out; the accepted payment for
@@ -60,7 +63,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -81,6 +84,13 @@ OPEN_SUPPLIER_ITEMS = ("AccountingDocumentItemType eq 'K' and "
 # Payment methods this run pays by transfer. Blank is the supplier's default,
 # which is what an inbound INVOIC posts with.
 TRANSFER = {"", "T"}
+
+# NACHA mode: the run identifications a file header can tell apart (see
+# `nacha_time_and_modifier`), the 36 file ID modifiers, and the first amount an
+# entry's ten digits of cents cannot hold.
+IDENTIFICATION = re.compile(r"[A-Z0-9]{1,3}")
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+NACHA_AMOUNT_LIMIT = Decimal("100000000.00")
 
 
 def odata(base: str, path: str, **query) -> List[Dict]:
@@ -117,6 +127,8 @@ class Item:
     name: str = ""
     iban: str = ""
     bic: str = ""
+    routing: str = ""           # in NACHA mode: the receiving bank's ABA number
+    account: str = ""           # in NACHA mode: the account number there
     status: str = "selected"    # selected, skipped, sent, accepted, rejected,
                                 # cleared, unreconciled, returned
     reason: str = ""            # a reason code from the bank, or why it was skipped
@@ -135,9 +147,20 @@ class Run:
     # What went wrong talking to either side, in words, rather than an
     # exception half way through a reconciliation.
     problems: List[str] = field(default_factory=list)
+    nacha_origin: str = ""      # the company identification, in NACHA mode
 
     @property
     def msg_id(self) -> str:
+        """The file's identity: what the bank tells two files apart by.
+
+        A `pain.001`'s is its `MsgId`. A NACHA file has none; the bank reads the
+        immediate origin, creation date, time and file ID modifier instead, so
+        in NACHA mode the header is built from the run and this says what the
+        bank will read from it. Either way the same run is the same file.
+        """
+        if self.nacha_origin:
+            return "%s-%s%s%s" % ((self.nacha_origin, self.run_on.strftime("%y%m%d"))
+                                  + nacha_time_and_modifier(self.identification))
         return "F110-%s-%s" % (self.run_on.strftime("%Y%m%d"), self.identification)
 
     def paying(self) -> List[Item]:
@@ -149,16 +172,36 @@ class PaymentRun:
 
     `company` is the paying account: `{"name", "iban", "bic"}`. House-bank
     data is not read from SAP here; it is the run's own configuration.
+
+    `file_format="nacha"` pays in dollars by ACH instead (#55): the file is a
+    NACHA file, the answer the bank's acknowledgement, and the suppliers are
+    paid to the routing and account numbers SAP holds for them (`BankNumber`,
+    `BankAccount`). `company` then also carries `company_id`, the company
+    identification the bank knows the account by, and `routing`, the bank's.
+    Statements are still `camt.053`, so reconciling does not change.
     """
 
-    def __init__(self, sap: str, bank: str, company: Dict[str, str]):
+    def __init__(self, sap: str, bank: str, company: Dict[str, str],
+                 file_format: str = "iso20022"):
         self.sap = sap
         self.bank = bank
         self.company = company
+        if file_format not in ("iso20022", "nacha"):
+            raise ValueError("file_format is 'iso20022' or 'nacha', not %r" % file_format)
+        self.nacha = file_format == "nacha"
+        self.currency = "USD" if self.nacha else "EUR"
         self.session = SapSession(sap)
 
     def run(self, run_on: datetime.date, identification: str) -> Run:
-        run = Run(run_on, identification)
+        run = Run(run_on, identification,
+                  nacha_origin=self.company["company_id"] if self.nacha else "")
+        if self.nacha:
+            refusal = self.nacha_refusal(identification)
+            if refusal:
+                # Nothing selected is nothing paid; the file could not have
+                # been told apart from another, or could not be written.
+                run.problems.append(refusal + ", so no open item was selected")
+                return run
         try:
             run.items = self.select(run_on)
         except urllib.error.HTTPError as error:
@@ -174,6 +217,27 @@ class PaymentRun:
         self.send(run)
         self.read_status(run)
         return run
+
+    def nacha_refusal(self, identification: str) -> str:
+        """Why this run cannot be a NACHA file from this company, or "".
+
+        The bank tells files apart by origin, date, time and modifier, and
+        the time and modifier are all a run's identification can go into: an
+        identification of up to three letters and digits fits exactly, so two
+        runs never share a file and the same run is always the same file (see
+        `nacha_time_and_modifier`). A longer one would have to be hashed, and
+        two runs that hashed alike would be one file to the bank: the second
+        refused as `DUPL`, a repeat to all appearances, and never paid.
+        """
+        if not IDENTIFICATION.fullmatch(identification):
+            return ("identification %r is not one to three capital letters or digits, "
+                    "which is what a NACHA file header can tell apart" % identification)
+        company_id, name = self.company["company_id"], self.company["name"]
+        if len(company_id) > 10 or not company_id.isascii():
+            return "company identification %r is not ten ASCII characters or fewer" % company_id
+        if not name.isascii():
+            return "company name %r is not ASCII, which a NACHA file is" % name
+        return ""
 
     # -- 1. select -------------------------------------------------------------
 
@@ -217,19 +281,48 @@ class PaymentRun:
         if invoice.get("PaymentMethod", "") not in TRANSFER:
             item.status, item.reason = "skipped", "payment method %r is not a transfer" % invoice["PaymentMethod"]
             return
-        if item.currency != "EUR":
-            item.status, item.reason = "skipped", "a SEPA transfer is in euros, not %s" % item.currency
+        if item.currency != self.currency:
+            item.status, item.reason = "skipped", "%s is in %s, not %s" % (
+                "an ACH credit" if self.nacha else "a SEPA transfer", self.currency,
+                item.currency)
+            return
+        if self.nacha and (len(item.reference) > 15 or not item.reference.isascii()
+                           or " " in item.reference):
+            # The individual identification number holds 15; one cut short
+            # would be a reference the supplier cannot match, and one with a
+            # space could not be read back from the acknowledgement's words.
+            item.status, item.reason = "skipped", (
+                "reference %r is not up to 15 ASCII characters without a space, "
+                "as a NACHA entry's identification number is" % item.reference)
+            return
+        if self.nacha and Decimal(item.amount) >= NACHA_AMOUNT_LIMIT:
+            item.status, item.reason = "skipped", (
+                "%s is more than a NACHA entry's ten digits hold" % item.amount)
             return
         banks = odata(self.sap, BANKS, **{"$filter": (
             "BusinessPartner eq '%s' and BankIdentification eq '%s'"
             % (item.supplier, invoice["BPBankAccountInternalID"]))})
-        if not banks or not banks[0].get("IBAN"):
+        if not banks or (not self.nacha and not banks[0].get("IBAN")):
             item.status, item.reason = "skipped", "no IBAN for account %s of %s" % (
                 invoice["BPBankAccountInternalID"], item.supplier)
             return
         bank = banks[0]
         item.iban, item.bic = bank["IBAN"], bank.get("SWIFTCode", "")
         item.name = bank.get("BankAccountHolderName") or item.supplier
+        if self.nacha:
+            item.routing, item.account = bank.get("BankNumber", ""), bank.get("BankAccount", "")
+            if not (len(item.routing) == 9 and item.routing.isdigit() and item.account):
+                item.status, item.reason = "skipped", (
+                    "no ABA routing and account number for account %s of %s"
+                    % (invoice["BPBankAccountInternalID"], item.supplier))
+            elif len(item.account) > 17 or not item.account.isascii():
+                # Cut short, an account number is somebody else's account.
+                item.status, item.reason = "skipped", (
+                    "account number %r is longer than a NACHA entry's 17 characters"
+                    % item.account)
+            elif not item.name.isascii():
+                item.status, item.reason = "skipped", (
+                    "name %r is not ASCII, which a NACHA file is" % item.name)
 
     # -- 2. send ---------------------------------------------------------------
 
@@ -237,8 +330,10 @@ class PaymentRun:
         paying = [i for i in run.items if i.status == "selected"]
         if not paying:
             return
-        run.http_status, body = call(self.bank, "POST", "/payments",
-                                     self.payment_file(run, paying), "application/xml")
+        run.http_status, body = call(
+            self.bank, "POST", "/payments",
+            self.nacha_file(run, paying) if self.nacha else self.payment_file(run, paying),
+            "text/plain" if self.nacha else "application/xml")
         if run.http_status == NO_ANSWER:
             # The file did not reach the bank, so nothing was sent: every item
             # stays selected, for the same run to be sent again.
@@ -297,7 +392,40 @@ class PaymentRun:
             add(add(transfer, "RmtInf"), "Ustrd", "Invoice %s" % item.reference)
         return ET.tostring(document, encoding="unicode", xml_declaration=True)
 
-    # -- 3. read the pain.002 ----------------------------------------------------
+    def nacha_file(self, run: Run, items: List[Item]) -> str:
+        """The same payments as a NACHA file: one CCD batch of ACH credits.
+
+        Written by hand here, as the `pain.001` is, because the example imports
+        neither mock. The header is built from the run, so the same run is the
+        same file (see `Run.msg_id`); every control total is computed.
+        """
+        odfi = self.company["routing"][:8]
+        cents = [int(Decimal(i.amount) * 100) for i in items]
+        entry_hash = sum(int(i.routing[:8]) for i in items)
+        time, modifier = nacha_time_and_modifier(run.identification)
+        lines = [
+            "101 %s%s%s%s%s094101%-23s%-23s%8s" % (
+                self.company["routing"], self.company["company_id"].rjust(10),
+                run.run_on.strftime("%y%m%d"), time, modifier,
+                "MOCK BANK", self.company["name"][:23], ""),
+            "5220%-16s%20s%-10sCCD%-10s%6s%s   1%s%07d" % (
+                self.company["name"][:16], "", self.company["company_id"][:10],
+                "SUPPLIERS", "", run.run_on.strftime("%y%m%d"), odfi, 1)]
+        for number, (item, amount) in enumerate(zip(items, cents), start=1):
+            lines.append("622%s%-17s%010d%-15s%-22s  0%s%07d" % (
+                item.routing, item.account, amount, item.reference,
+                item.name[:22], odfi, number))
+        lines.append("8220%06d%010d%012d%012d%-10s%19s%6s%s%07d" % (
+            len(items), entry_hash % 10 ** 10, 0, sum(cents),
+            self.company["company_id"][:10], "", "", odfi, 1))
+        blocks = -(-(len(lines) + 1) // 10)
+        lines.append("9%06d%06d%08d%010d%012d%012d%39s" % (
+            1, blocks, len(items), entry_hash % 10 ** 10, 0, sum(cents), ""))
+        while len(lines) % 10:
+            lines.append("9" * 94)
+        return "\n".join(lines) + "\n"
+
+    # -- 3. read the pain.002, or the acknowledgement ----------------------------
 
     def read_status(self, run: Run) -> None:
         """Match the bank's status reports to the run by MsgId, then EndToEndId.
@@ -305,6 +433,8 @@ class PaymentRun:
         Only `pain.002`s are collected, so the `camt` messages stay in the
         mailbox for whatever reconciles the statement.
         """
+        if self.nacha:
+            return self.read_acknowledgement(run)
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=pain.002")
         if status != 200:
             run.problems.append("the bank's mailbox %s, so no status report was read"
@@ -342,6 +472,44 @@ class PaymentRun:
                                         if tag(e) == "Cd"), "") or ""
                 elif code in ACCEPTED:
                     item.status, item.reason = "accepted", ""
+
+    def read_acknowledgement(self, run: Run) -> None:
+        """NACHA mode: the bank's acknowledgement, matched by FILE, then ENTRY.
+
+        The acknowledgement is mock-bank's plain shape, one fact to a line
+        starting with what it is, so it is read with `split()`: `STATUS RJCT
+        DUPL` is the bank having this run already, and an `ENTRY` line names the
+        entry's identification number - the supplier's invoice number - and
+        whether it was accepted or rejected with a return code.
+        """
+        status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=nacha.ack")
+        if status != 200:
+            run.problems.append("the bank's mailbox %s, so no acknowledgement was read"
+                                % said(status, raw))
+            return
+        by_reference = {i.reference: i for i in run.paying()}
+        for ack in raw.decode("utf-8").split("ACKNOWLEDGEMENT ")[1:]:
+            lines = [line.split() for line in ack.splitlines()]
+            fields = {words[0]: words[1:] for words in lines if words}
+            if fields.get("FILE") != [run.msg_id]:
+                continue
+            # `or`, not a default: a bare STATUS line is there and empty.
+            state = fields.get("STATUS") or [""]
+            if state[:2] == ["RJCT", "DUPL"]:
+                run.duplicate = True
+                continue
+            for words in (w for w in lines if w and w[0] == "ENTRY"):
+                item = by_reference.get(words[2])
+                if item is None:
+                    continue
+                if words[4] == "ACCEPTED":
+                    item.status, item.reason = "accepted", ""
+                else:
+                    item.status, item.reason = "rejected", words[5]
+            if state[0] == "RJCT" and len(state) > 1 and not any(
+                    w[0] == "ENTRY" for w in lines if w):
+                for item in by_reference.values():
+                    item.status, item.reason = "rejected", state[1]
 
     # -- 4. reconcile: post the statements to SAP ------------------------------
 
@@ -477,6 +645,23 @@ class PaymentRun:
                 "</E1IDKU1></IDOC></FINSTA01>"
                 % (escape(number), day.replace("-", ""), escape(self.company["bic"]),
                    escape(iban), iban[:2], "".join(body)))
+
+
+def nacha_time_and_modifier(identification: str) -> Tuple[str, str]:
+    """The file creation time and file ID modifier for a run, from its identification.
+
+    NACHA tells two files of one day from one origin apart by these two, so two
+    runs need two pairs and the same run always the same pair: derived from the
+    identification, not the clock, which a re-run would move on. Numbering
+    every identification of one to three letters and digits in order gives
+    47,988 of them, fewer than the 1,440 minutes of a day times the 36
+    modifiers, so each has its own pair; `PaymentRun.nacha_refusal` refuses
+    the rest.
+    """
+    number = (sum(36 ** length for length in range(1, len(identification)))
+              + int(identification, 36))
+    minutes, modifier = divmod(number, 36)
+    return "%02d%02d" % divmod(minutes, 60), ALPHABET[modifier]
 
 
 def said(status: int, body: bytes) -> str:

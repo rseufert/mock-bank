@@ -168,7 +168,8 @@ def check_tree_is_releasable(version: str):
             "request, not of this step."
             % (PYPROJECT, declared.group(1) if declared else "nothing", version))
 
-    dated = [f.group(2) for f in HEADING.finditer(read(CHANGELOG))
+    text = read(CHANGELOG)
+    dated = [f.group(2) for f in HEADING.finditer(text)
              if f.group(1) == version]
     if not dated:
         raise Refused(
@@ -192,7 +193,22 @@ def check_tree_is_releasable(version: str):
                FRAGMENTS, "\n".join("      %s/%s" % (FRAGMENTS, n) for n in waiting),
                version))
 
-    return local, dated[0]
+    # Worked out here rather than at the publish step, so that an empty section
+    # is refused before a tag exists. The script's promise is that it refuses
+    # before it does anything, and this was the one check that did not keep it:
+    # `notes_for` used to be called after the tag was created and pushed.
+    #
+    # It also comes from the same read of the file as the date above. Reading
+    # CHANGELOG.md twice in one run is how the two answers come to disagree.
+    notes = notes_for(text, version)
+    if not notes.strip():
+        raise Refused(
+            "%s's [%s] section has a heading and a date but nothing under it, so "
+            "the Release would have no notes. Assemble the fragments into it:\n"
+            "      python3 tools/check_changelog.py --assemble %s"
+            % (CHANGELOG, version, version))
+
+    return local, dated[0], notes
 
 
 def ci_verdict(answer, workflow: str = CI_WORKFLOW):
@@ -384,7 +400,7 @@ def main() -> int:
         # The local checks first: they are cheaper, they need no network, and a
         # dirty tree is both more likely and more useful to hear about than a
         # GitHub problem.
-        commit, date = check_tree_is_releasable(version)
+        commit, date, notes = check_tree_is_releasable(version)
 
         if state == "unknown":
             raise Refused(
@@ -416,6 +432,10 @@ def main() -> int:
               "[%s] dated, no fragments waiting"
               % (BRANCH, BRANCH, PYPROJECT, version, version))
         print("  checked: %s" % check_ci_is_green(commit))
+        print("  the Release notes are %s's [%s] section, %d line(s):"
+              % (CHANGELOG, version, len(notes.strip().splitlines())))
+        for line in notes.strip().splitlines():
+            print("      | %s" % line)
 
         if local == commit:
             print("  the tag %s is already here and points at %s." % (tag, commit[:8]))
@@ -434,16 +454,6 @@ def main() -> int:
         if released:
             print("  the GitHub Release for %s already exists; leaving it." % tag)
         else:
-            notes = notes_for(read(CHANGELOG), version)
-            if not notes.strip():
-                raise Refused(
-                    "%s's [%s] section is empty, so the Release would have no "
-                    "notes. Assemble the fragments into it first."
-                    % (CHANGELOG, version))
-            print("  the Release notes are %s's [%s] section, %d line(s):"
-                  % (CHANGELOG, version, len(notes.strip().splitlines())))
-            for line in notes.strip().splitlines():
-                print("      | %s" % line)
             # A real file, because `gh` reads the body from one. Written next to
             # nothing and removed afterwards even when the publish fails, so a
             # refused release leaves no litter in the tree being released.

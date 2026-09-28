@@ -658,6 +658,38 @@ python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
 cd examples && python3 -m unittest -v test_payment_run
 ```
 
+**NACHA mode.** `PaymentRun(..., file_format="nacha")` pays the same
+invoices by ACH: a NACHA file of credits instead of the `pain.001`, the bank's
+acknowledgement read instead of the `pain.002`, and each supplier paid to the
+ABA routing and account number SAP holds for it (`BankNumber`, `BankAccount`)
+instead of an IBAN. The file's header is built from the run, so the same run
+sent twice is still the same file and still `DUPL`. The bank tells NACHA files
+apart by origin, date, creation time and file ID modifier, and the run's
+identification goes into the last two exactly, which leaves room for one to
+three capital letters or digits. A longer identification is refused before
+anything is selected. SAP's `F110` identifications are five characters, so a
+caller with those keeps a mapping of its own to three. If it were hashed instead, two runs that hashed alike
+would be one file to the bank, and the second would be refused as a repeat and
+never paid. An item a NACHA entry cannot carry is skipped with the reason, as
+a foreign-currency item is:
+- a reference over 15 characters, or holding a space or anything that is not
+  ASCII;
+- an amount of 100,000,000.00 or more;
+- an account number over 17 characters;
+- a name that is not ASCII.
+
+Statements are still `camt.053`, so reconciling does not change. The same
+tests run in this mode too, which is 0.3's definition of done, with one more
+for what an entry cannot carry:
+
+```bash
+PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v test_payment_run
+```
+
+In that mode the tests make ACME a dollar account in NACHA format and give the
+three suppliers US bank details through `A_BusinessPartnerBank`; a closed
+account is answered `R02` where the ISO run sees `AC04`.
+
 **The example does not advance bank time; the tests do.** A client cannot move
 a real bank's clock. It sends its file and reads statements as they arrive, so
 `reconcile` posts whatever the bank has sent so far, and a payment not on a
@@ -741,6 +773,7 @@ than half-supporting it.
 | 0.1 | ISO 20022 credit transfers: `pain.001` in; `pain.002`, `camt.054`, `camt.053` out; accounts, balances, cutoff, holidays, clock; every behaviour above except `return-later`; HTTP only | **Done.** Every message the mock writes validates against its own dictionary and against the published XSDs; the tour and the example client run in CI |
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | The same `payment_run` tests pass in NACHA mode |
+| 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | The procure to pay example runs in CI against mock-sap and mock-edi from PyPI |
 
 ## Contributing
 
