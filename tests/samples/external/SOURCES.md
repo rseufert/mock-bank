@@ -41,6 +41,7 @@ does not see them; `tests/test_nacha.py` reads them.
 | --- | --- | --- | --- |
 | `nacha-loan-credit.ach` | [moov-io/ach](https://github.com/moov-io/ach) @ `7ee7ad03d7342e1f651c32db22fc8168c2b97cce` | `test/testdata/loan-credit.ach` | A one-entry credit batch that must read with no finding: its entry hash, counts, totals and block count all agree |
 | `nacha-ppd-mixedDebitCredit.ach` | same | `test/testdata/ppd-mixedDebitCredit.ach` | A batch with a debit and two credits: the debit is the one finding, the credits are read |
+| `nacha-return-WEB.ach` | same | `test/testdata/return-WEB.ach` | A return file: a returned debit (`26`, `R01`) and a returned credit (`21`, `R03`), each with its addenda 99. It pins the positions the mock's return writer (#54) has to match, and it found that a return of a debit totals as a debit, which the mock's own reader and writer had agreed wrongly on (#55) |
 
 moov-io/ach is **Apache License 2.0** (`LICENSE-Apache-2.0.txt`), copyright
 2018-2020 The Moov Authors, and it has a `NOTICE` file, kept beside the samples
