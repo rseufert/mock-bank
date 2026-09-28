@@ -621,7 +621,11 @@ def assemble(version: str, date: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base", default="", help="revision to compare against, e.g. origin/main")
-    parser.add_argument("--labels", default="", help="comma-separated pull request labels; `%s` lifts the entry rule" % ESCAPE_HATCH)
+    parser.add_argument(
+        "--labels", default="",
+        help="comma-separated pull request labels; `%s` lifts the entry rule and "
+             "`%s` lifts the one about losing an entry's text"
+             % (ESCAPE_HATCH, REWRITE_HATCH))
     parser.add_argument("--assemble", metavar="VERSION", default="",
                         help="write %s/ into %s as this release and delete the "
                              "fragments" % (FRAGMENTS, CHANGELOG))
