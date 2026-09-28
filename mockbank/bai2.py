@@ -29,10 +29,11 @@ Type codes
 ``015``         closing ledger balance
 ``495``         the debit for a payment that left the account (**placeholder**)
 ``165``         the credit for a payment that came back (**placeholder**)
+``195``         money arriving from somebody else, #91 (**placeholder**)
 ==============  ==============================================================
 
 ``010`` and ``015`` are the two status codes this mock needs and are not in
-doubt. **The two transaction codes are placeholders, and are wrong until #57
+doubt. **The transaction codes are placeholders, and are wrong until #57
 settles them against a file from outside the project.** They are listed in
 ``PLACEHOLDER_CODES`` so that nothing else in the package has to know which is
 which.
@@ -96,7 +97,10 @@ CLOSING_LEDGER = "015"
 # #57 replaces them against a file from outside the project.
 DEBIT = "495"
 RETURNED_CREDIT = "165"
-PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT)
+# Money arriving (#91): Incoming Money Transfer, by the reasoning that gives the
+# debit 495 - a transfer, not a "preauthorized" movement the other party pulled.
+RECEIVED_CREDIT = "195"
+PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT, RECEIVED_CREDIT)
 
 # `Z` means the amount is immediately available; BAI2's other funds types say
 # when it becomes so. Everything this mock books is already booked, so there is
@@ -336,20 +340,24 @@ def _transaction(payment: Dict) -> str:
     comma in either would end the field early, so it is replaced rather than
     escaped: BAI2 has no escape, and a name with a comma in it is common.
     """
+    if payment.get("incoming"):
+        # Money arriving from somebody else (#91): the payer's name is the
+        # text, and their structured reference the customer reference number.
+        return _record("16", RECEIVED_CREDIT, _movement(payment["amount"]),
+                       AVAILABLE_NOW, _safe(payment["end_to_end_id"]),
+                       _safe(payment.get("reference") or ""),
+                       _safe(payment.get("debtor_name") or ""))
     if payment.get("credit"):
-        # Every credit this mock books today is a payment of its own coming
-        # back, and carries the reason it came back. #96 adds money *arriving*,
-        # whose rows are credits too - and coding a customer's payment as a
-        # return would be a wrong statement, not a cosmetic one. So the
-        # distinction is the return reason rather than the credit flag, and an
-        # unexplained credit stops here instead of being mislabelled. Whichever
-        # of #56 and #96 lands second adds the received-credit code.
+        # Any other credit is a payment of this bank's own coming back, and
+        # carries the reason it came back. Coding a customer's payment as a
+        # return would be a wrong statement, not a cosmetic one, so a credit
+        # that is neither money arriving nor explained stops here instead of
+        # being mislabelled.
         if not payment.get("return_reason"):
             raise Unreadable(
-                "a credit with no return reason is not a return, and BAI2 has "
-                "no code here for one yet: %r would be written as %s, which "
-                "says the payment came back. A received credit needs its own "
-                "type code (see #57)."
+                "a credit with no return reason is not a return, and it is not "
+                "money arriving either: %r would be written as %s, which says "
+                "the payment came back."
                 % (payment.get("end_to_end_id"), RETURNED_CREDIT))
         code = RETURNED_CREDIT
     else:
