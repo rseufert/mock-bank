@@ -167,9 +167,9 @@ If a change touches more than one of these, it is usually two changes.
   endpoint table and the route table disagree. It checks
   coverage, not prose; keeping the prose true is on you.
 - **A changelog fragment.** An entry is its own file: `changelog.d/<issue>.<kind>.md`,
-  where kind is `added`, `changed`, `fixed` or `removed`, holding the bullet's
-  text as it would have been written under `## [Unreleased]`. Nothing goes into
-  `CHANGELOG.md` by hand; `tools/check_changelog.py --assemble` writes the
+  where kind is `added`, `changed`, `deprecated`, `removed`, `fixed` or
+  `security`, holding the bullet's text as it would have been written under
+  `## [Unreleased]`. Nothing goes into `CHANGELOG.md` by hand; `tools/check_changelog.py --assemble` writes the
   fragments into a release section at release time. This is a directory of small
   files rather than one section because every pull request used to edit the same
   lines, a conflicting pull request gets no CI run at all, and resolving that

@@ -211,6 +211,16 @@ class AssemblingARelease(ToolCase):
         self.assertLess(text.index("**Nine.**"), text.index("**Ten.**"))
         self.assertLess(text.index("**Ten.**"), text.index("**A fix.**"))
 
+    def test_all_six_kinds_are_accepted_in_keep_a_changelogs_order(self):
+        kinds = ["security", "fixed", "removed", "deprecated", "changed", "added"]
+        for number, kind in enumerate(kinds, start=1):
+            self.fragment("%d.%s.md" % (number, kind), "**%s.** It happened.\n" % kind)
+        code, out = self.assemble()
+        self.assertEqual(code, 0, out)
+        text = self.read("CHANGELOG.md")
+        headings = [text.index("### %s" % k.capitalize()) for k in reversed(kinds)]
+        self.assertEqual(headings, sorted(headings))
+
     def test_the_body_is_indented_as_a_bullet(self):
         self.fragment("42.added.md", "**A thing.** First line.\nSecond line.\n")
         self.assemble()

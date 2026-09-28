@@ -338,7 +338,7 @@ class DropBox:
             self._release(working, path)
             return Scanned(name=name, ok=False, error=str(error))
 
-        answer, decision, findings = self.state.receive(payload)
+        answer, decision, findings = self.state.receive(payload, source=name)
 
         # `failed/` means the bank could not put the file through: one it could
         # not read, or one rejected at group level for DUPL or FF01. A PART is

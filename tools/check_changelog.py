@@ -65,11 +65,12 @@ PACKAGE = "mockbank/"
 ESCAPE_HATCH = "no changelog"
 FRAGMENTS = "changelog.d"
 
-# The kinds Keep a Changelog defines, in the order a release section lists them.
-# A kind not in here is refused rather than assembled under a heading nobody
-# reads: "Security" and "Deprecated" are in the standard and would belong here
-# the day this project has one to write.
-KINDS = ("added", "changed", "fixed", "removed")
+# The kinds Keep a Changelog defines, all six, in the order a release section
+# lists them. A kind not in here is refused rather than assembled under a
+# heading nobody reads. All six from the start, including the two this project
+# has not needed yet, because adding one later is free but a contributor who
+# reached for `security` and was refused would have written it as `fixed`.
+KINDS = ("added", "changed", "deprecated", "removed", "fixed", "security")
 FRAGMENT_NAME = re.compile(r"^(\d+)\.([a-z]+)\.md$")
 
 HEADING = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$")

@@ -101,10 +101,57 @@ class StatusReport(MessageCase):
         self.assertEqual(len(self.of_type(collected, CAMT054)), 1)
         self.assertEqual(before - self.balance("ACME"), 700)
 
-    def test_a_body_with_no_msgid_gets_no_pain002(self):
+    # A body with no MsgId used to get no pain.002 (#26): a status report has
+    # to name what it reports on. With a folder door there is nobody to hand
+    # the HTTP answer to, so it is answered as NOTPROVIDED instead (#64).
+
+    def refusal(self, collected):
+        rows = [item for item in collected if item["type"] == PAIN002.name]
+        self.assertEqual(len(rows), 1, collected)
+        return self.of_type(rows, PAIN002)[0], rows[0]
+
+    def test_a_body_with_no_msgid_gets_a_pain002_naming_it_notprovided(self):
         answer = self.send("MsgId,Amount\n").json()
-        self.assertEqual(answer["queued"], [])
+        self.assertEqual([(q["type"], q["account"], q["released"]) for q in answer["queued"]],
+                         [(PAIN002.name, None, True)])
+        root, row = self.refusal(self.mailbox())
+        self.assertIsNone(row["account"])
+        m = ns(PAIN002)
+        group = root.find("m:CstmrPmtStsRpt/m:OrgnlGrpInfAndSts", m)
+        self.assertEqual(group.findtext("m:OrgnlMsgId", namespaces=m), "NOTPROVIDED")
+        self.assertEqual(group.findtext("m:OrgnlMsgNmId", namespaces=m), "NOTPROVIDED")
+        self.assertEqual(group.findtext("m:GrpSts", namespaces=m), "RJCT")
+        self.assertEqual(group.findtext("m:StsRsnInf/m:Rsn/m:Cd", namespaces=m), "FF01")
+        self.assertEqual(schema.check(PAIN002, root), [])
+
+    def test_a_pain001_without_a_msgid_is_reported_to_its_debtor(self):
+        text = pain001("GONE-1", ACME, [("G1", 100, UMBRELLA)])
+        text = text.replace(b"<MsgId>GONE-1</MsgId>", b"")
+        self.assertEqual(self.send(text).status, 422)
+        root, row = self.refusal(self.mailbox())
+        self.assertEqual(row["account"], "ACME")
+        m = ns(PAIN002)
+        group = root.find("m:CstmrPmtStsRpt/m:OrgnlGrpInfAndSts", m)
+        self.assertEqual(group.findtext("m:OrgnlMsgId", namespaces=m), "NOTPROVIDED")
+        # The message type was read, so it is named.
+        self.assertEqual(group.findtext("m:OrgnlMsgNmId", namespaces=m), "pain.001.001.09")
+
+    def test_a_silent_debtor_still_hears_nothing(self):
+        self.request("PATCH", "/_mock/accounts/ACME", body={"behaviour": "silent"})
+        text = pain001("GONE-1", ACME, [("G1", 100, UMBRELLA)])
+        self.send(text.replace(b"<MsgId>GONE-1</MsgId>", b""))
         self.assertEqual(self.mailbox(), [])
+
+    def test_a_duplicate_is_still_reported_under_its_own_msgid(self):
+        text = pain001("TWICE-1", ACME, [("T1", 100, UMBRELLA)])
+        self.send(text)
+        self.mailbox()
+        self.send(text)
+        root, _row = self.refusal(self.mailbox())
+        m = ns(PAIN002)
+        group = root.find("m:CstmrPmtStsRpt/m:OrgnlGrpInfAndSts", m)
+        self.assertEqual(group.findtext("m:OrgnlMsgId", namespaces=m), "TWICE-1")
+        self.assertEqual(group.findtext("m:StsRsnInf/m:Rsn/m:Cd", namespaces=m), "DUPL")
 
 
 class DelayedStatus(MessageCase):
