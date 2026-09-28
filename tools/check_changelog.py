@@ -65,6 +65,16 @@ PACKAGE = "mockbank/"
 ESCAPE_HATCH = "no changelog"
 FRAGMENTS = "changelog.d"
 
+# What `## [Unreleased]` holds, exactly. Kept here rather than inferred, so the
+# check can decide by comparison instead of by hunting for things that look
+# wrong: prose, a numbered list or a `####` heading are all as wrong as a bullet
+# and none of them look it. Rewording the paragraph in CHANGELOG.md means
+# rewording it here; the check says so when they disagree.
+POINTER = """Entries for the next release are one file each in
+[`changelog.d/`](changelog.d/), so that two pull requests adding an entry do not
+conflict on the same lines of this file. `tools/check_changelog.py --assemble`
+writes them into this section at release time. Nothing is added here by hand."""
+
 # The kinds Keep a Changelog defines, all six, in the order a release section
 # lists them. A kind not in here is refused rather than assembled under a
 # heading nobody reads. All six from the start, including the two this project
@@ -233,6 +243,11 @@ def check_unreleased_is_a_pointer(text: str):
     body = dict((version, section) for version, _, section in sections(text))
     unreleased = body.get("Unreleased", "")
 
+    if " ".join(unreleased.split()) == " ".join(POINTER.split()):
+        return problems       # whitespace-insensitive, so re-wrapping is not a change
+
+    # It differs. Say how, in the terms the writer will recognise, and fall back
+    # to naming the difference itself when nothing recognisable is there.
     kind = ""
     for line in unreleased.splitlines():
         if line.startswith("### "):
@@ -251,6 +266,20 @@ def check_unreleased_is_a_pointer(text: str):
                 "%s/%s. That section is a pointer now, so an entry written there "
                 "is never released - and a merge can put one there without a "
                 "conflict." % (_short(entry), FRAGMENTS, name))
+
+    if not problems:
+        # Prose, a numbered item, a #### heading: wrong, and nothing about the
+        # line says so. Point at the first line that is not in the pointer.
+        expected = " ".join(POINTER.split())
+        stray = next((line for line in unreleased.splitlines()
+                      if line.strip() and " ".join(line.split()) not in expected),
+                     "")
+        problems.append(
+            "CHANGELOG.md's [Unreleased] is not the pointer at %s/ and holds "
+            "nothing that looks like an entry either%s\n    That section holds "
+            "the pointer paragraph and nothing else. If you meant to reword it, "
+            "reword `POINTER` in tools/check_changelog.py to match."
+            % (FRAGMENTS, ": %s" % _short(stray) if stray else "."))
     return problems
 
 
@@ -364,12 +393,23 @@ def assemble(version: str, date: str) -> int:
     text = _read(CHANGELOG)
     waiting = fragments()
     heading = "## [%s] - %s" % (version, date)
-    already = heading in text
+    # Whether the version is already assembled is a question about the version,
+    # not about the date. Comparing the full dated heading made a second run
+    # with a different date look like a fresh release with no fragments, which
+    # reported "nothing to release" and exited 1 - so a release script calling
+    # this twice could not tell "already done" from "something is wrong".
+    written = next((date for version_seen, date, _ in sections(text)
+                    if version_seen == version), None)
+    already = written is not None
 
     if not waiting:
         if already:
             print("[%s] is already assembled and no fragments are left; nothing to do."
                   % version)
+            if written != date:
+                print("  note: it is dated %s, not the %s you gave. The date in the "
+                      "file is the one that shipped; nothing was changed."
+                      % (written, date))
             return 0
         print("no fragments in %s/, so there is nothing to release under [%s]."
               % (FRAGMENTS, version))

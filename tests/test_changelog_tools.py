@@ -22,13 +22,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TOOL = os.path.join(ROOT, "tools", "check_changelog.py")
 
+# The pointer paragraph is the tool's own constant rather than a copy of it: the
+# check decides by exact match, so a copy here would drift and these tests would
+# be asserting against a changelog no real one looks like.
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+from check_changelog import POINTER                                  # noqa: E402
+
 CHANGELOG = """# Changelog
 
 Every release of mock-bank.
 
 ## [Unreleased]
 
-Entries for the next release are one file each in `changelog.d/`.
+%s
 
 ## [0.1.0] - 2026-09-26
 
@@ -38,7 +44,7 @@ Entries for the next release are one file each in `changelog.d/`.
 
 [Unreleased]: https://example.invalid/x/compare/v0.1.0...HEAD
 [0.1.0]: https://example.invalid/x/releases/tag/v0.1.0
-"""
+""" % POINTER
 
 PYPROJECT = 'version = "0.1.0"\n'
 
@@ -255,6 +261,27 @@ class AssemblingARelease(ToolCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.read("CHANGELOG.md"), after_once)
 
+    def test_a_second_run_with_a_different_date_is_still_a_no_op(self):
+        # A release script calls this and reads the exit code. Comparing the
+        # full dated heading made a different date look like a fresh release
+        # with no fragments, which exited 1 - indistinguishable from something
+        # actually being wrong.
+        self.three_fragments()
+        self.assemble(date="2026-10-01")
+        after_once = self.read("CHANGELOG.md")
+        code, out = self.assemble(date="2026-10-02")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read("CHANGELOG.md"), after_once)
+        self.assertIn("2026-10-01", out)     # says which date actually shipped
+
+    def test_a_different_date_still_refuses_when_fragments_are_waiting(self):
+        self.three_fragments()
+        self.assemble(date="2026-10-01")
+        self.fragment("43.added.md")
+        code, out = self.assemble(date="2026-10-02")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read("CHANGELOG.md").count("## [0.2.0]"), 1)
+
     def test_it_refuses_rather_than_writing_the_section_twice(self):
         # Fragments and an assembled section together: somebody added an entry
         # after the release was cut, or the release was cut twice.
@@ -351,6 +378,34 @@ class TheUnreleasedSectionHoldsOnlyThePointer(ToolCase):
         code, out = self.run_tool()
         self.assertEqual(code, 1, "a clean merge left a wrong file and nothing said so")
         self.assertIn("44.fixed.md", out)
+
+    def test_prose_that_is_not_the_pointer_is_refused(self):
+        # Nothing here looks like an entry, which is exactly why the check
+        # compares against the pointer instead of hunting for bullets.
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            POINTER, "Entries live in changelog.d/ now. See CONTRIBUTING."))
+        code, out = self.run_tool()
+        self.assertEqual(code, 1)
+        self.assertIn("not the pointer", out)
+
+    def test_a_numbered_item_is_refused(self):
+        self.unreleased("1. **A thing** (#99). Numbered, not bulleted.\n\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1)
+
+    def test_a_deeper_heading_is_refused(self):
+        self.unreleased("#### Added\n\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 1)
+
+    def test_rewrapping_the_pointer_is_not_a_change(self):
+        # The comparison collapses whitespace, so reflowing the paragraph to a
+        # different width is allowed. A check that failed on that would be
+        # trained out of people within a week.
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            POINTER, " ".join(POINTER.split())))
+        code, out = self.run_tool()
+        self.assertEqual(code, 0, out)
 
     def test_the_pointer_on_its_own_passes(self):
         code, out = self.run_tool()
