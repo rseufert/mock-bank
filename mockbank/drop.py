@@ -45,7 +45,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import db, nacha, validate
+from . import db, outbox, validate
 
 PROCESSED = "processed"
 FAILED = "failed"
@@ -475,9 +475,10 @@ class DropBox:
                          "SELECT * FROM message WHERE id = ?", (message_id,))
             if row is None:
                 continue
-            # A NACHA acknowledgement or return file is text, and named so.
+            # A NACHA acknowledgement or return file, or a BAI2 statement, is
+            # text and named so.
             name = "%s-%s-%d.%s" % (row["type"], row["account"] or "bank", row["id"],
-                                    nacha.TEXT_TYPES.get(row["type"], "xml"))
+                                    outbox.TEXT_TYPES.get(row["type"], "xml"))
             final = self._inside_pickup(name)
             if final is None:
                 self.refused.append(name)

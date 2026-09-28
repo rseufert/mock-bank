@@ -31,7 +31,14 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List
 
-from . import accounts, credits, db, messages, nacha
+from . import accounts, bai2, credits, db, messages, nacha
+
+
+# Every message type that is not XML, and the extension it is written under.
+# The four callers of this ask "is this XML, and if not what does it end in" -
+# not "is this NACHA" - so the union lives here rather than in either format's
+# module, and neither has to know about the other.
+TEXT_TYPES = dict(nacha.TEXT_TYPES, **bai2.TEXT_TYPES)
 
 
 def queue_status(conn, decision, file_id, now, delay_ms=0,
@@ -339,6 +346,33 @@ def ended_business_days(clock, before, after) -> List[datetime.date]:
     return days
 
 
+def _statement_body(account, day, number, opening, closing, shown, now, clock):
+    """(message type, body) for one account's statement, in its own format.
+
+    A NACHA-format account is sent BAI2 and everything else a ``camt.053``. The
+    two writers take the same statement data, which is what makes this a choice
+    of renderer rather than a second statement: the balances and the entries are
+    already worked out above and neither writer computes them.
+
+    ``statement-gap`` needs nothing here. It drops an entry from ``shown``
+    before this is called, so both formats leave the same entry out and both
+    keep the balances true - which is the point of the behaviour, and would stop
+    being true if either writer recomputed a total from the entries it was given.
+    """
+    if account.get("format") == "nacha":
+        # The receiver is left to default to the account id. An earlier version
+        # passed the account's name, which is a display string where BAI2 wants
+        # an identification - and the 02's originator and ultimate receiver are
+        # already the thing #57 has to settle against an outside sample, so this
+        # is not the place to add a third guess.
+        return bai2.STATEMENT, bai2.write_statement(
+            account, day, number, opening, closing, shown, created_at=now)
+    msg_id = "MB-C053-%s-%d" % (account["id"][:18], number)
+    return messages.CAMT053.name, messages.write_camt053(
+        account, day, number, opening, closing, shown, msg_id, now,
+        clock.zone).decode("utf-8")
+
+
 def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
     """A ``camt.053`` for every open account for each of ``days``, in order,
     released at once. A day already issued for an account is skipped, so
@@ -395,14 +429,17 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
             opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
                                     for p in booked)
             shown = booked[:-1] if account["behaviour"] == "statement-gap" else booked
+            # One counter for both formats, keyed on the camt.053 name it was
+            # created under: an account that changes format keeps counting where
+            # it left off rather than restarting at 1 and colliding with the
+            # statements it has already been sent.
             number = db.next_value(conn, "camt.053:" + account["id"])
-            msg_id = "MB-C053-%s-%d" % (account["id"][:18], number)
-            body = messages.write_camt053(account, day, number, opening, closing, shown,
-                                          msg_id, now, clock.zone)
+            kind, text = _statement_body(account, day, number, opening, closing,
+                                         shown, now, clock)
             cursor = conn.execute(
                 "INSERT INTO message (type, account, due_at, released_at, body)"
                 " VALUES (?,?,?,?,?)",
-                (messages.CAMT053.name, account["id"], stamp, stamp, body.decode("utf-8")))
+                (kind, account["id"], stamp, stamp, text))
             conn.execute(
                 "INSERT INTO statement (account, day, number, opening, closing, entries,"
                 " message_id) VALUES (?,?,?,?,?,?,?)",

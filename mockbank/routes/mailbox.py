@@ -32,7 +32,7 @@ def mailbox(h) -> None:
         # mix is refused, before anything is taken, and says how to ask.
         waiting = {row["type"] for row in outbox.collect(
             h.state.conn, h.state.now(), leave=True, kind=kind)}
-        text = waiting & set(nacha.TEXT_TYPES)
+        text = waiting & set(outbox.TEXT_TYPES)
         if text and len(waiting) > 1:
             return h.json(409, {
                 "error": "?raw is a sequence of XML documents, and NACHA "
@@ -46,7 +46,7 @@ def mailbox(h) -> None:
     if flag(h.query, "raw"):
         # The bodies and nothing else. See outbox.RAW_SEPARATOR on why
         # this is a sequence of documents rather than one document.
-        text = rows and all(row["type"] in nacha.TEXT_TYPES for row in rows)
+        text = rows and all(row["type"] in outbox.TEXT_TYPES for row in rows)
         return h.text(200, outbox.raw(rows), "text/plain; charset=utf-8" if text
                       else "application/xml; charset=utf-8")
     h.json(200, outbox.as_json(rows))
@@ -59,7 +59,7 @@ def message(h, identifier: str) -> None:
     if row is None:
         return unknown_message(h, identifier)
     h.text(200, row["body"].strip() + "\n",
-           "text/plain; charset=utf-8" if row["type"] in nacha.TEXT_TYPES
+           "text/plain; charset=utf-8" if row["type"] in outbox.TEXT_TYPES
            else "application/xml; charset=utf-8")
 
 

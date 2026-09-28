@@ -101,7 +101,7 @@ the mock what it supports rather than assuming.
 
 ## Formats and choreography
 
-ISO 20022 comes first; NACHA and BAI2 follow in 0.3. You send one payment file
+ISO 20022 came first, and NACHA and BAI2 joined it in 0.3. You send one payment file
 and the mock answers with the messages a real bank sends, in the order it
 sends them.
 
@@ -112,7 +112,7 @@ sends them.
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
 | `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
-| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH **(0.3; so far NACHA files are read at both doors and acknowledged, and returns and BAI2 follow)** |
+| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH, for an account whose `format` is `nacha`: a plain acknowledgement where an ISO 20022 account gets a `pain.002`, a NACHA return file where it gets a `pacs.004`, and a BAI2 statement where it gets a `camt.053` |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
@@ -271,14 +271,33 @@ computed, and it reads back through the same reader with no finding. Sent to
 `POST /payments` it is refused by name: the bank sends return files, it does
 not take them.
 
-Statements and notifications stay `camt.053` and `camt.054` until BAI2, so a
-NACHA return shows there with the same reason in ISO 20022's words (`R01` is
-`AM04`, `R02` is `AC04`, `R03` is `AC01`). In the mailbox an acknowledgement's
-type is `nacha.ack` and a return file's `nacha.return`; `GET
-/_mock/mailbox/<id>` serves either as `text/plain`, and in `--pickup-dir` they
-are `.txt` and `.ach` files. `?raw` is a sequence of XML documents, so it
-refuses with `409` to mix text into one and says how to ask for each:
-`?raw&type=nacha.ack`, `?raw&type=nacha.return` and `?raw&type=camt.`, say.
+A NACHA account's end-of-day statement is a BAI2 file, where every other
+account's is a `camt.053`: the same clock, the same balances and entries, and
+one counter shared between the two, so an account that changes format keeps
+counting. The choice is per account, so one payment file can produce both.
+Notifications stay `camt.054`, so a NACHA return shows there with the same
+reason in ISO 20022's words (`R01` is `AM04`, `R02` is `AC04`, `R03` is
+`AC01`). A BAI2 statement carries no reason at all; the `R` code is in the
+return file.
+
+**What the BAI2 statement does not yet settle.** It is held to a file from
+outside the project, which fixed who the `02` names as originator, what a record
+count covers and that balances and control totals state their sign. It could not
+settle the transaction type codes on the `16` records: `495` for a payment and
+`165` for one coming back are placeholders, and a reader should take a
+movement's direction from the code's range, 100 to 399 a credit and 400 to 699 a
+debit, as `examples/payment_run.py` does. The mock writes BAI2 and does not
+claim to read it: `mockbank.bai2.read` reads what the mock wrote and refuses a
+real bank's file
+([#114](https://github.com/rseufert/mock-bank/issues/114)).
+
+In the mailbox an acknowledgement's type is `nacha.ack`, a return file's
+`nacha.return` and a BAI2 statement's `bai2.statement`; `GET
+/_mock/mailbox/<id>` serves each as `text/plain`, and in `--pickup-dir` they
+are `.txt`, `.ach` and `.bai2` files. `?raw` is a sequence of XML documents, so
+it refuses with `409` to mix text into one and says how to ask for each:
+`?raw&type=nacha.ack`, `?raw&type=nacha.return`, `?raw&type=bai2` and
+`?raw&type=camt.`, say.
 
 A `camt.053` closes each business day for every open account the bank holds,
 in order, as the clock passes the day's end - a day with no entries still gets
@@ -330,6 +349,12 @@ curl -s -X POST http://127.0.0.1:8080/_mock/credits -H 'Content-Type: applicatio
   `RmtInf/Ustrd` and a structured `reference` apart from it in
   `RmtInf/Strd/CdtrRefInf/Ref`. A receiving system that reads the structured
   field can be tested against one that has to parse the prose.
+- **For an account that banks in NACHA the statement is BAI2**, as it is for
+  that account's debits, and money arriving is a `16` of type code `195`, an
+  incoming transfer: the `EndToEndId` as the bank reference, the structured
+  reference as the customer reference and the payer's name as the text. `195`
+  is a placeholder, like the other two codes. The `camt.054` goes to every
+  account, whatever its format.
 - **Amounts are minor units** and the currency is the account's; a credit in
   another is refused, as the mock does no FX, and so is one to a closed or
   unknown account, or for a value date already past.
@@ -734,7 +759,11 @@ a foreign-currency item is:
 - an account number over 17 characters;
 - a name that is not ASCII.
 
-Statements are still `camt.053`, so reconciling does not change. The same
+The statement may be BAI2, which is what a US bank sends an ACH account (#57),
+and `reconcile` reads it by hand into the same statement a `camt.053` gives:
+the balances, and each movement's direction from its type code's range, so no
+particular code has to be known. The reason an ACH payment came back is read
+from the bank's NACHA return file, where it is an `R` code. The same
 tests run in this mode too, which is 0.3's definition of done, with one more
 for what an entry cannot carry:
 
@@ -830,7 +859,7 @@ than half-supporting it.
 | --- | --- | --- |
 | 0.1 | ISO 20022 credit transfers: `pain.001` in; `pain.002`, `camt.054`, `camt.053` out; accounts, balances, cutoff, holidays, clock; every behaviour above except `return-later`; HTTP only | **Done.** Every message the mock writes validates against its own dictionary and against the published XSDs; the tour and the example client run in CI |
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
-| 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | The same `payment_run` tests pass in NACHA mode |
+| 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | The procure to pay example runs in CI against mock-sap and mock-edi from PyPI |
 
 ## Contributing

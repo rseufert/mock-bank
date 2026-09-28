@@ -70,13 +70,13 @@ class TheDeclaration(unittest.TestCase):
         # The writer is built from the declaration, so a caller that forgets a
         # field is a bug here rather than a short line somebody else's parser
         # rejects days later.
-        with self.assertRaises(bai2.Unreadable) as refused:
+        with self.assertRaises(bai2.Unwritable) as refused:
             bai2._record("49", 100)              # a 49 takes a total and a count
         self.assertIn("account trailer", str(refused.exception))
         self.assertIn("49", str(refused.exception))
 
     def test_an_undeclared_record_code_is_refused(self):
-        with self.assertRaises(bai2.Unreadable):
+        with self.assertRaises(bai2.Unwritable):
             bai2._record("88", 1, 2)
 
 
@@ -163,7 +163,7 @@ class TheTypeCodes(unittest.TestCase):
         # a cosmetic slip, so an unexplained credit stops here.
         arriving = payment(9, "CUSTOMER-1", 50000, credit=True)
         arriving["return_reason"] = ""
-        with self.assertRaises(bai2.Unreadable) as refused:
+        with self.assertRaises(bai2.Unwritable) as refused:
             bai2.write_statement(ACCOUNT, DAY, 7, 0, 50000, [arriving],
                                  created_at=AT)
         self.assertIn("CUSTOMER-1", str(refused.exception))
@@ -172,12 +172,21 @@ class TheTypeCodes(unittest.TestCase):
 
     def test_the_account_record_carries_the_two_balances_and_no_movement_totals(self):
         # Movement summaries on the 03 are legal BAI2 and were in a first draft.
-        # They double-count: the control total sums every amount field, so each
-        # payment would appear in its summary and again in its own 16.
+        # The draft was dropped because they would be counted twice - once in the
+        # summary and again in each 16 - and #57's outside sample shows that is
+        # exactly what BAI2 does: each of its 49 totals is precisely twice the sum
+        # of its own 16s, because the 88's credit and debit totals are in there
+        # too. So the double-counting was real and the objection to it was not: a
+        # BAI2 reader expects the total to include the summaries.
+        #
+        # This mock still writes balances only, which is what the issue asks for
+        # and what keeps the 03 a statement of position rather than a second
+        # rendering of the entries. It is now a choice with a reason rather than
+        # an avoidance of a problem that turned out not to exist.
         _, _, text = both(10875000, 12500000, THREE)
         account_record = [l for l in text.splitlines() if l.startswith("03,")][0]
-        self.assertIn("010,10875000", account_record)
-        self.assertIn("015,12500000", account_record)
+        self.assertIn("010,+10875000", account_record)
+        self.assertIn("015,+12500000", account_record)
         # Against the constants: an earlier version asserted "455" was absent,
         # which was the first draft's debit code, so after it changed to 495 the
         # assertion could no longer fail for the reason it was written for.
@@ -233,10 +242,10 @@ class TheTrailers(unittest.TestCase):
     def test_a_wrong_total_or_count_in_any_trailer_is_caught_by_name(self):
         text = self.file()
         for original, broken, expect in (
-                ("49,25125000,5/", "49,999999,5/", "account control total"),
-                ("49,25125000,5/", "49,25125000,9/", "number of records"),
-                ("98,25125000,1,7/", "98,1,1,7/", "group control total"),
-                ("99,25125000,1,9/", "99,25125000,1,99/", "number of records")):
+                ("49,+25125000,5/", "49,+999999,5/", "account control total"),
+                ("49,+25125000,5/", "49,+25125000,9/", "number of records"),
+                ("98,+25125000,1,7/", "98,+1,1,7/", "group control total"),
+                ("99,+25125000,1,9/", "99,+25125000,1,99/", "number of records")):
             with self.subTest(expect=expect, broken=broken):
                 self.assertIn(original, text, "the file's shape moved")
                 problems = bai2.trailers_agree(text.replace(original, broken))
@@ -269,49 +278,78 @@ class FieldsThatCouldEndARecordEarly(unittest.TestCase):
 
 
 class FreeTextInEveryRecord(unittest.TestCase):
-    """Not only the 16. The account's name is free text on the control plane.
+    """Not only the 16. The party names are free text, and reach two records.
 
     `_safe` used to be applied at three call sites, all in the 16, so the 01 and
     the 02 were open: an account named `ACME, Inc.` wrote a nine-field 02 with
     every field after the name shifted, and `A/S Nordisk` ended the record at
     `02,A/`. Neither showed up as a failing test, because `read` did not count a
     record's fields against its declaration and accepted the nine-field 02.
+
+    **These probed it through the account's name until #57.** The 02 carried that
+    name, wrongly - the sample from outside the project shows the 02 naming the
+    same two parties as the 01, by identification and not by name - so once the
+    02 was fixed, `account["name"]` reached no record at all and every test here
+    passed whatever `_safe` did. Two of them passed *vacuously* rather than
+    failing, which is the worse half: asserting a character is absent from a file
+    that never had the field.
+
+    So they go through `receiver` now, which the 01 carries as its receiver and
+    the 02 as its ultimate receiver. That is stricter than before, not a
+    workaround: one junk value has to survive two records rather than one.
     """
 
-    def with_name(self, name):
-        account = dict(ACCOUNT, name=name)
-        return bai2.write_statement(account, DAY, 7, 2000, 1000, THREE[:1],
-                                    created_at=AT)
+    def with_party(self, name):
+        return bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, THREE[:1],
+                                    created_at=AT, receiver=name)
 
     def group_header(self, text):
         return [l for l in text.splitlines() if l.startswith("02,")][0]
 
-    def test_a_comma_in_the_account_name_does_not_shift_the_group_header(self):
-        text = self.with_name("ACME, Inc.")
+    def file_header(self, text):
+        return [l for l in text.splitlines() if l.startswith("01,")][0]
+
+    def test_a_comma_in_a_party_does_not_shift_the_headers(self):
+        text = self.with_party("ACME, Inc.")
+        self.assertEqual(self.file_header(text),
+                         "01,MOCKBANK,ACME  Inc.,261006,0000,7,,,2/")
         self.assertEqual(self.group_header(text),
-                         "02,ACME  Inc.,ACME,1,261005,0000,EUR,/")
+                         "02,ACME  Inc.,MOCKBANK,1,261005,0000,EUR,/")
         self.assertEqual(len(bai2.read(text)), 7)
 
-    def test_a_slash_in_the_account_name_does_not_end_the_group_header(self):
-        text = self.with_name("A/S Nordisk")
+    def test_a_slash_in_a_party_does_not_end_the_headers(self):
+        text = self.with_party("A/S Nordisk")
+        self.assertIn("A S Nordisk", self.file_header(text))
         self.assertIn("A S Nordisk", self.group_header(text))
         self.assertEqual(len(bai2.read(text)), 7)
 
-    def test_a_line_break_in_the_account_name_does_not_split_the_record(self):
+    def test_a_line_break_in_a_party_does_not_split_the_record(self):
         # The trailers count the record once however many lines it occupies, so
         # a split record is a wrong file rather than merely an unreadable one.
         for breaker in ("\n", "\r", "\r\n", "\u2028", "\u2029", "\u0085"):
             with self.subTest(breaker=repr(breaker)):
-                text = self.with_name("ACME" + breaker + "Inc.")
+                text = self.with_party("ACME" + breaker + "Inc.")
                 self.assertEqual(len(text.splitlines()), 7)
                 self.assertEqual(len(bai2.read(text)), 7)
                 self.assertEqual(bai2.trailers_agree(text), [])
 
-    def test_the_file_header_is_made_safe_too(self):
+    def test_the_party_a_test_alters_does_reach_the_file(self):
+        # The guard on the whole class. If `receiver` stops reaching a record the
+        # way `account["name"]` did, every test above goes quiet instead of red,
+        # so one test asserts the input is load-bearing.
+        self.assertNotEqual(self.with_party("ONE"), self.with_party("TWO"))
+        self.assertNotIn("ONE", self.with_party("TWO"))
+
+    def test_the_sender_is_made_safe_in_both_records_it_reaches(self):
         text = bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, THREE[:1],
                                     created_at=AT, sender="MOCK, BANK/1")
-        header = [l for l in text.splitlines() if l.startswith("01,")][0]
-        self.assertEqual(header, "01,MOCK  BANK 1,ACME,261006,0000,7,,,2/")
+        self.assertEqual(self.file_header(text),
+                         "01,MOCK  BANK 1,ACME,261006,0000,7,,,2/")
+        # The same value, as the 02's originator: since #57 the bank is named in
+        # both headers, so a sender that is safe in one and not the other is a
+        # state this can distinguish.
+        self.assertEqual(self.group_header(text),
+                         "02,ACME,MOCK  BANK 1,1,261005,0000,EUR,/")
         self.assertEqual(len(bai2.read(text)), 7)
 
     def test_none_is_written_as_nothing_rather_than_as_the_word(self):
@@ -330,8 +368,9 @@ class TheReaderCountsFields(unittest.TestCase):
         return both(2000, 1000, THREE[:1])[2]
 
     def test_a_record_with_a_field_too_many_is_refused_by_line_and_name(self):
-        text = self.clean().replace("02,ACME Corporation,",
-                                    "02,ACME,Corporation,")
+        # The 02's ultimate receiver, split in two. Since #57 that field is the
+        # account's id rather than its name, so the shift is `ACME` -> `AC,ME`.
+        text = self.clean().replace("02,ACME,", "02,AC,ME,")
         with self.assertRaises(bai2.Unreadable) as refused:
             bai2.read(text)
         self.assertIn("line 2", str(refused.exception))
@@ -363,7 +402,7 @@ class OnlyABalanceMayBeNegative(unittest.TestCase):
     def test_a_negative_movement_is_refused_rather_than_written(self):
         # It would contradict its own type code and lower the control total.
         row = dict(THREE[0], amount=-1000)
-        with self.assertRaises(bai2.Unreadable) as refused:
+        with self.assertRaises(bai2.Unwritable) as refused:
             bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, [row],
                                  created_at=AT)
         self.assertIn("direction", str(refused.exception))
@@ -383,6 +422,69 @@ class TheFileHeaderDate(unittest.TestCase):
         header = [l for l in text.splitlines() if l.startswith("01,")][0]
         self.assertEqual(header.split(",")[3], "261006")        # AT, not DAY
         self.assertNotEqual(header.split(",")[3], "261005")
+
+
+class ControlCharactersAndWhichErrorIsWhich(unittest.TestCase):
+    """Two things inherited from #95's review, fixed here because #95 had merged.
+
+    `_safe` listed the line breaks it could think of, which left tab and `\x01`
+    to pass through: harmless to the field boundaries and still junk in a file a
+    bank parses. A list of the dangerous ones is a list somebody has to keep
+    complete; "no control characters" is not.
+
+    And the writer raised `Unreadable`, which reads as though something had been
+    parsed. The writer's refusals are `Unwritable` now, both under `Wrong` so a
+    caller that does not care can still catch one thing.
+    """
+
+    def with_party(self, name):
+        # Through `receiver`, not `account["name"]`, for the reason
+        # `FreeTextInEveryRecord` gives: since #57 fixed the 02's parties the
+        # account's name reaches no record, and these would have gone quiet.
+        return bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000,
+                                    THREE[:1], created_at=AT, receiver=name)
+
+    def test_the_party_a_test_alters_does_reach_the_file(self):
+        self.assertNotEqual(self.with_party("ONE"), self.with_party("TWO"))
+
+    def test_every_c0_control_and_del_is_replaced(self):
+        for code in list(range(0x20)) + [0x7f]:
+            with self.subTest(code=hex(code)):
+                text = self.with_party("ACME" + chr(code) + "Inc.")
+                # Per record, not per file: the file is newline-separated, so
+                # asserting the character is absent from the whole text is a
+                # test that can never pass for 0x0a. What matters is that no
+                # record carries it.
+                for line in text.splitlines():
+                    self.assertNotIn(chr(code), line)
+                self.assertEqual(len(bai2.read(text)), 7)
+                self.assertEqual(bai2.trailers_agree(text), [])
+
+    def test_a_tab_no_longer_survives(self):
+        # The one the earlier list missed that a human would actually paste.
+        self.assertIn("ACME Inc.", self.with_party("ACME\tInc."))
+
+    def test_printable_punctuation_is_left_alone(self):
+        # Only what would break a field or a parser: a name is not sanitised
+        # beyond that, because a statement should say who was paid.
+        text = self.with_party("Acção & Cia. (S.A.) – #1")
+        self.assertIn("Acção & Cia. (S.A.) – #1", text)
+
+    def test_the_writer_and_the_reader_raise_different_errors(self):
+        self.assertTrue(issubclass(bai2.Unwritable, bai2.Wrong))
+        self.assertTrue(issubclass(bai2.Unreadable, bai2.Wrong))
+        self.assertFalse(issubclass(bai2.Unwritable, bai2.Unreadable))
+        with self.assertRaises(bai2.Unwritable):
+            bai2._record("49", 100)
+        with self.assertRaises(bai2.Unreadable):
+            bai2.read("77,nothing/\n")
+
+    def test_either_can_be_caught_as_one_thing(self):
+        for call in (lambda: bai2._record("49", 100),
+                     lambda: bai2.read("77,nothing/\n")):
+            with self.subTest():
+                with self.assertRaises(bai2.Wrong):
+                    call()
 
 
 class ReadingBackWhatIsNotBai2(unittest.TestCase):

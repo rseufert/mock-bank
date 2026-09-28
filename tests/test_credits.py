@@ -13,7 +13,7 @@ from xml.etree import ElementTree as ET
 from test_statements import (ACME, CAMT053, FRIDAY, M, MONDAY, TODAY, StatementCase,
                              minor, read_statement)
 
-from mockbank import schema
+from mockbank import bai2, schema
 
 CAMT054 = schema.MESSAGES["camt.054.001.08"]
 N = {"m": CAMT054.namespace}
@@ -233,14 +233,20 @@ class OnAnAccountThatIsNotPlain(CreditCase):
         self.assertEqual(self.credit_entries(root), [])
         self.assertEqual(read_statement(root)["closing"], before + 125000)
 
-    def test_a_nacha_account_books_it_too(self):
+    def test_a_nacha_account_books_it_and_its_bai2_statement_says_received(self):
+        # A NACHA account's statement is BAI2 (#57), where money arriving is
+        # a received credit, not a payment of ours coming back.
         self.patch("/_mock/accounts/ACME", body={"format": "nacha", "currency": "USD"})
         before = self.balance("ACME")
-        self.credit(currency="USD")
+        self.credit(currency="USD", end_to_end_id="CUST-77", reference="RF18539007547034")
         self.advance(FRIDAY)
         self.assertEqual(self.balance("ACME"), before + 125000)
-        [entry] = self.credit_entries(self.statement_roots()[0])
-        self.assertEqual(entry["amount"], 125000)
+        [text] = [m["body"] for m in self.get("/_mock/mailbox?type=bai2").json()]
+        [statement] = bai2.statements(text)
+        self.assertEqual([(e.type_code, e.amount, e.reference) for e in statement.entries],
+                         [(bai2.RECEIVED_CREDIT, 125000, "CUST-77")])
+        self.assertEqual((statement.opening, statement.closing), (before, before + 125000))
+        self.assertEqual(bai2.trailers_agree(text), [])
 
     def test_return_later_never_sends_money_that_arrived_back(self):
         self.patch("/_mock/accounts/ACME", body={"behaviour": "return-later"})

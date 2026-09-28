@@ -145,15 +145,32 @@ RETURN_OF = {"22": "21", "32": "31", "42": "41", "52": "51"}
 # Returns the reader takes: of credits, which this bank writes, and of debits
 # (26, 36, 46), which it never sends but which a return file from anywhere
 # else may carry - moov-io/ach's `return-WEB.ach` has one of each (#55).
-RETURNS = set(RETURN_OF.values()) | {"26", "36", "46"}
+# ... and 56, a returned loan debit: 26, 36, 46 and 56 are the automated returns
+# of debits to checking, savings, the general ledger and a loan, exactly as 21,
+# 31, 41 and 51 are of the credits. Three of the four were here, which was an
+# asymmetry rather than a decision (#102).
+RETURNS = set(RETURN_OF.values()) | {"26", "36", "46", "56"}
+
+
+# The second digits that mean a credit. A tuple, not the string "1234": `in` on
+# a string is a substring test, so `"" in "1234"` is True and a blank or
+# one-character code counted as a credit - silently, and on the side the mock's
+# own writer agreed with, which is the side where an error hides (#102).
+CREDIT_DIGITS = ("1", "2", "3", "4")
 
 
 def side(code: str) -> str:
     """Which control total an entry counts in: by its code's second digit,
     1 to 4 a credit and 6 to 9 a debit - returns included. A return of a debit
     (26) is a debit, however the money moves; moov-io/ach's file, which the
-    reader is held to, counts it that way (#55)."""
-    return "credit" if code[1:2] in "1234" else "debit"
+    reader is held to, counts it that way (#55).
+
+    A code with no second digit is a debit here, which is not because a blank is
+    a debit - it is neither - but because the credit total is the one the bank's
+    own writer computes the same way, so anything unclassifiable landing there
+    is the case that cannot be caught. Such a code only reaches this from a
+    malformed line, which is already a finding of its own."""
+    return "credit" if code[1:2] in CREDIT_DIGITS else "debit"
 
 # The return codes the bank answers with, from what it decided (#54): the
 # same behaviours a pain.002 answers with ISO 20022 reasons.
