@@ -606,8 +606,10 @@ takes that one file with it.
 
 **Look at `run.problems` first.** An answer the run could not use goes there,
 in words: the bank answering anything but `202` or `422` to the payment file, a
-mailbox that does not answer, or SAP refusing a statement. It is not raised and
-it is not dropped. An empty list is what a clean run looks like. Each item's
+mailbox answering with an error, SAP refusing a statement - and a bank or SAP
+that does not answer at all, down or refusing the connection, which is named as
+such. None of it is raised and none of it is dropped. A payment file the bank
+never received leaves every item `selected`, to send again. An empty list is what a clean run looks like. Each item's
 `status` and `reason` say the rest: `rejected` with the bank's code, `cleared`
 with SAP's clearing document, `unreconciled` when a statement does not add up,
 `returned` with the bank's reason.
@@ -627,7 +629,8 @@ numbered as there, and what the rest of the suite adds to them:
 | `test_an_item_not_yet_due_is_not_selected` | An invoice on `NT30` terms is left for a later run |
 | `test_the_selection_asks_sap_to_leave_blocked_and_cleared_items_out` | The query SAP receives asks for supplier lines that are neither blocked nor cleared |
 | `test_a_blocked_invoice_is_never_selected` | An invoice blocked for payment on the supplier invoice, as an SAP user blocks one, never reaches the bank; the unblocked one beside it is paid |
-| `test_sap_refusing_a_statement_is_recorded_against_it`, `test_a_bank_that_does_not_answer_is_a_problem_not_silence` | What goes into `run.problems`, and that nothing stops half way |
+| `test_a_bank_that_answers_with_an_error_is_a_problem_not_silence`, `test_sap_refusing_a_statement_is_recorded_against_it` | An error answer from either side goes into `run.problems` in words, and nothing stops half way |
+| `test_a_bank_that_does_not_answer_is_a_problem_not_silence`, `test_sap_not_answering_the_selection_selects_nothing_and_says_so`, `test_sap_not_answering_a_statement_is_recorded_against_it` | A side that does not answer at all - a port nothing listens on - is a named problem too, not a traceback, and a file that never reached the bank leaves its items as they were |
 | `test_two_payments_of_the_missing_amount_are_both_named` | A shortfall two payments could explain names both rather than guessing one |
 
 ```bash

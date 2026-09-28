@@ -64,7 +64,8 @@ from typing import Dict, List, Optional
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
-from bank_messages import ACCEPTED, PAIN001, bank_documents, call, child_text, entries, tag
+from bank_messages import (ACCEPTED, NO_ANSWER, PAIN001, bank_documents, call, child_text,
+                           entries, tag)
 
 ODATA = "/sap/opu/odata/sap"
 ITEMS = ODATA + "/API_OPLACCTGDOCITEMCUBE_SRV/A_OperationalAcctgDocItemCube"
@@ -157,7 +158,19 @@ class PaymentRun:
         self.session = SapSession(sap)
 
     def run(self, run_on: datetime.date, identification: str) -> Run:
-        run = Run(run_on, identification, self.select(run_on))
+        run = Run(run_on, identification)
+        try:
+            run.items = self.select(run_on)
+        except urllib.error.HTTPError as error:
+            run.problems.append("SAP answered %d to the selection, so no open item "
+                                "was selected" % error.code)
+            return run
+        except (urllib.error.URLError, OSError) as error:
+            # Nothing selected is nothing paid, which is the safe side; the
+            # problem says why the list is empty rather than leaving it to look
+            # like a day with nothing due.
+            run.problems.append(unanswered("SAP", "no open item was selected", error))
+            return run
         self.send(run)
         self.read_status(run)
         return run
@@ -226,6 +239,12 @@ class PaymentRun:
             return
         run.http_status, body = call(self.bank, "POST", "/payments",
                                      self.payment_file(run, paying), "application/xml")
+        if run.http_status == NO_ANSWER:
+            # The file did not reach the bank, so nothing was sent: every item
+            # stays selected, for the same run to be sent again.
+            run.problems.append("the bank did not answer, so the payment file was "
+                                "not sent: %s" % body.decode("utf-8", "replace"))
+            return
         if run.http_status not in (202, 422):
             # 422 is a file the bank rejected, and its pain.002 says why; any
             # other answer means the file may not have arrived at all.
@@ -288,8 +307,8 @@ class PaymentRun:
         """
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=pain.002")
         if status != 200:
-            run.problems.append("the bank's mailbox answered %d, so no status report "
-                                "was read" % status)
+            run.problems.append("the bank's mailbox %s, so no status report was read"
+                                % said(status, raw))
             return
         by_reference = {i.reference: i for i in run.paying()}
         for root in bank_documents(raw.decode("utf-8")):
@@ -335,8 +354,8 @@ class PaymentRun:
         """
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=camt.053")
         if status != 200:
-            run.problems.append("the bank's mailbox answered %d, so no statement was "
-                                "read: %s" % (status, raw.decode("utf-8", "replace")[:200]))
+            run.problems.append("the bank's mailbox %s, so no statement was read"
+                                % said(status, raw))
             return
         statements = [s for d in bank_documents(raw.decode("utf-8"))
                       if tag(d[0]) == "BkToCstmrStmt"
@@ -364,6 +383,11 @@ class PaymentRun:
             applied = {}
             record["error"] = "SAP refused statement %s: %d %s" % (
                 number, error.code, error.read().decode("utf-8", "replace")[:200])
+            run.problems.append(record["error"])
+        except (urllib.error.URLError, OSError) as error:
+            applied = {}
+            record["error"] = unanswered("SAP", "statement %s was not posted" % number,
+                                         error)
             run.problems.append(record["error"])
         record.update(cleared=applied.get("CLEARED", []),
                       reopened=applied.get("REOPENED", []),
@@ -453,6 +477,20 @@ class PaymentRun:
                 "</E1IDKU1></IDOC></FINSTA01>"
                 % (escape(number), day.replace("-", ""), escape(self.company["bic"]),
                    escape(iban), iban[:2], "".join(body)))
+
+
+def said(status: int, body: bytes) -> str:
+    """How the bank answered, in words: not at all, or with which status."""
+    text = body.decode("utf-8", "replace")[:200]
+    if status == NO_ANSWER:
+        return "did not answer (%s)" % text
+    return "answered %d: %s" % (status, text)
+
+
+def unanswered(side: str, consequence: str, error) -> str:
+    """A host that did not answer at all, named, and what that left undone."""
+    return "%s did not answer, so %s: %s" % (side, consequence,
+                                              getattr(error, "reason", error))
 
 
 def signed(amount: str, side: str) -> Decimal:
