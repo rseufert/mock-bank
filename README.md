@@ -111,13 +111,14 @@ sends them.
 | `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
+| `camt.052` | Out | When you ask: `POST /_mock/accounts/<id>/report` | The intraday report: the day so far for one account, with its opening balance (`OPBD`), the balance now (`ITBD`) and every entry booked today, on the same terms as the statement the day will end with. `statement-gap` does not apply to it, so a reconciler can see the entry the statement then leaves out |
 | `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
 | NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH, for an account whose `format` is `nacha`: a plain acknowledgement where an ISO 20022 account gets a `pain.002`, a NACHA return file where it gets a `pacs.004`, and a BAI2 statement where it gets a `camt.053` |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model. The mock writes
-`pain.002.001.10`, `camt.054.001.08`, `camt.053.001.08` and `pacs.004.001.09`,
-the versions that go with `pain.001.001.09` and that most banks accept today. That is a choice, not
+`pain.002.001.10`, `camt.054.001.08`, `camt.053.001.08`, `camt.052.001.08` and
+`pacs.004.001.09`, the versions that go with `pain.001.001.09` and that most banks accept today. That is a choice, not
 the only right answer; so are the others the standard leaves open, and the
 mock says which it made:
 
@@ -530,6 +531,7 @@ like mock-edi's so the two feel the same.
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
+| Intraday report | `POST /_mock/accounts/<id>/report` | A `camt.052` for the account now, released to the mailbox and the pickup directory at once; answers `201` with its number, day, opening and interim balance and how many entries it carries. Every account gets one, whatever its `format`; a closed account is `409` |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole. What is still due on a day that becomes one moves to the next business day; today is refused once something has booked on it |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
@@ -964,7 +966,6 @@ than half-supporting it.
 | Direct debits (`pain.008`) | Collections are a second choreography; they can follow once credit transfers are solid. |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
-| Intraday reports (`camt.052`) | Useful, but `camt.054` covers what a reconciliation test needs first. |
 
 ## Roadmap
 
@@ -974,7 +975,7 @@ than half-supporting it.
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Done.** `procure_to_pay`'s ten tests pass in CI against mock-sap and mock-edi from PyPI |
-| 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source | In progress. What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
+| 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source; an intraday `camt.052` on request | In progress. What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
 
 ## Contributing
 

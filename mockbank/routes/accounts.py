@@ -1,4 +1,5 @@
-"""The accounts the bank holds, and the statements issued for them."""
+"""The accounts the bank holds, the statements issued for them, and the
+intraday report a test can ask for."""
 from __future__ import annotations
 
 from .. import accounts, outbox
@@ -63,6 +64,25 @@ def statements(h, identifier: str) -> None:
     if accounts.get(h.state.conn, identifier) is None:
         return unknown_account(h, identifier)
     h.json(200, outbox.statements(h.state.conn, identifier))
+
+
+@route("POST", "/_mock/accounts/<id>/report",
+       note=("a camt.052 intraday report for an account now: the day so far, "
+             "released to the mailbox at once"))
+def report(h, identifier: str) -> None:
+    row = accounts.get(h.state.conn, identifier)
+    if row is None:
+        return unknown_account(h, identifier)
+    # Book whatever has come due first, so the report is the day as it stands.
+    h.state.release()
+    try:
+        issued = outbox.issue_report(h.state.conn, h.state.clock,
+                                     accounts.get(h.state.conn, identifier),
+                                     h.state.now())
+    except outbox.Unreportable as refusal:
+        return h.json(409, {"error": str(refusal)})
+    h.state.deliver()
+    h.json(201, issued)
 
 
 def unknown_account(h, identifier: str) -> None:

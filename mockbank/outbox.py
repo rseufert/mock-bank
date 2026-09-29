@@ -20,6 +20,9 @@ Four kinds of message leave the bank, each on its own schedule:
   the bank holds, for every business day an advance of the clock passes the
   end of, in order, empty days included (``issue_statements``).
 
+* **``camt.052``** is written when a test asks for one: the day so far for one
+  account, released at once (``issue_report``, #132).
+
 ``release_due`` is the function the clock calls first as it moves: it books
 every payment whose settlement date has come, writes their ``camt.054``, and
 releases every queued message whose time has come. It is safe to call twice:
@@ -373,6 +376,48 @@ def _statement_body(account, day, number, opening, closing, shown, now, clock):
         clock.zone).decode("utf-8")
 
 
+def _position(conn, account, day):
+    """(opening, closing, entries) for one account's ``day``, as the
+    statement and the intraday report both state them.
+
+    The closing is the account's balance now with every movement booked after
+    ``day`` undone, and the opening is the closing with the day's own
+    movements undone too. For today, nothing has booked after it, so the
+    closing is the balance now: what a report calls the interim balance.
+    """
+    when = day.isoformat()
+    # Debits booked after the day took money out since; returns that
+    # came back after it put money in. Undo both to reach the day's end.
+    later_debits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                                " WHERE account_id = ? AND booked_at IS NOT NULL"
+                                " AND settlement_date > ?",
+                          (account["id"], when))["total"]
+    later_credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
+                                 " WHERE account_id = ? AND returned_at IS NOT NULL"
+                                 " AND return_due > ?",
+                           (account["id"], when))["total"]
+    booked = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
+                           " JOIN file ON file.id = payment.file_id"
+                           " WHERE account_id = ? AND booked_at IS NOT NULL"
+                           " AND settlement_date = ? ORDER BY payment.id",
+                     (account["id"], when))
+    came_back = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
+                              " JOIN file ON file.id = payment.file_id"
+                              " WHERE account_id = ? AND returned_at IS NOT NULL"
+                              " AND return_due = ? ORDER BY payment.id",
+                        (account["id"], when))
+    booked += [dict(p, credit=True) for p in came_back]
+    # Money that arrived from somebody else (#91): on the day it booked,
+    # and undone, like a return, for any day before it.
+    later_credits += credits.booked_after(conn, account["id"], when)
+    booked += [dict(c, incoming=True, credit=True)
+               for c in credits.booked_on(conn, account["id"], when)]
+    closing = account["balance"] + int(later_debits) - int(later_credits)
+    opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
+                            for p in booked)
+    return opening, closing, booked
+
+
 def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
     """A ``camt.053`` for every open account for each of ``days``, in order,
     released at once. A day already issued for an account is skipped, so
@@ -398,36 +443,7 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
                     conn, "SELECT id FROM statement WHERE account = ? AND day = ?",
                     (account["id"], day.isoformat())):
                 continue
-            when = day.isoformat()
-            # Debits booked after the day took money out since; returns that
-            # came back after it put money in. Undo both to reach the day's end.
-            later_debits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
-                                        " WHERE account_id = ? AND booked_at IS NOT NULL"
-                                        " AND settlement_date > ?",
-                                  (account["id"], when))["total"]
-            later_credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
-                                         " WHERE account_id = ? AND returned_at IS NOT NULL"
-                                         " AND return_due > ?",
-                                   (account["id"], when))["total"]
-            booked = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
-                                   " JOIN file ON file.id = payment.file_id"
-                                   " WHERE account_id = ? AND booked_at IS NOT NULL"
-                                   " AND settlement_date = ? ORDER BY payment.id",
-                             (account["id"], when))
-            came_back = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
-                                      " JOIN file ON file.id = payment.file_id"
-                                      " WHERE account_id = ? AND returned_at IS NOT NULL"
-                                      " AND return_due = ? ORDER BY payment.id",
-                                (account["id"], when))
-            booked += [dict(p, credit=True) for p in came_back]
-            # Money that arrived from somebody else (#91): on the day it booked,
-            # and undone, like a return, for any day before it.
-            later_credits += credits.booked_after(conn, account["id"], when)
-            booked += [dict(c, incoming=True, credit=True)
-                       for c in credits.booked_on(conn, account["id"], when)]
-            closing = account["balance"] + int(later_debits) - int(later_credits)
-            opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
-                                    for p in booked)
+            opening, closing, booked = _position(conn, account, day)
             shown = booked[:-1] if account["behaviour"] == "statement-gap" else booked
             # One counter for both formats, keyed on the camt.053 name it was
             # created under: an account that changes format keeps counting where
@@ -449,6 +465,39 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
                            "number": number, "message_id": cursor.lastrowid})
     conn.commit()
     return issued
+
+
+class Unreportable(ValueError):
+    """An account the bank will not report on: closed."""
+
+
+def issue_report(conn, clock, account, now) -> Dict[str, Any]:
+    """A ``camt.052`` for ``account`` as of ``now``, released at once (#132).
+
+    The same position the day's statement will state, so far: the opening,
+    the balance now, and every entry booked today. ``statement-gap`` is not
+    applied - it is a fault in the statement, and a report that shows the
+    entry the statement then leaves out is what lets a reconciler find it.
+    Reports are numbered on their own counter, apart from the statements'.
+    """
+    if account["closed"]:
+        raise Unreportable("account %r is closed, and the bank does not report on "
+                           "a closed account" % account["id"])
+    today = clock.today()
+    opening, interim, booked = _position(conn, account, today)
+    number = db.next_value(conn, "camt.052:" + account["id"])
+    msg_id = "MB-C052-%s-%d" % (account["id"][:18], number)
+    body = messages.write_camt052(account, today, number, opening, interim, booked,
+                                  msg_id, now, clock.zone).decode("utf-8")
+    stamp = db.stamp(now)
+    cursor = conn.execute(
+        "INSERT INTO message (type, account, due_at, released_at, body)"
+        " VALUES (?,?,?,?,?)",
+        (messages.CAMT052.name, account["id"], stamp, stamp, body))
+    conn.commit()
+    return {"account": account["id"], "day": today.isoformat(), "number": number,
+            "opening": opening, "interim": interim, "entries": len(booked),
+            "message_id": cursor.lastrowid}
 
 
 def statements(conn, account_id) -> List[Dict[str, Any]]:

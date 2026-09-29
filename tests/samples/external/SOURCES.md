@@ -175,6 +175,7 @@ from these pinned commits and must match these SHA-256s before use:
 | `pacs.004.001.09.xsd` | same | `xsd/pacs.004.001.09.xsd` | `e2b13023bed19429bd8347ed9e13d31e6dec33fa4a8ef07dd03138d5442826b9` |
 | `camt.053.001.08.xsd` | [genkgo/camt](https://github.com/genkgo/camt) (MIT) @ `56e047d1599854ca34db0ccabce15230fcdd3f16` | `assets/camt.053.001.08.xsd` | `c3cfac080dc31476bde7444b05d00e1b23558d5e44529e58d0ad562e6013873d` |
 | `camt.054.001.08.xsd` | same | `assets/camt.054.001.08.xsd` | `2b392a1f7e70e70902fd0d803ff85989613bd1cae351663240b0bb9243be2c28` |
+| `camt.052.001.08.xsd` | same | `assets/camt.052.001.08.xsd` | `113d29938c45ba1c993f2d3e31610a214f3fb3e9ea0c6f2945750c0586567d15` |
 
 The same values are in `XSDS` in `tools/check_xsd.py`; `tests/test_dictionary.py`
 checks that the two agree. To re-pin, change both.

@@ -443,6 +443,48 @@ def write_camt053(account, day, number, opening, closing, payments, msg_id,
     under ``statement-gap`` they are meant not to.
     """
     ccy = account["currency"]
+    start = datetime.datetime.combine(day, datetime.time(0, 0), tzinfo=zone)
+    end = datetime.datetime.combine(day, datetime.time(23, 59, 59), tzinfo=zone)
+    statement = _account_report(account, day, payments, msg_id, created_at, start, end)
+    statement.update({"LglSeqNb": number, "ElctrncSeqNb": number,
+                      "Bal": [_balance("OPBD", opening, ccy, day),
+                              _balance("CLBD", closing, ccy, day)]})
+    return schema.serialize(CAMT053, {"BkToCstmrStmt": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at},
+        "Stmt": [statement]}})
+
+
+CAMT052 = schema.MESSAGES["camt.052.001.08"]
+
+
+def write_camt052(account, day, number, opening, interim, payments, msg_id,
+                  created_at, zone) -> bytes:
+    """The intraday report for one account, as of ``created_at``:
+    ``camt.052.001.08`` (#132).
+
+    What the day's statement will say so far: ``opening`` is the day's opening
+    booked balance (``OPBD``), ``interim`` the booked balance now (``ITBD``),
+    and ``payments`` every entry booked today up to now. The period runs from
+    the start of the day to ``created_at``. ``number`` is the account's report
+    number, its own sequence; a report is not a legal statement, so it carries
+    no ``LglSeqNb``.
+    """
+    ccy = account["currency"]
+    start = datetime.datetime.combine(day, datetime.time(0, 0), tzinfo=zone)
+    report = _account_report(account, day, payments, msg_id, created_at, start,
+                             created_at)
+    report.update({"ElctrncSeqNb": number,
+                   "Bal": [_balance("OPBD", opening, ccy, day),
+                           _balance("ITBD", interim, ccy, day)]})
+    return schema.serialize(CAMT052, {"BkToCstmrAcctRpt": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at},
+        "Rpt": [report]}})
+
+
+def _account_report(account, day, payments, msg_id, created_at, start, end):
+    """What a statement and a report share: the account, the period, the
+    entries and their summary. ``TxsSummry`` totals the entries shown."""
+    ccy = account["currency"]
     entries = [_entry(p, day) for p in payments]
     credits = [p["amount"] for p in payments if p.get("credit")]
     debits = [p["amount"] for p in payments if not p.get("credit")]
@@ -459,20 +501,12 @@ def write_camt053(account, day, number, opening, closing, payments, msg_id,
         if debits:
             summary["TtlDbtNtries"] = {"NbOfNtries": len(debits),
                                        "Sum": format_decimal(sum(debits), ccy)}
-    start = datetime.datetime.combine(day, datetime.time(0, 0), tzinfo=zone)
-    end = datetime.datetime.combine(day, datetime.time(23, 59, 59), tzinfo=zone)
-    statement = {
-        "Id": msg_id, "ElctrncSeqNb": number, "LglSeqNb": number,
-        "CreDtTm": created_at, "FrToDt": {"FrDtTm": start, "ToDtTm": end},
-        "Acct": {"Id": {"IBAN": account["iban"]}, "Ccy": ccy,
-                 "Ownr": {"Nm": account["name"][:140]},
-                 "Svcr": {"FinInstnId": {"BICFI": BANK_BIC}}},
-        "Bal": [_balance("OPBD", opening, ccy, day), _balance("CLBD", closing, ccy, day)],
-        "TxsSummry": summary,
-        "Ntry": entries}
-    return schema.serialize(CAMT053, {"BkToCstmrStmt": {
-        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at},
-        "Stmt": [statement]}})
+    return {"Id": msg_id, "CreDtTm": created_at,
+            "FrToDt": {"FrDtTm": start, "ToDtTm": end},
+            "Acct": {"Id": {"IBAN": account["iban"]}, "Ccy": ccy,
+                     "Ownr": {"Nm": account["name"][:140]},
+                     "Svcr": {"FinInstnId": {"BICFI": BANK_BIC}}},
+            "TxsSummry": summary, "Ntry": entries}
 
 
 def format_decimal(minor, ccy) -> str:

@@ -107,7 +107,7 @@ INDEX_TEMPLATE = """<!doctype html>
 <h1>mock-bank</h1>
 <p>A mock bank. Send it a <code>pain.001</code> and it answers with a
 <code>pain.002</code>, <code>camt.054</code>, <code>camt.053</code> and,
-when asked, a <code>pacs.004</code>.</p>
+when asked, a <code>pacs.004</code> or a <code>camt.052</code>.</p>
 <h2>What this build answers</h2>
 <ul>
 %(supported)s
