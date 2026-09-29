@@ -43,11 +43,18 @@ def read_statement(root):
         "entries": [(e.findtext("m:NtryDtls/m:TxDtls/m:Refs/m:EndToEndId", namespaces=M),
                      minor(e.findtext("m:Amt", namespaces=M))) for e in entries],
         # Who each entry paid. Added by #129: the two renderings of one statement
-        # disagreed about the payee's name for four releases and nothing compared
-        # them, because `entries` carried the reference and the amount and
-        # stopped there.
+        # disagreed about the payee's name through 0.3 and 0.4, and nothing
+        # compared them, because `entries` carried the reference and the amount
+        # and stopped there.
+        # Whichever party the entry names: a payment out names its payee as
+        # `Cdtr`, and money arriving names its payer as `Dbtr`. Reading only
+        # `Cdtr` left an incoming credit with nothing to compare, which is the
+        # same gap one level down.
         "payees": [e.findtext("m:NtryDtls/m:TxDtls/m:RltdPties/m:Cdtr/m:Pty/m:Nm",
-                              namespaces=M) for e in entries],
+                              namespaces=M)
+                   or e.findtext("m:NtryDtls/m:TxDtls/m:RltdPties/m:Dbtr/m:Pty/m:Nm",
+                                 namespaces=M)
+                   for e in entries],
         "summary": stmt.findtext("m:TxsSummry/m:TtlNtries/m:NbOfNtries", namespaces=M),
         "tags": [schema.split_tag(child.tag)[1] for child in stmt],
     }

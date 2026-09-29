@@ -620,9 +620,14 @@ def _transaction(payment: Dict) -> str:
     """One 16 record.
 
     The `EndToEndId` goes in the bank reference number, which is the field a
-    treasury system reconciles on, and the creditor's name in the text. A
-    comma in either would end the field early, so it is replaced rather than
-    escaped: BAI2 has no escape, and a name with a comma in it is common.
+    treasury system reconciles on, and the other party's name in the text.
+
+    The references are delimited, so a comma in one would end the field early
+    and `_safe` replaces it. The text is not: it runs to the terminator, so
+    `_record` makes it safe by kind with `_free_text`, which keeps the comma.
+    Both branches pass the name through unchanged for that reason - money
+    arriving names the payer where a payment out names the payee, and neither
+    should be misspelt on a statement (#129).
     """
     if payment.get("incoming"):
         # Money arriving from somebody else (#91): the payer's name is the
@@ -630,7 +635,7 @@ def _transaction(payment: Dict) -> str:
         return _record("16", RECEIVED_CREDIT, _movement(payment["amount"]),
                        AVAILABLE_NOW, _safe(payment["end_to_end_id"]),
                        _safe(payment.get("reference") or ""),
-                       _safe(payment.get("debtor_name") or ""))
+                       payment.get("debtor_name") or "")
     if payment.get("credit"):
         # Any other credit is a payment of this bank's own coming back, and
         # carries the reason it came back. Coding a customer's payment as a
@@ -698,8 +703,11 @@ def _free_text(text) -> str:
 
     What is still replaced:
 
-    - **line breaks and control characters**, because a wrapped line no longer
-      confuses the reader (#128) but is still junk in a file a bank parses;
+    - **line breaks and control characters.** Not cosmetic: since #128 a line
+      that begins with a declared code and a separator starts a record, so a
+      payee called `Foo\n49,+0,2` would put a **forged account trailer** into
+      the file. `trailers_agree` would then report the file as inconsistent,
+      which is a wrong file caught late rather than one never written;
     - **the separator that completes a `/<code>,`**, which `_records` would read
       as the end of the record. The slash is kept.
 
@@ -730,6 +738,9 @@ def _free_text(text) -> str:
     for bad in CONTROLS + tuple(c for c in UNSAFE
                                 if c not in (SEPARATOR, TERMINATOR)):
         out = out.replace(bad, " ")
+    # `.strip()` to match `_safe`, so a name that differs only in the padding
+    # around it is written the same way by either. No test holds it and none
+    # should: it is a consistency between the two, not a property of the format.
     return SPLITS_A_RECORD.sub(r"\1 ", out).strip()
 
 
