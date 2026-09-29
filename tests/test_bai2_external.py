@@ -24,6 +24,7 @@ that stays.
 """
 import datetime
 import hashlib
+import re
 import os
 import shutil
 import subprocess
@@ -37,6 +38,9 @@ from mockbank import bai2                                            # noqa: E40
 
 SAMPLE = os.path.join(HERE, "samples", "external", "bai2-sample1.txt")
 TWO = os.path.join(HERE, "samples", "external", "bai2-sample2.txt")
+THREE = os.path.join(HERE, "samples", "external", "bai2-sample3.txt")
+FOUR = os.path.join(HERE, "samples", "external", "bai2-sample4.txt")
+FIVE = os.path.join(HERE, "samples", "external", "bai2-sample5.txt")
 
 # The digest in SOURCES.md. Not a checksum for its own sake: it is what makes
 # "byte-for-byte from that commit" a claim a test can fail on, and it is how a
@@ -44,7 +48,19 @@ TWO = os.path.join(HERE, "samples", "external", "bai2-sample2.txt")
 DIGESTS = {
     SAMPLE: "0150331e6118e9fc6a1a10871f739b2d317c5cca5159c007622cffbbb64fe00c",
     TWO: "34ccf04a37e44353e5aac16981201239ae90102c12806aaa739a2e13ae3aee6b",
+    THREE: "8a13ec611352000fbab9a880858e8349b50380fab9754bc237391738cfd9ada4",
+    FOUR: "5a11cde54c9c8266b34d9980ee66237c1311f56b87d9eb1d28e5f02bafebaa9f",
+    FIVE: "0391a0999e718ee84048f1b9642be5b08f963c41f3cd628f3f8ac677fb9a2e5c",
 }
+
+# The five, and what each was vendored to settle. Kept as data so a test cannot
+# quietly stop covering one.
+ALL = (SAMPLE, TWO, THREE, FOUR, FIVE)
+
+# Three of the five state trailers that match their own contents. `sample4` and
+# `sample5` do not, and that is a fact about those files rather than about the
+# reader - see `TheTwoFixturesWhoseOwnArithmeticIsWrong`.
+RECONCILING = (SAMPLE, TWO, THREE)
 DIGEST = DIGESTS[SAMPLE]
 
 DAY = datetime.date(2026, 10, 5)
@@ -123,7 +139,11 @@ class TheSampleIsWhatSourcesMdSaysItIs(unittest.TestCase):
             cwd=root, capture_output=True, text=True)
         if tracked.returncode != 0:
             self.skipTest("not a git work tree")
-        files = [name for name in tracked.stdout.split("\0") if name]
+        # Deduplicated: during an unresolved merge `git ls-files` lists a
+        # conflicted path once per stage, so a run in the middle of one counted
+        # 26 names for 24 files and failed for a reason that had nothing to do
+        # with line endings.
+        files = sorted({name for name in tracked.stdout.split("\0") if name})
         self.assertGreaterEqual(len(files), 15, "no external samples found")
         self.assertIn("tests/samples/external/bai2-sample1.txt", files)
         asked = subprocess.run(
@@ -416,41 +436,214 @@ class TheReaderReadsARealFile(unittest.TestCase):
                 self.assertIn("camt.053", str(refused.exception))
 
 
-class WhatIsStillNotRead(unittest.TestCase):
-    """Three more classes moov-io/bai2's other samples show, pinned as gaps.
+class WhatWasStillNotRead(unittest.TestCase):
+    """`WhatIsStillNotRead` inverted (#128). Same contract, other side.
 
-    Same contract as the class this replaces: each passes today, describes a real
-    limitation, and has to be changed by the work that closes it. They are not
-    in this change because each needs its own fixture and rule 11 wants one
-    capability per pull request.
-
-    The samples are not vendored yet, so these are built from the shape rather
-    than from the files - which is weaker, and is why the follow-up issue names
-    the sample each one needs.
+    Those three tests asserted that `read` could not take a `16` whose text
+    contains commas, records packed several to a line, or a record with no
+    terminator. Each was written to be changed by the work that fixed it rather
+    than deleted, so here is each one from the other direction, against the files
+    that prompted it rather than against a line I made up.
     """
 
-    def test_a_text_field_containing_commas_is_read_short(self):
-        # sample4: `16,447,60000,,SPB2322984714570,1111,ACH Credit Payment,Entry
-        # Description: EXP; -, SEC: CCD, ...` - ten comma-separated pieces that
-        # are one field, because a 16's text runs to the end of the record.
-        packed = "16,447,60000,,REF1,1111,ACH Credit Payment, SEC: CCD/"
-        with self.assertRaises(bai2.Unreadable) as refused:
-            bai2.read(packed + "\n")
-        self.assertIn("transaction detail", str(refused.exception))
+    def test_a_text_field_containing_commas_is_one_field(self):
+        # sample4's 16s carry free text with commas in it. The text is the last
+        # field of a record and BAI2 has no escape, so it runs to the terminator.
+        one = [bai2.detail(r.values) for r in bai2._fold(text(FOUR))
+               if r.code == "16"][0]
+        self.assertEqual(one.type_code, "447")
+        self.assertEqual(one.amount, 60000)
+        self.assertEqual(one.reference, "SPB2322984714570")
+        self.assertIn(",", one.text, "the commas are inside one field")
+        self.assertTrue(one.text.startswith("ACH Credit Payment,"), one.text)
 
-    def test_several_records_on_one_line_are_not_split(self):
-        # sample3 packs them: `16,...PPD/ 16,142,500,Z,...`. The `/` terminates a
-        # record there and the newline does not.
-        two = "16,142,2500,Z,,,FIRST/ 16,142,500,Z,,,SECOND/"
-        with self.assertRaises(bai2.Unreadable):
-            bai2.read(two + "\n")
+    def test_records_packed_onto_one_line_are_all_read(self):
+        # sample3 puts as many as three records on a line, separated by `/`.
+        packed = [line for line in text(THREE).splitlines()
+                  if line.rstrip().rstrip("/").count("/") > 1]
+        self.assertTrue(packed, "no packed line to read")
+        found = [r for r in bai2._records(text(THREE))]
+        self.assertGreater(len(found), len(text(THREE).strip().splitlines()),
+                           "more records than lines, which is the point")
+        self.assertEqual(len(bai2.read(text(THREE))), 60)
 
-    def test_a_record_with_no_terminator_is_refused(self):
-        # sample4 has 102 of 116 lines unterminated and sample5 110 of 124: the
-        # newline is the terminator in those files.
-        with self.assertRaises(bai2.Unreadable) as refused:
-            bai2.read("01,MOCKBANK,ACME,261006,0000,7,,,2\n")
-        self.assertIn("does not end with", str(refused.exception))
+    def test_a_record_with_no_terminator_is_read(self):
+        # sample4 leaves 102 of its 116 lines unterminated; the newline ends them.
+        lines = [l for l in text(FOUR).splitlines() if l.strip()]
+        unterminated = [l for l in lines if not l.rstrip().endswith("/")]
+        self.assertEqual(len(unterminated), 102)
+        self.assertEqual(len(bai2.read(text(FOUR))), 31)
+
+    def test_every_vendored_sample_reads(self):
+        # The flat statement, so a regression in any one of them is one failure
+        # with a name rather than five scattered ones.
+        for path in ALL:
+            with self.subTest(os.path.basename(path)):
+                self.assertTrue(bai2.read(text(path)))
+
+
+class HowARecordEnds(unittest.TestCase):
+    """The rule #128 settled, and the two readings it had to rule out.
+
+    A `/` is not a delimiter to split on and a newline is not one either. A line
+    starts a record when it begins with a declared code and a separator, and
+    otherwise continues the record above; within a line, a `/` ends a record when
+    a declared code and a separator follow it.
+    """
+
+    def test_a_slash_inside_a_field_is_not_a_terminator(self):
+        # sample5's customer references and remittance text carry slashes. Split
+        # on `/` and twenty-two fields in that one file are shattered.
+        inside = [r for r in bai2._fold(text(FIVE))
+                  if r.code == "16" and "/" in ",".join(r.values)]
+        self.assertTrue(inside, "no slash-bearing field to check")
+        one = bai2.detail(inside[0].values)
+        self.assertIn("/", one.customer_reference + one.text)
+        self.assertEqual(len(bai2.read(text(FIVE))), 34)
+
+    def test_a_slash_before_a_record_code_is_a_terminator(self):
+        line = "16,142,2500,Z,,,FIRST/ 16,142,500,Z,,,SECOND/"
+        got = [piece for _, piece in bai2._records(line + "\n")]
+        self.assertEqual(len(got), 2, got)
+        self.assertTrue(got[0].endswith("FIRST"), got[0])
+        self.assertTrue(got[1].endswith("SECOND"), got[1])
+
+    def test_a_slash_before_two_digits_that_are_not_a_code_is_content(self):
+        """The near miss, and it has to carry a comma to be one.
+
+        A first version of this used `08/18/23 Invoice`, taken from sample5. That
+        does not distinguish anything: `/18` is followed by `/`, not a separator,
+        so even a rule of "any two digits then a comma" leaves it alone - and a
+        mutation weakening the codes to `\\d\\d` passed the whole suite.
+
+        The case that separates them needs a slash, two digits **and** a comma:
+        `1/23,456` in free text. `23,` is a separator-terminated pair of digits
+        and is not a declared code, so this splits under the weaker rule and not
+        under the real one.
+        """
+        line = "16,495,30000000,,GI23,3785726,Wire,Payment for 1/23,456 units/"
+        got = [piece for _, piece in bai2._records(line + "\n")]
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("1/23,456 units", got[0])
+        # And sample5's own, which is why the file is vendored even though it
+        # cannot tell the two rules apart on its own.
+        real = "16,495,30000000,,GI2323300009168,3785726,Wire,\"08/18/23 Invoice\"/"
+        self.assertEqual(len([p for _, p in bai2._records(real + "\n")]), 1)
+
+    def test_a_code_without_a_separator_is_content(self):
+        """The separator in the lookahead, which nothing pinned until now.
+
+        `Unit 4/88 Harbour St` in an address carries a declared code straight
+        after a slash - and no separator after it, so it is text. Dropping the
+        separator from `NEXT_RECORD`'s lookahead passed the whole suite before
+        this test, which is why it is here: moov-io/bai2's own scanner requires
+        the comma too ("any of the defined BAI2 record codes (followed by a
+        comma)"), so it is the part of the rule two readers agree on and the part
+        a guess would leave out.
+        """
+        line = "16,142,2500,Z,,,REF1,Deliver to Unit 4/88 Harbour St/"
+        got = [piece for _, piece in bai2._records(line + "\n")]
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("Unit 4/88 Harbour St", got[0])
+        # And the same code *with* a separator does split, so this is about the
+        # separator and not about `88` being unreachable here.
+        split = [piece for _, piece in
+                 bai2._records("16,142,2500,Z,,,REF1,text/88,more/\n")]
+        self.assertEqual(len(split), 2, split)
+
+    def test_a_wrapped_line_keeps_the_break_it_was_written_with(self):
+        """sample3's wrapped 16, pinned to the character.
+
+        Joining with a space passed before this test. It must not: a space is a
+        character the field could have contained and a line break is not, so
+        joining with one would be indistinguishable from the producer having
+        written it. The `,       1111111111` on the end is the `88` that follows,
+        which joins with a separator because that is what a continuation
+        continues.
+        """
+        wrapped = [r for r in bai2._fold(text(THREE))
+                   if r.code == "16" and any("\n" in v for v in r.values)]
+        self.assertEqual(len(wrapped), 1, "one wrapped record in sample3")
+        # Two, not three: the `16` and its `88`. **A wrapped line is not a
+        # record**, so it does not count toward a trailer's record count - and
+        # that is not my reading, it is sample3's own arithmetic, whose trailers
+        # reconcile only if the wrap is uncounted.
+        self.assertEqual(wrapped[0].lines, 2, "the 16 and its 88, not the wrap")
+        self.assertEqual(bai2.trailers_agree(text(THREE)), [],
+                         "which is what makes the count above a fact")
+        self.assertEqual(
+            bai2.detail(wrapped[0].values).text,
+            "111111     ACH_SETL           1111111111\n"
+            "111111111111111        ,       1111111111")
+
+    def test_a_line_that_does_not_start_with_a_code_continues_the_one_above(self):
+        # sample3 wraps a 16's text onto a second line that carries the
+        # terminator; sample5 writes a continuation as `88:EREF: ...`, with a
+        # colon where the separator should be. Treating every newline as a
+        # terminator makes those records whose codes are `111111111111111` and
+        # `88:EREF: 07370568132`.
+        for path, orphan in ((THREE, "111111111111111"),
+                             (FIVE, "88:EREF: 07370568132")):
+            with self.subTest(os.path.basename(path)):
+                self.assertIn(orphan, text(path), "the sample changed")
+                codes = {r.code for r in bai2._fold(text(path))}
+                self.assertTrue(codes <= set(bai2.RECORDS), sorted(codes))
+                self.assertNotIn(orphan.split(":")[0] + ":", codes)
+
+    def test_field_padding_is_content_and_is_kept(self):
+        # `RETURNED CHEQUE     ` is twenty characters in a fixed-width field.
+        # Stripping whitespace off a record's end took five of them.
+        one = bai2.detail([r for r in bai2._fold(text()) if r.code == "16"][0].values)
+        self.assertEqual(one.text, "RETURNED CHEQUE     ")
+
+    def test_no_record_the_file_contains_is_dropped(self):
+        """The guard on the whole rule, counted a second way.
+
+        Every place a declared code begins a record - at the start of a line or
+        after a `/` - is accounted for, so a splitter that quietly swallowed one
+        fails here rather than producing a smaller, tidier, wrong answer.
+
+        Counted with its own expression rather than by calling `_records`, which
+        would be asking the splitter whether the splitter is right. An earlier
+        version counted coded *lines*, which undercounts `sample3` by the eleven
+        records it packs onto lines that already had one.
+        """
+        starts = re.compile(r"(?:^|/[ \t]*)(?:%s)," % "|".join(
+            sorted(set(bai2.RECORDS) | {bai2.CONTINUATION})), re.M)
+        for path in ALL:
+            with self.subTest(os.path.basename(path)):
+                self.assertEqual(sum(r.lines for r in bai2._fold(text(path))),
+                                 len(starts.findall(text(path))))
+
+
+class TheTwoFixturesWhoseOwnArithmeticIsWrong(unittest.TestCase):
+    """`sample4` and `sample5` read and do not reconcile, and that is the file.
+
+    Pinned because the tempting conclusion is that the reader is wrong. It is
+    not: every coded line in both is accounted for (the test above), and the
+    files state totals that contradict themselves. They are moov-io's parser
+    fixtures - one is named for a bug report - so they exercise reading rather
+    than arithmetic.
+    """
+
+    def test_three_of_the_five_reconcile(self):
+        for path in RECONCILING:
+            with self.subTest(os.path.basename(path)):
+                self.assertEqual(bai2.trailers_agree(text(path)), [])
+
+    def test_the_other_two_do_not_and_here_is_why(self):
+        for path in (FOUR, FIVE):
+            with self.subTest(os.path.basename(path)):
+                folded = bai2._fold(text(path))
+                totals = [bai2._int(r.values[0]) for r in folded if r.code == "49"]
+                stated = bai2._int([r for r in folded if r.code == "98"][0].values[0])
+                # One account states a large negative total and two state nought;
+                # the group trailer is the sum of the positive ones alone, which
+                # no consistent file would be.
+                self.assertIn(-1260161341762, totals)
+                self.assertNotEqual(sum(totals), stated)
+                self.assertEqual(sum(t for t in totals if t > 0), stated)
+                self.assertTrue(bai2.trailers_agree(text(path)))
 
 
 if __name__ == "__main__":

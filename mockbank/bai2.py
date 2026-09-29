@@ -108,6 +108,7 @@ be fixed silently or quietly rot.
 from __future__ import annotations
 
 import datetime
+import re
 from collections import namedtuple
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -160,10 +161,21 @@ Field = namedtuple("Field", "name kind")
 # missed last time.
 #
 # FUNDS and OPT exist because #114 found that a record's width is not a constant.
-# Both are read-side facts - this mock writes `Z` and fills every field - so they
-# change what `read` accepts and nothing about what the writer produces.
-N, A, DATE, TIME, SIGNED, FUNDS, OPT, GROUP = ("N", "A", "D", "T", "S", "F",
-                                               "O", "G")
+# REST is #128's: the last field of a record is not delimited at all. BAI2 has no
+# escape character, so a field that could contain the separator can only be the
+# last one, and it runs to the terminator - commas included. `sample4` writes a
+# 16 whose text is
+#
+#     ACH Credit Payment,Entry Description: EXP; -, SEC: CCD, Client Ref ID: 1111
+#
+# as one field. Counting commas made that record four fields too wide.
+#
+# All three are read-side facts - this mock writes `Z`, fills every field, and
+# replaces a comma in its text - so they change what `read` accepts and nothing
+# about what the writer produces. #129 is the other half, where the writer stops
+# replacing a comma it never needed to.
+N, A, DATE, TIME, SIGNED, FUNDS, OPT, REST, GROUP = ("N", "A", "D", "T", "S",
+                                                     "F", "O", "R", "G")
 
 # A continuation. It has no fields of its own: it continues the comma-separated
 # field stream of the record before it, and `_fold` joins the two before anything
@@ -203,7 +215,7 @@ RECORDS = {
     "16": ("transaction detail", _fields(
         ("record code", A), ("type code", A), ("amount", N),
         ("funds type", FUNDS), ("bank reference number", OPT),
-        ("customer reference number", OPT), ("text", OPT))),
+        ("customer reference number", OPT), ("text", REST))),
     "49": ("account trailer", _fields(
         ("record code", A), ("account control total", SIGNED),
         ("number of records", N))),
@@ -270,6 +282,13 @@ def _walk(code: str, values: Sequence[str]):
     for index, field in enumerate(spec):
         if field.kind is GROUP:
             return _walk_groups(code, values, used)
+        if field.kind is REST:
+            # The last field runs to the terminator, commas and all, so whatever
+            # is left is one field however many separators it holds. That is what
+            # makes a record with a comma in its text readable, and it is also
+            # why this can never be short: there is nothing after it to be short
+            # of.
+            return len(values), ""
         if field.kind is OPT:
             # Trailing fields may simply be absent - sample2's
             # `16,115,450000,S,100000,200000,150000,,,/` fills them and
@@ -696,11 +715,15 @@ def detail(values: Sequence[str]) -> "Detail":
     """
     width = _funds_width(values[2], values[3:]) if len(values) > 2 else 1
     after = 2 + width
-    trailing = list(values[after:]) + ["", "", ""]
+    trailing = list(values[after:])
+    # The text is everything from the third trailing field on, rejoined: it is
+    # one field that happens to contain separators, not several fields (#128).
+    text = SEPARATOR.join(trailing[2:]) if len(trailing) > 2 else ""
+    trailing += ["", ""]
     return Detail(values[0], _int(values[1]),
                   values[2] if len(values) > 2 else "",
                   tuple(values[3:after]),
-                  trailing[0], trailing[1], trailing[2])
+                  trailing[0], trailing[1], text)
 
 
 def _int(value: str) -> int:
@@ -755,6 +778,100 @@ def _count(lines: Sequence[str], trailers: int = 0) -> int:
 Record = namedtuple("Record", "code name values")
 
 
+# Where one record ends and the next begins, which is two questions in BAI2 and
+# not one.
+#
+# **A `/` is not a delimiter to split on.** `sample5` writes customer references
+# like `AB/GS/RPFILERP0001/RPBA0001` and remittance text like `08/18/23 Invoice`;
+# splitting on `/` shatters twenty-two fields in that one file. A mid-record `/`
+# ends a record only when a declared code and a separator follow it. Over all five
+# of moov-io/bai2's samples that is exact both ways: all eleven of `sample3`'s
+# packed records are found and none of `sample5`'s content slashes is mistaken
+# for one. A declared code rather than any two digits, because four of those
+# content slashes *are* followed by two digits - `08/18/23` gives `/18/23` and
+# `/23 In` - and none by a code.
+#
+# **A newline is not a delimiter either.** `sample4` leaves 102 of its 116 lines
+# unterminated, so a newline often does end a record - but `sample3` wraps one
+# 16's text onto a second line that ends with the `/`, and `sample5` writes a
+# continuation as `88:EREF: ...` with a colon where the separator should be.
+# Treating every newline as a terminator makes the first a record whose code is
+# `111111111111111` and the second one whose code is `88:EREF: 07370568132`.
+#
+# So the rule is the other way round: **a line starts a record when it begins
+# with a declared code and a separator, and otherwise continues the record
+# above.** Across the five samples exactly two lines continue one, and they are
+# those two. Nothing needs a special case and nothing needs a per-file mode.
+#
+# moov-io/bai2's own scanner reaches the same rule from the other direction, and
+# requires the separator too - `pkg/util/scanner.go` at the pinned commit:
+#
+#     // If the next three bytes are any of the defined BAI2 record codes
+#     // (followed by a comma), we consider the next line as a new record
+#
+# and, where a line runs on without one:
+#
+#     // Here, the current line "continued" onto the next line without a
+#     // delimiter and without a new record code on the subsequent line. Parse
+#     // the next line as though it is a continuation of the current line.
+#
+# Two readers agreeing is not proof, but they were written from the same files
+# and not from each other, and the separator is the part a guess would drop.
+#
+# What this cannot do: a text field containing `/16,` would still split wrongly,
+# and a wrapped line that happens to begin `16,` would start a record. Both are
+# inherent to a format with no escape character and a run-to-end last field - a
+# human reading the line could not tell either - and they are written here rather
+# than pretended away. Nothing in the samples comes within two characters.
+_CODES = "|".join(sorted(set(RECORDS) | {CONTINUATION}))
+NEXT_RECORD = re.compile(r"/[ \t]*(?=(?:%s)%s)" % (_CODES, re.escape(SEPARATOR)))
+STARTS_RECORD = re.compile(r"^(?:%s)%s" % (_CODES, re.escape(SEPARATOR)))
+
+
+def _records(text: str):
+    """(line number, the record's text) for each record, in order.
+
+    The line number is where the record *started*, because that is the line
+    somebody looking for the problem should open.
+    """
+    out = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        line = line.rstrip()
+        if not line.strip():
+            continue
+        if not STARTS_RECORD.match(line.lstrip()):
+            if not out:
+                raise Unreadable(
+                    "line %d starts with no declared record code: %r"
+                    % (number, line.strip()[:40]))
+            # A wrapped record: the newline is inside its last field, so it is
+            # kept rather than turned into a separator. `sample3` wraps a 16's
+            # text at a column and puts the terminator on the second line.
+            #
+            # A newline and not a space, because a space is a character the field
+            # could have contained and a newline is not - joining with one would
+            # be indistinguishable from the producer having written it. What the
+            # file holds is a line break, so that is what is kept.
+            where, so_far = out[-1]
+            out[-1] = (where, so_far + "\n" + _ended(line))
+            continue
+        for piece in NEXT_RECORD.split(line.lstrip()):
+            if piece.strip():
+                out.append((number, _ended(piece)))
+    return out
+
+
+def _ended(piece: str) -> str:
+    """A record's text without its terminator, which is optional in practice.
+
+    Only the terminator comes off. A field may be padded with spaces - sample1
+    writes `RETURNED CHEQUE     ` in a fixed-width text field - and that padding
+    is the field's content, not whitespace around a record. An earlier version
+    here stripped it and turned a 20-character text into a 15-character one.
+    """
+    return piece[:-1] if piece.endswith(TERMINATOR) else piece
+
+
 Folded = namedtuple("Folded", "line code values lines")
 
 
@@ -781,14 +898,8 @@ def _fold(text: str) -> List["Folded"]:
     disagreeing about the format, with only the example held to a real file.
     """
     out = []
-    for number, line in enumerate(text.splitlines(), start=1):
-        line = line.strip()
-        if not line:
-            continue
-        if not line.endswith(TERMINATOR):
-            raise Unreadable("line %d does not end with %r: %r"
-                             % (number, TERMINATOR, line[:40]))
-        values = line[:-1].split(SEPARATOR)
+    for number, raw in _records(text):
+        values = raw.split(SEPARATOR)
         code, rest = values[0], values[1:]
         if code == CONTINUATION:
             if not out:
