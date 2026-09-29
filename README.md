@@ -300,11 +300,17 @@ is folded into the record it continues, because it continues that record's
 comma-separated field stream rather than carrying fields of its own; a funds type
 occupies one field, or three when it is value-dated, or four when availability is
 distributed over three periods, or 2 + 2n when it is distributed over named days;
-and an amount may carry an explicit sign or not. Two files from moov-io/bai2 are
-held to that, and the check worth naming is that every control total and record
-count in both, recomputed from the records it covers, comes out as stated. Three
-things it still does not read: a text field containing commas, several records
-packed onto one line, and a record with no `/` where the newline terminates.
+and an amount may carry an explicit sign or not. It also knows where a record
+ends ([#128](https://github.com/rseufert/mock-bank/issues/128)): a `16`'s text
+runs to the terminator with its commas, several records may share one line, and
+a record with no `/` ends at the newline. A `/` inside a field is content unless
+a record code and a separator follow it. Five files from moov-io/bai2 are held
+to that. Three of them reconcile, and the check worth naming is that every
+control total and record count in those, recomputed from the records it covers,
+comes out as stated. The other two state totals that contradict themselves,
+which is those files and not the reader. One limit remains, because BAI2 has no
+escape character: a text that itself contains `/16,` cannot be told from the
+start of a record.
 
 In the mailbox an acknowledgement's type is `nacha.ack`, a return file's
 `nacha.return` and a BAI2 statement's `bai2.statement`; `GET
@@ -975,7 +981,7 @@ than half-supporting it.
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Done.** `procure_to_pay`'s ten tests pass in CI against mock-sap and mock-edi from PyPI |
-| 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source; an intraday `camt.052` on request | In progress. What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
+| 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source; an intraday `camt.052` on request | **Done.** What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
 
 ## Contributing
 

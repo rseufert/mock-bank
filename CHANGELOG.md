@@ -13,6 +13,144 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.5.0] - 2026-09-29
+
+### Added
+
+- **An intraday report, `camt.052`, on request** (#132).
+  `POST /_mock/accounts/<id>/report` writes a `camt.052.001.08` for the account
+  as it stands now, and releases it to the mailbox and the pickup directory at
+  once. It carries the day's opening balance (`OPBD`), the balance now (`ITBD`)
+  and every entry booked today, worked out exactly as the day's `camt.053` will
+  be. Anything already due is booked first. `statement-gap` doesn't apply to a
+  report, so a reconciler can compare the two and find the entry the statement
+  leaves out. Reports are numbered on their own sequence and carry no
+  `LglSeqNb`. Every account can have one, whatever its `format`; a closed account
+  is refused with `409`. The message is declared in the dictionary and validated
+  against the published XSD in CI, like the others. No schema change.
+
+### Changed
+
+- **The BAI2 statement writes real transaction type codes** (#127). **This changes
+  the bytes the mock writes**, so a client that matched on the old codes will
+  stop matching:
+
+  | Movement | Was | Now | Its description in the BAI2 code table |
+  | --- | --- | --- | --- |
+  | A payment sent | `495` | `447` | ACH Disbursement Funding Debit |
+  | A payment returned | `165` | `257` | Individual ACH Return Item |
+  | Money arriving (#91) | `195` | `142` | ACH Credit Received |
+
+  The old codes were placeholders, and they were wrong. A bank writes `495` for
+  an outgoing wire, `165` for the proceeds of a debit collection and `195` for an
+  incoming wire. Each new code has a named source, vendored under
+  `tests/samples/external/`: moov-io/bai2's transcription of the type code table,
+  and two of its sample files that are a bank's own exports. `447` and `142` are
+  what those exports write for an ACH credit payment sent and an ACH credit
+  received. For `257`, the evidence is the table's description, since the
+  samples' only `257` is a returned debit. A reader that takes the direction from
+  the code's range (100–399 a credit, 400–699 a debit), as `payment_run` does,
+  reads the new codes as it read the old ones. `bai2.PLACEHOLDER_CODES` is now
+  empty.
+
+### Fixed
+
+- **`mockbank.bai2.read` knows where a BAI2 record ends** (#128). #114 taught it
+  continuations and funds-type widths; it still assumed one record to a line, a
+  terminator on every record, and a field count it could get by counting commas.
+  Three real files say otherwise, and all three are now vendored.
+
+  **A `16`'s text runs to the terminator, commas and all.** BAI2 has no escape
+  character, so the only field that may contain a separator is the last one.
+  `sample4` writes `ACH Credit Payment,Entry Description: EXP; -, SEC: CCD, Client
+  Ref ID: 1111` as a single field, which counting commas made four fields too wide.
+  The declaration says so now, with a `REST` kind, rather than the reader knowing
+  it by position.
+
+  **A `/` is not a delimiter to split on.** `sample5` carries customer references
+  like `AB/GS/RPFILERP0001/RPBA0001` and remittance text like `08/18/23 Invoice` -
+  twenty-two slashes inside fields, every one of which a naive split would have
+  shattered. A `/` ends a record only when a declared record code and a separator
+  follow it. Measured across all five samples that is exact both ways: all eleven
+  of `sample3`'s packed records are found, and none of `sample5`'s content slashes
+  is mistaken for one.
+
+  **A newline is not a delimiter either.** `sample4` leaves 102 of its 116 lines
+  unterminated, so a newline usually does end a record - but `sample3` wraps one
+  `16`'s text onto a second line that carries the terminator, and `sample5` writes
+  a continuation as `88:EREF: ...` with a colon where the separator should be.
+  Taking every newline as a terminator makes those two records whose codes are
+  `111111111111111` and `88:EREF: 07370568132`. So the rule runs the other way: a
+  line starts a record when it begins with a declared code and a separator, and
+  otherwise continues the record above. Across the five samples exactly two lines
+  continue one, and they are those two.
+
+  Field padding is content and is kept: `RETURNED CHEQUE     ` is twenty
+  characters in a fixed-width field, and an earlier draft of this change stripped
+  five of them off the end of the record.
+
+  Two of the new samples read and do **not** reconcile. That is those files rather
+  than the reader - each states one account total of `-1260161341762` and two of
+  `000`, and its group trailer is the sum of the positive ones alone. Every coded
+  line in both is accounted for. A test pins the disagreement with its arithmetic,
+  because the tempting conclusion when a total does not match is that the reader
+  is wrong.
+
+- **A comma in a creditor's name reaches the BAI2 statement** (#129). The
+  `camt.053` of a statement said `Umbrella, Logistics, S.A.` and the BAI2
+  rendering of the same statement said `Umbrella  Logistics  S.A.` — two
+  renderings disagreeing about who was paid, since 0.3.
+
+  `_safe` replaced the comma to stop it ending a delimited field early. The `16`'s
+  text is not delimited: it is the last field of the record and runs to the
+  terminator, which is why a real file can carry `ACH Credit Payment,Entry
+  Description: EXP; -, SEC: CCD, Client Ref ID: 1111` as one field. So the
+  sanitising was protecting a field that needed none, and the cost was a statement
+  that misnamed the payee. A slash is kept for the same reason — `sample5` carries
+  twenty-two of them inside fields.
+
+  One sequence a run-to-end field still cannot carry is `/` before a record code
+  and a separator, which the reader takes for the end of a record. The writer
+  replaces **the separator** that completes it, keeping the slash: `Umbrella/16,Inc`
+  is written `Umbrella/16 Inc`. Neutralising the slash instead — the obvious
+  version — is wrong, because the reader's rule allows whitespace after the slash,
+  so blanking or removing one exposes the one before it: `A//16,B` becomes
+  `A/ 16,B` or `A/16,B` and still splits. Replacing the separator needs one pass
+  and provably so, since a match requires a comma.
+
+  **Money arriving had the same defect**, one branch over: the payer's name was
+  sanitised where the payee's was, so a `camt.054` and a `camt.053` said
+  `Customer, Ltd` while the BAI2 statement said `Customer  Ltd`. Both branches
+  pass the name through now.
+
+  The `16`'s text is made safe from its declaration rather than at the call site,
+  which is where every other field has been made safe since #57. That matters here
+  beyond tidiness: a line break in a name would otherwise put a **forged record**
+  into the file, because since #128 a line beginning with a declared code and a
+  separator starts one. A payee called `Foo\n49,+0,2` wrote a second account
+  trailer. The writer has always replaced line breaks and control characters, so
+  this was never reachable - but nothing held that guard, and removing it passed
+  every test in the suite.
+
+  **And the assertion that was missing.** `tests/test_bai2.py` exists to hold the
+  two renderings of one statement to each other, and it compared each entry's
+  reference and amount and stopped there — so the disagreement about the payee had
+  nowhere to surface. It compares the name now, which is worth more than the fix:
+  the fix was one line, and nothing would have caught the next one.
+
+- **`payment_run` reads a real bank's BAI2 statement** (#130). Its reader, which
+  the example writes by hand because it imports neither mock, could only read the
+  files mock-bank writes. It now reads what `mockbank.bai2` reads since #128:
+  funds types `V`, `S` and `D` (the bank reference moves by the fields each one
+  takes, where before they were refused), several records packed onto one line, a
+  record wrapped onto the next, and texts full of commas and slashes. A slash
+  followed by a record code is only a record boundary when a comma follows the
+  code. An account the bank reports without both ledger balances (`010`, `015`),
+  such as an intraday position, no longer stops the rest of the file. If it is the
+  paying account, `reconcile` names it in `run.problems` instead of posting it.
+  Over moov-io/bai2's five files, every movement reads as `mockbank.bai2` reads
+  it.
+
 ## [0.4.0] - 2026-09-28
 
 ### Added
@@ -633,7 +771,8 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/rseufert/mock-bank/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rseufert/mock-bank/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rseufert/mock-bank/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rseufert/mock-bank/compare/v0.1.0...v0.2.0
