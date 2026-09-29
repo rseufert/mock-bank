@@ -803,6 +803,21 @@ Record = namedtuple("Record", "code name values")
 # above.** Across the five samples exactly two lines continue one, and they are
 # those two. Nothing needs a special case and nothing needs a per-file mode.
 #
+# moov-io/bai2's own scanner reaches the same rule from the other direction, and
+# requires the separator too - `pkg/util/scanner.go` at the pinned commit:
+#
+#     // If the next three bytes are any of the defined BAI2 record codes
+#     // (followed by a comma), we consider the next line as a new record
+#
+# and, where a line runs on without one:
+#
+#     // Here, the current line "continued" onto the next line without a
+#     // delimiter and without a new record code on the subsequent line. Parse
+#     // the next line as though it is a continuation of the current line.
+#
+# Two readers agreeing is not proof, but they were written from the same files
+# and not from each other, and the separator is the part a guess would drop.
+#
 # What this cannot do: a text field containing `/16,` would still split wrongly,
 # and a wrapped line that happens to begin `16,` would start a record. Both are
 # inherent to a format with no escape character and a run-to-end last field - a
@@ -832,6 +847,11 @@ def _records(text: str):
             # A wrapped record: the newline is inside its last field, so it is
             # kept rather than turned into a separator. `sample3` wraps a 16's
             # text at a column and puts the terminator on the second line.
+            #
+            # A newline and not a space, because a space is a character the field
+            # could have contained and a newline is not - joining with one would
+            # be indistinguishable from the producer having written it. What the
+            # file holds is a line break, so that is what is kept.
             where, so_far = out[-1]
             out[-1] = (where, so_far + "\n" + _ended(line))
             continue

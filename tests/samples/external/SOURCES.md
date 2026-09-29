@@ -142,12 +142,16 @@ The check worth having is not that either file reads. It is that
 count recomputed from the records it covers. A wrong fold or a wrong funds-type
 width changes one of those numbers.
 
-**Still not read**, each needing a sample this directory does not hold yet: a
-`16` whose text field contains commas and runs to the end of the record
-(`sample4`), several records packed onto one line separated by `/` (`sample3`),
-and records with no `/` at all, where the newline terminates (`sample4`,
-`sample5`). `WhatIsStillNotRead` in `tests/test_bai2_external.py` pins those
-three.
+**All three are read now** (#128), against the samples that prompted them: a
+`16`'s text runs to the terminator with its commas (`sample4`), records packed
+onto one line are all found (`sample3`), and a record with no `/` ends at the
+newline (`sample4`). Two things those files added that nobody had asked about: a
+`/` **inside** a field is not a terminator, which `sample5` proves twenty-two
+times over, and a line that does not begin with a declared code and a separator
+continues the record above rather than starting one - which is how `sample3`
+wraps a text field and how `sample5` writes `88:EREF: ...` with a colon.
+`WhatWasStillNotRead` and `HowARecordEnds` in `tests/test_bai2_external.py` hold
+all of it.
 
 ## Invalid: the XSD rejects them, and so must the mock
 

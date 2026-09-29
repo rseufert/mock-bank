@@ -530,6 +530,52 @@ class HowARecordEnds(unittest.TestCase):
         real = "16,495,30000000,,GI2323300009168,3785726,Wire,\"08/18/23 Invoice\"/"
         self.assertEqual(len([p for _, p in bai2._records(real + "\n")]), 1)
 
+    def test_a_code_without_a_separator_is_content(self):
+        """The separator in the lookahead, which nothing pinned until now.
+
+        `Unit 4/88 Harbour St` in an address carries a declared code straight
+        after a slash - and no separator after it, so it is text. Dropping the
+        separator from `NEXT_RECORD`'s lookahead passed the whole suite before
+        this test, which is why it is here: moov-io/bai2's own scanner requires
+        the comma too ("any of the defined BAI2 record codes (followed by a
+        comma)"), so it is the part of the rule two readers agree on and the part
+        a guess would leave out.
+        """
+        line = "16,142,2500,Z,,,REF1,Deliver to Unit 4/88 Harbour St/"
+        got = [piece for _, piece in bai2._records(line + "\n")]
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("Unit 4/88 Harbour St", got[0])
+        # And the same code *with* a separator does split, so this is about the
+        # separator and not about `88` being unreachable here.
+        split = [piece for _, piece in
+                 bai2._records("16,142,2500,Z,,,REF1,text/88,more/\n")]
+        self.assertEqual(len(split), 2, split)
+
+    def test_a_wrapped_line_keeps_the_break_it_was_written_with(self):
+        """sample3's wrapped 16, pinned to the character.
+
+        Joining with a space passed before this test. It must not: a space is a
+        character the field could have contained and a line break is not, so
+        joining with one would be indistinguishable from the producer having
+        written it. The `,       1111111111` on the end is the `88` that follows,
+        which joins with a separator because that is what a continuation
+        continues.
+        """
+        wrapped = [r for r in bai2._fold(text(THREE))
+                   if r.code == "16" and any("\n" in v for v in r.values)]
+        self.assertEqual(len(wrapped), 1, "one wrapped record in sample3")
+        # Two, not three: the `16` and its `88`. **A wrapped line is not a
+        # record**, so it does not count toward a trailer's record count - and
+        # that is not my reading, it is sample3's own arithmetic, whose trailers
+        # reconcile only if the wrap is uncounted.
+        self.assertEqual(wrapped[0].lines, 2, "the 16 and its 88, not the wrap")
+        self.assertEqual(bai2.trailers_agree(text(THREE)), [],
+                         "which is what makes the count above a fact")
+        self.assertEqual(
+            bai2.detail(wrapped[0].values).text,
+            "111111     ACH_SETL           1111111111\n"
+            "111111111111111        ,       1111111111")
+
     def test_a_line_that_does_not_start_with_a_code_continues_the_one_above(self):
         # sample3 wraps a 16's text onto a second line that carries the
         # terminator; sample5 writes a continuation as `88:EREF: ...`, with a
