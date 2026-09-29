@@ -64,6 +64,8 @@ XSDS = {
                         "de038b373e47b0077b1832ddd81f4b2f1eb25d35721f62da1e38b7f5a09fda24"),
     "pain.001.001.03": (_PROGNOV + "pain.001.001.03.xsd",
                         "6bb5c6f24250ab807f31f6164142bafd6d43bad8d162a926e258ff4c11e128af"),
+    "pain.008.001.08": (_PROGNOV + "pain.008.001.08.xsd",
+                        "7edf4e4ce34c47a5567af6a327e22af4ed4007f715822af9f353c94ecc10f5ba"),
     "pain.002.001.10": (_PROGNOV + "pain.002.001.10.xsd",
                         "2f9f8d0e9891fa9f31ccf0576397afe501614384d688ae6e43ba694b3d24b0cf"),
     "pacs.004.001.09": (_PROGNOV + "pacs.004.001.09.xsd",
