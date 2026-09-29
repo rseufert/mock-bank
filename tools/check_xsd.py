@@ -72,6 +72,8 @@ XSDS = {
                         "c3cfac080dc31476bde7444b05d00e1b23558d5e44529e58d0ad562e6013873d"),
     "camt.054.001.08": (_GENKGO + "camt.054.001.08.xsd",
                         "2b392a1f7e70e70902fd0d803ff85989613bd1cae351663240b0bb9243be2c28"),
+    "camt.052.001.08": (_GENKGO + "camt.052.001.08.xsd",
+                        "113d29938c45ba1c993f2d3e31610a214f3fb3e9ea0c6f2945750c0586567d15"),
 }
 
 
@@ -241,8 +243,8 @@ def written_by_the_mock():
     MsgId (OrgnlMsgId NOTPROVIDED), money arriving from somebody else, the
     debit notification, the
     return a return-later account brings (a pacs.004 and a camt.054 credit),
-    and the statements for the days an advance crosses, the return's among
-    them."""
+    the statements for the days an advance crosses, the return's among
+    them, and intraday reports before and after it."""
     from mockbank.server import Config, make_server
     httpd = make_server(Config(port=0, quiet=True, clock="2026-10-01T09:00"))
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -272,7 +274,12 @@ def written_by_the_mock():
             "note": "Payment for INV-2026-0041 less the 70.00 we agreed", "wrap": 35,
             "debtor": {"name": "Customer Ltd", "iban": "NL41MOCK0000000001",
                        "bic": "MOCKNL2A"}}).encode("utf-8"))
+        # intraday reports (#132): one with the day's debits, return and
+        # money arriving, one on a day with nothing booked yet
+        call("POST", "/_mock/accounts/ACME/report")
+        call("POST", "/_mock/accounts/GLOBEX/report")
         call("POST", "/_mock/advance?to=2026-10-06")
+        call("POST", "/_mock/accounts/ACME/report")
         messages = json.loads(call("GET", "/_mock/mailbox").decode("utf-8"))
     finally:
         httpd.shutdown()

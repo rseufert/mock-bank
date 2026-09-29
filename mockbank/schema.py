@@ -26,9 +26,9 @@ Where the standard leaves a choice, the mock picks one and says so here, in
 * **Versions.** ``pain.001.001.09`` is read, and ``pain.001.001.03`` is
   accepted as well and read into the same mapping (its ``BIC`` and
   ``BICOrBEI`` are keyed as the ``.09`` ``BICFI`` and ``AnyBIC``). The mock
-  writes ``pain.002.001.10``, ``camt.054.001.08``, ``camt.053.001.08`` and
-  ``pacs.004.001.09``, the versions that go with ``pain.001.001.09`` in the
-  2019 message set most banks accept today.
+  writes ``pain.002.001.10``, ``camt.054.001.08``, ``camt.053.001.08``,
+  ``camt.052.001.08`` and ``pacs.004.001.09``, the versions that go with
+  ``pain.001.001.09`` in the 2019 message set most banks accept today.
 * **Returns.** A return reaches the client as a ``pacs.004`` whose
   ``OrgnlGrpInf`` names the client's own ``pain.001``, standing in for the
   interbank message a real bank would relay, and whose ``SttlmMtd`` is
@@ -75,7 +75,8 @@ STRUCTURAL = "FF01"
 
 CHOICES = {
     "read": "pain.001.001.09, and pain.001.001.03 read into the same mapping",
-    "written": "pain.002.001.10, camt.054.001.08, camt.053.001.08, pacs.004.001.09",
+    "written": "pain.002.001.10, camt.054.001.08, camt.053.001.08, camt.052.001.08, "
+               "pacs.004.001.09",
     "bank_transaction_code": "PMNT/ICDT/ESCT on every debit the mock books, "
                              "PMNT/ICDT/RRTN on the credit a return books",
     "returns": "a pacs.004 to the client, OrgnlGrpInf naming its pain.001, "
@@ -773,18 +774,32 @@ def camt054():
                                    notification.many(1)))
 
 
-def camt053():
+def cash_balance():
     balance_type = Group("Tp", code_or_proprietary("CdOrPrtry", codes="ExternalBalanceType1Code"),
                          code_or_proprietary("SubTp").opt, iso="BalanceType13")
-    balance = Group("Bal", balance_type, Amt("Amt"),
-                    Code("CdtDbtInd", codes="CreditDebitCode"), date_or_datetime("Dt"),
-                    iso="CashBalance8")
+    return Group("Bal", balance_type, Amt("Amt"),
+                 Code("CdtDbtInd", codes="CreditDebitCode"), date_or_datetime("Dt"),
+                 iso="CashBalance8")
+
+
+def camt053():
     body = report_header("StmtPgntn") + [
-        balance.many(1), transactions_summary().opt, entry().many(),
+        cash_balance().many(1), transactions_summary().opt, entry().many(),
         Text("AddtlStmtInf", 500).opt]
     statement = Group("Stmt", *body, iso="AccountStatement9")
     return Group("Document", Group("BkToCstmrStmt", group_header_statement(),
                                    statement.many(1)))
+
+
+def camt052():
+    # The statement's shape under other names (#132): a report may carry no
+    # balance at all, where a statement needs at least one.
+    body = report_header("RptPgntn") + [
+        cash_balance().many(), transactions_summary().opt, entry().many(),
+        Text("AddtlRptInf", 500).opt]
+    report = Group("Rpt", *body, iso="AccountReport25")
+    return Group("Document", Group("BkToCstmrAcctRpt", group_header_statement(),
+                                   report.many(1)))
 
 
 class Message:
@@ -819,6 +834,8 @@ MESSAGES = {m.name: m for m in (
             "Bank-to-customer debit/credit notification: a payment has settled"),
     Message("camt.053.001.08", "out", camt053(),
             "Bank-to-customer statement: the end-of-day account statement"),
+    Message("camt.052.001.08", "out", camt052(),
+            "Bank-to-customer account report: the intraday report, on request"),
     Message("pacs.004.001.09", "out", pacs004(),
             "Payment return: a payment that had settled comes back, with its reason"),
 )}

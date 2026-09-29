@@ -313,6 +313,14 @@ class WhatTheBankWritesBack(DropCase):
             self.get("/_mock/mailbox?leave")      # each call releases first
         self.assertEqual(self.listing(self.pickup), first)
 
+    def test_an_intraday_report_lands_at_once(self):
+        # #132: asked for over HTTP, and in the folder before the answer comes
+        # back, without waiting for anything else to release.
+        self.assertEqual(self.post("/_mock/accounts/ACME/report").status, 201)
+        written = self.listing(self.pickup)
+        self.assertEqual(len(written), 1, written)
+        self.assertTrue(written[0].startswith("camt.052.001.08-ACME-"), written)
+
     def test_posting_over_http_also_writes_to_the_pickup_directory(self):
         # The pickup directory is the bank's outbound side, not the drop
         # directory's reply: a message released by an HTTP post goes there too.
