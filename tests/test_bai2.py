@@ -131,16 +131,13 @@ class TheTypeCodes(unittest.TestCase):
         return [e.type_code for e in bai2.statements(text)[0].entries]
 
     def test_a_debit_and_a_return_get_the_codes_the_module_names(self):
-        # Asserted against the constants, not against literals: both are
-        # placeholders until #57 settles them, and a test hard-coding them would
-        # have to be edited in lockstep for no gain. What is worth pinning is
-        # that a debit and a return differ and that the return is the credit.
+        # Asserted as literals since #127 settled them: these are what a bank's
+        # parser matches on, so changing one has to change a test on purpose.
+        # Where each comes from is tests/test_bai2_type_codes.py.
         _, _, text = both(10875000, 12500000, THREE)
-        self.assertEqual(self.codes(text),
-                         [bai2.DEBIT, bai2.DEBIT, bai2.RETURNED_CREDIT])
-        self.assertNotEqual(bai2.DEBIT, bai2.RETURNED_CREDIT)
-        self.assertEqual(set(bai2.PLACEHOLDER_CODES),
-                         {bai2.DEBIT, bai2.RETURNED_CREDIT, bai2.RECEIVED_CREDIT})
+        self.assertEqual(self.codes(text), ["447", "447", "257"])
+        self.assertEqual((bai2.DEBIT, bai2.RETURNED_CREDIT), ("447", "257"))
+        self.assertEqual(bai2.PLACEHOLDER_CODES, ())
 
     def test_money_arriving_is_a_received_credit_not_a_return(self):
         # The row `credits.booked_on` gives the statement, as the outbox marks it.
@@ -150,8 +147,8 @@ class TheTypeCodes(unittest.TestCase):
                     "value_date": "2026-10-01", "note": ["INV-1001"]}
         text = bai2.write_statement(ACCOUNT, DAY, 7, 0, 125000, [arriving],
                                     created_at=AT)
-        self.assertEqual(self.codes(text), [bai2.RECEIVED_CREDIT])
-        self.assertEqual(len({bai2.DEBIT, bai2.RETURNED_CREDIT, bai2.RECEIVED_CREDIT}), 3)
+        self.assertEqual(self.codes(text), ["142"])
+        self.assertEqual(bai2.RECEIVED_CREDIT, "142")
         [detail] = [l for l in text.splitlines() if l.startswith("16,")]
         self.assertEqual(detail.split(",")[3:],
                          ["Z", "CUST-77", "RF18539007547034", "Customer  Ltd/"])

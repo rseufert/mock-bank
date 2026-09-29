@@ -139,7 +139,11 @@ class TheSampleIsWhatSourcesMdSaysItIs(unittest.TestCase):
             cwd=root, capture_output=True, text=True)
         if tracked.returncode != 0:
             self.skipTest("not a git work tree")
-        files = [name for name in tracked.stdout.split("\0") if name]
+        # Deduplicated: during an unresolved merge `git ls-files` lists a
+        # conflicted path once per stage, so a run in the middle of one counted
+        # 26 names for 24 files and failed for a reason that had nothing to do
+        # with line endings.
+        files = sorted({name for name in tracked.stdout.split("\0") if name})
         self.assertGreaterEqual(len(files), 15, "no external samples found")
         self.assertIn("tests/samples/external/bai2-sample1.txt", files)
         asked = subprocess.run(

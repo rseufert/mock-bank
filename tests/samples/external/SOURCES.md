@@ -55,14 +55,16 @@ did not write. `tests/test_bai2_external.py` reads it.
 | File | Source | Path at that commit | What it exercises |
 | --- | --- | --- | --- |
 | `bai2-sample1.txt` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `d3e11b628d3d59fd6911836b9ca328cb8b7621f2` | `test/testdata/sample1.txt` | Two account sections in one group, each with an `88` continuation carrying credit and debit summaries, eleven and six `16` details, and every amount on a `V` (value-dated) funds type. It settles what the writer's record counts and control totals mean, and it is the file that showed the reader cannot read real BAI2 at all |
-| `bai2-sample3.txt` | same | `test/testdata/sample3.txt` | The file that packs records: eleven of them share a line with another, separated by `/`. It also wraps one `16`'s text onto a second line that carries the terminator. Its trailers reconcile, so it checks the packing arithmetically and not only structurally (#128) |
-| `bai2-sample4.txt` | same | `test/testdata/sample4-continuations-newline-delimited.txt` | 102 of its 116 lines carry no terminator at all - the newline ends them - and its `16`s carry free text with commas inside one field. 85 continuations, 68 of them following another (#128) |
-| `bai2-sample5.txt` | same | `test/testdata/sample5-issue113.txt` | Slashes **inside** fields: customer references like `AB/GS/RPFILERP0001/RPBA0001` and remittance text like `08/18/23 Invoice`. Twenty-two of them, and a reader that split on `/` would shatter every one. It also writes one continuation as `88:EREF: ...`, with a colon where the separator should be (#128) |
 | `bai2-sample2.txt` | same | `test/testdata/sample2.txt` | Four groups, five accounts, and the file that settled how continuations work (#114). `88` follows an `03`, a `16` and another `88`; a summary group **splits across the boundary**, its type code ending one record and its amount beginning the next; funds types `S`, `V`, `1` and blank appear, and `D` with its (days, amount) pairs; balances are written `+4350000`, `2830000` and `-500000`, so signed and bare amounts sit in one file |
+| `bai2-sample3.txt` | same | `test/testdata/sample3.txt` | A bank's export whose `16` texts name the movement. It settled `142` as the code a bank writes for an ACH credit received (`PPD`) (#127). It also packs several records onto one line - eleven of them share a line with another - and wraps one `16`'s text onto a second line that carries the terminator. Its trailers reconcile, so the packing is checked arithmetically and not only structurally (#128) |
+| `bai2-sample4.txt` | same | `test/testdata/sample4-continuations-newline-delimited.txt` | A bank's export with an `SEC` code and `GS ID` on every `16`. It settled `447` as the code for an ACH credit payment the account holder sent (`CCD`, `CTX`), and showed that `495`, `165` and `195`, the codes it replaced, are written for an outgoing wire, a debit collection's proceeds and an incoming wire (#127). 102 of its 116 lines carry no terminator at all - the newline ends them - and its `16`s carry free text with commas inside one field. 85 continuations, 68 of them following another (#128) |
+| `bai2-sample5.txt` | same | `test/testdata/sample5-issue113.txt` | Slashes **inside** fields: customer references like `AB/GS/RPFILERP0001/RPBA0001` and remittance text like `08/18/23 Invoice`. Twenty-two of them, and a reader that split on `/` would shatter every one. It also writes one continuation as `88:EREF: ...`, with a colon where the separator should be (#128) |
+| `bai2-type-codes.go` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `aee8612bc3e12439f201fc305b551e27a74c4e36` - **a later commit** than the rows above, because the table does not exist at `d3e11b6` | `pkg/bai2/type_codes_data.go` | moov's transcription of the type code table ("Appendix A of Cash Management Balance Reporting Specifications Version 2"): each code's direction, level and description. The evidence for `257`, *Individual ACH Return Item*: the samples' only `257` is a returned debit, and ours is a returned credit, so the table is what covers our case (#127) |
 
 moov-io/bai2 is **Apache License 2.0**. Its `LICENSE` at that commit is
 byte-for-byte the copy already here as `LICENSE-Apache-2.0.txt`, so no second
-copy is kept. It has **no `NOTICE` file** - `NOTICE-moov-ach.txt` is
+copy is kept. The same holds at `aee8612`, the later commit `bai2-type-codes.go`
+is pinned to. It has **no `NOTICE` file** - `NOTICE-moov-ach.txt` is
 moov-io/ach's and does not cover it. Copyright The Moov Authors.
 
 SHA-256 of each file as fetched, so a re-pin is a visible change:
@@ -74,6 +76,7 @@ SHA-256 of each file as fetched, so a re-pin is a visible change:
 | `bai2-sample3.txt` | `8a13ec611352000fbab9a880858e8349b50380fab9754bc237391738cfd9ada4` |
 | `bai2-sample4.txt` | `5a11cde54c9c8266b34d9980ee66237c1311f56b87d9eb1d28e5f02bafebaa9f` |
 | `bai2-sample5.txt` | `0391a0999e718ee84048f1b9642be5b08f963c41f3cd628f3f8ac677fb9a2e5c` |
+| `bai2-type-codes.go` | `2efbcb0cd05620f4e2c2bdb10c528f70571ad9cba6285cd657ebb0b7eebe66ee` |
 
 **`sample4` and `sample5` do not reconcile, and that is the file rather than the
 reader.** Each states one account total of `-1260161341762` and two of `000`,
