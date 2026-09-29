@@ -465,6 +465,13 @@ def _record(code: str, *values) -> str:
             parts.extend(_safe(item) for item in value)
         elif field.kind is A:
             parts.append(_safe(value))
+        elif field.kind is REST:
+            # By kind, not at the call site. `REST` fell through to `str(value)`
+            # when #128 declared it, and the text was safe only because
+            # `_transaction` happened to call `_safe` itself - which is the
+            # arrangement #57 fixed, where three safe call sites left the 01 and
+            # the 02 open.
+            parts.append(_free_text(value))
         elif field.kind is SIGNED:
             parts.append(_signed(value))
         else:
@@ -642,7 +649,7 @@ def _transaction(payment: Dict) -> str:
     return _record("16", code, _movement(payment["amount"]), AVAILABLE_NOW,
                    _safe(payment["end_to_end_id"]),
                    _safe(payment.get("msg_id") or ""),
-                   _safe(payment.get("creditor_name") or ""))
+                   payment.get("creditor_name") or "")
 
 
 # Everything that would end a field, a record, or a line. The line breaks are
@@ -667,6 +674,9 @@ def _safe(text) -> str:
     ends the field early and every field after it shifts, which is a wrong
     statement rather than an unreadable one. Replaced with a space, and `None`
     becomes empty rather than the text "None".
+
+    For the *last* field of a record see `_free_text`, which keeps the comma
+    because nothing follows it to shift.
     """
     if text is None:
         return ""
@@ -674,6 +684,53 @@ def _safe(text) -> str:
     for bad in UNSAFE + CONTROLS:
         out = out.replace(bad, " ")
     return out.strip()
+
+
+def _free_text(text) -> str:
+    """The last field of a record, which may contain the separator.
+
+    A comma is safe here and nowhere else: this field runs to the terminator, so
+    there is no field after it to shift. `sample4` carries `ACH Credit Payment,
+    Entry Description: EXP; -, SEC: CCD, Client Ref ID: 1111` as one field, and
+    replacing those commas is how a BAI2 statement came to name a creditor
+    `Umbrella  Logistics  S.A.` where the `camt.053` of the same statement said
+    `Umbrella, Logistics, S.A.` (#129).
+
+    What is still replaced:
+
+    - **line breaks and control characters**, because a wrapped line no longer
+      confuses the reader (#128) but is still junk in a file a bank parses;
+    - **the separator that completes a `/<code>,`**, which `_records` would read
+      as the end of the record. The slash is kept.
+
+    A bare slash is kept too, which is why the sequence above needs handling at
+    all. A first version of this excluded only the separator from the replaced
+    set and left the terminator in it, so every slash still became a space -
+    `A/S Nordisk` came out `A S Nordisk`, and `SPLITS_A_RECORD` was unreachable
+    because no slash survived to form the sequence. A slash is safe on its own:
+    the writer puts one record on a line and appends the terminator, so
+    `_ended` takes that one off and leaves the field's own.
+
+    That last choice is the interesting one, and the obvious version of it is
+    wrong. Neutralising the *slash* looks right - it is the delimiter-ish
+    character - but `NEXT_RECORD` allows whitespace between the slash and the
+    code, so blanking or removing one slash can expose the one before it:
+    `A//16,B` becomes `A/ 16,B` or `A/16,B`, both of which still split. Fixing
+    that needs iterating to a fixed point.
+
+    Replacing the **separator** needs one pass and provably so: a match requires
+    a comma, so turning a comma into a space can only remove matches and never
+    create one. It also keeps the slash, which real files carry freely - twenty-two
+    of them in `sample5` - and sacrifices the one comma that would have split the
+    record rather than every comma in the name.
+    """
+    if text is None:
+        return ""
+    out = str(text)
+    for bad in CONTROLS + tuple(c for c in UNSAFE
+                                if c not in (SEPARATOR, TERMINATOR)):
+        out = out.replace(bad, " ")
+    return SPLITS_A_RECORD.sub(r"\1 ", out).strip()
 
 
 Summary = namedtuple("Summary", "type_code amount count funds")
@@ -826,6 +883,13 @@ Record = namedtuple("Record", "code name values")
 _CODES = "|".join(sorted(set(RECORDS) | {CONTINUATION}))
 NEXT_RECORD = re.compile(r"/[ \t]*(?=(?:%s)%s)" % (_CODES, re.escape(SEPARATOR)))
 STARTS_RECORD = re.compile(r"^(?:%s)%s" % (_CODES, re.escape(SEPARATOR)))
+
+# The mirror of `NEXT_RECORD`, for the writer: the one sequence a run-to-end field
+# cannot carry, because `_records` would read it as the end of the record. Written
+# beside the reader's rule so the two cannot drift - if a code is ever added,
+# both change together.
+SPLITS_A_RECORD = re.compile(r"(/[ \t]*(?:%s))%s"
+                             % (_CODES, re.escape(SEPARATOR)))
 
 
 def _records(text: str):
