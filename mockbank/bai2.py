@@ -919,16 +919,35 @@ def _records(text: str):
                 raise Unreadable(
                     "line %d starts with no declared record code: %r"
                     % (number, line.strip()[:40]))
-            # A wrapped record: the newline is inside its last field, so it is
-            # kept rather than turned into a separator. `sample3` wraps a 16's
-            # text at a column and puts the terminator on the second line.
+            # A wrapped record: the line continues the one above, joined with
+            # **nothing** (#142). `sample3` wraps a 16's text at a column and
+            # puts the terminator on the second line.
             #
-            # A newline and not a space, because a space is a character the field
-            # could have contained and a newline is not - joining with one would
-            # be indistinguishable from the producer having written it. What the
-            # file holds is a line break, so that is what is kept.
+            # #128 kept the line break here, and the argument for that was
+            # confused: it said a space is a character the field could have
+            # contained and a newline is not, so joining with a space would be
+            # indistinguishable from the producer having written one. True, and
+            # an argument against joining with a *space*. It says nothing against
+            # joining with nothing, which never got considered - and a newline
+            # left inside a value is no better, because it is a character no
+            # producer meant either. A wrap in a reference read back as
+            # `INV-2026-\n0101`, and `payment_run` reconciles on that field.
+            #
+            # moov-io/bai2's scanner joins with nothing, in `pkg/util/scanner.go`:
+            # a newline goes to its `fullLine` label without reaching the buffer
+            # (only the `default` branch writes), and the continuation path
+            # re-enters the loop with that same buffer, so the next line's
+            # characters are appended directly.
+            #
+            # One implementation and no file: **no BAI2 file anywhere in
+            # moov-io/bai2 wraps outside a 16's text**, so nothing attests the
+            # case this rule is for. The two wraps that exist both continue a
+            # 16's text, where the content is filler and reads as meaninglessly
+            # one way as the other. That is recorded on #142 rather than
+            # presented as settled, and the rule is the PM's decision on that
+            # basis.
             where, so_far = out[-1]
-            out[-1] = (where, so_far + "\n" + _ended(line))
+            out[-1] = (where, so_far + _ended(line))
             continue
         for piece in NEXT_RECORD.split(line.lstrip()):
             if piece.strip():

@@ -729,7 +729,12 @@ def bai2_records(text: str) -> List[List[str]]:
             if not raw:
                 raise ValueError("a BAI2 file starts with a record code, not %r"
                                  % line.strip()[:40])
-            raw[-1] += "\n" + (line[:-1] if line.endswith("/") else line)
+            # Joined with nothing (#142): a wrapped line continues the one
+            # above and the break is not part of any field. moov-io/bai2's own
+            # scanner does the same, and `mockbank.bai2._records` is held to this
+            # by `tests/test_payment_run_readers.py` - change one and that test
+            # fails, which is the point of it.
+            raw[-1] += line[:-1] if line.endswith("/") else line
             continue
         raw += [p[:-1] if p.endswith("/") else p
                 for p in BAI2_NEXT.split(line.lstrip()) if p.strip()]

@@ -140,6 +140,26 @@ class ARealBanksFile(unittest.TestCase):
                     [(Decimal(d.amount).scaleb(-2), "CRDT" if int(d.type_code) < 400
                       else "DBIT", d.reference, d.customer_reference) for d in theirs])
 
+    def test_both_readers_split_every_file_into_the_same_fields(self):
+        """The agreement, one level below the movements - and it had a hole.
+
+        The test above compares each movement's amount, side and two references.
+        It does **not** compare the text, and `sample3`'s only wrapped line falls
+        in a text field, so the two readers could disagree about how a wrap joins
+        and nothing here noticed: reverting `payment_run`'s join alone, while
+        `mockbank.bai2` kept #142's, passed this whole suite.
+
+        Comparing the field lists closes it. It is also the stronger statement of
+        what "two readers agree" should mean - not that they agree about the four
+        values one caller happens to use, but that they cut the same file into the
+        same fields.
+        """
+        for name in SAMPLES:
+            with self.subTest(sample=name):
+                text = sample(name)
+                theirs = [[r.code] + list(r.values) for r in bai2._fold(text)]
+                self.assertEqual(payment_run.bai2_records(text), theirs)
+
     def test_sample3_adds_up_account_by_account(self):
         # Packed records and a wrapped one: if either were read wrong, a
         # movement would be lost or invented and an account would not add up.

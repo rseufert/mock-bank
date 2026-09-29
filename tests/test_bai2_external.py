@@ -551,19 +551,31 @@ class HowARecordEnds(unittest.TestCase):
                  bai2._records("16,142,2500,Z,,,REF1,text/88,more/\n")]
         self.assertEqual(len(split), 2, split)
 
-    def test_a_wrapped_line_keeps_the_break_it_was_written_with(self):
-        """sample3's wrapped 16, pinned to the character.
+    def test_a_wrapped_line_joins_with_nothing(self):
+        """sample3's wrapped 16, pinned to the character (#142).
 
-        Joining with a space passed before this test. It must not: a space is a
-        character the field could have contained and a line break is not, so
-        joining with one would be indistinguishable from the producer having
-        written it. The `,       1111111111` on the end is the `88` that follows,
-        which joins with a separator because that is what a continuation
-        continues.
+        **This asserted the opposite until #142**, and the change is deliberate:
+        it pinned `...1111111111\\n111111111111111...`, keeping the line break
+        inside the field. #128's argument for that was confused - it said a space
+        is a character the field could have contained and a newline is not, so
+        joining with a space would be indistinguishable from the producer having
+        written one. True, and an argument against a *space*; it says nothing
+        against joining with **nothing**, which never got considered. A newline
+        left in a value is a character no producer meant either.
+
+        moov-io/bai2's scanner joins with nothing, and no file anywhere attests
+        the case either way - the two wraps in existence both fall in a `16`'s
+        text where the content is filler. One implementation, no file, and the
+        PM's decision on that basis; #142 records it as exactly that.
+
+        The `,       1111111111` on the end is the `88` that follows, which joins
+        with a separator, because that is what a continuation continues.
         """
         wrapped = [r for r in bai2._fold(text(THREE))
-                   if r.code == "16" and any("\n" in v for v in r.values)]
+                   if r.code == "16" and r.line == 18]
         self.assertEqual(len(wrapped), 1, "one wrapped record in sample3")
+        self.assertNotIn("\n", "".join(wrapped[0].values),
+                         "no line break survives in any field")
         # Two, not three: the `16` and its `88`. **A wrapped line is not a
         # record**, so it does not count toward a trailer's record count - and
         # that is not my reading, it is sample3's own arithmetic, whose trailers
@@ -573,8 +585,27 @@ class HowARecordEnds(unittest.TestCase):
                          "which is what makes the count above a fact")
         self.assertEqual(
             bai2.detail(wrapped[0].values).text,
-            "111111     ACH_SETL           1111111111\n"
-            "111111111111111        ,       1111111111")
+            "111111     ACH_SETL           1111111111111111111111111"
+            "        ,       1111111111")
+
+    def test_a_wrap_inside_a_reference_reads_as_one_value(self):
+        """The case #142 exists for, and the reason the rule is not cosmetic.
+
+        A fixed-width producer wraps wherever its column falls, which need not be
+        the last field. `payment_run` reconciles on the bank reference, so a
+        newline left inside it is a payment that stops matching its invoice.
+
+        No vendored sample wraps here - both that exist fall in a `16`'s text - so
+        this is constructed, and #142 says so rather than implying a file behind
+        it.
+        """
+        wrapped = ("16,495,125000,Z,INV-2026-\n"
+                   "0101,MSG-1,Globex Supplies B.V./\n")
+        one = bai2.detail(bai2._fold(wrapped)[0].values)
+        self.assertEqual(one.reference, "INV-2026-0101")
+        self.assertEqual(one.customer_reference, "MSG-1")
+        self.assertEqual(one.text, "Globex Supplies B.V.")
+        self.assertEqual(one.amount, 125000)
 
     def test_a_line_that_does_not_start_with_a_code_continues_the_one_above(self):
         # sample3 wraps a 16's text onto a second line that carries the
