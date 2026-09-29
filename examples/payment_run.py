@@ -560,7 +560,15 @@ class PaymentRun:
                 run.problems.append("a %s from the bank could not be read: %s"
                                     % (WHAT[kind], error))
                 continue
-            statements += [s for s in found if s["account"] in self.own_account()]
+            for s in found:
+                if s["account"] not in self.own_account():
+                    continue
+                if s["opening"] is None or s["closing"] is None:
+                    run.problems.append(
+                        "the %s for %s gives no opening and closing ledger balance "
+                        "(010 and 015), so it was not posted" % (WHAT[kind], s["day"]))
+                    continue
+                statements.append(s)
         statements.sort(key=lambda s: (s["day"], int(s["number"] or 0)))
         for statement in statements:
             self.post_statement(run, statement)
@@ -694,58 +702,110 @@ def camt_statements(text: str) -> List[Dict]:
             for s in d[0] if tag(s) == "Stmt"]
 
 
-def bai2_statements(text: str) -> List[Dict]:
-    """Every account in a run of BAI2 files, as the same plain statement.
+# The records a BAI2 file is made of. A line starts one only when it begins
+# with one of these and a comma, and a `/` inside a line ends one only when one
+# of these and a comma follow it: a slash inside a reference (`AB/GS/RP0001`) or
+# an address (`Unit 4/88 Harbour St`) is text, and a line that starts with
+# neither is the record above wrapped onto a second line. The same rule as
+# `mockbank.bai2` since #128, written again here because this example imports
+# neither mock, and the rule moov-io/bai2's scanner states too.
+BAI2_CODES = ("01", "02", "03", "16", "49", "88", "98", "99")
+BAI2_STARTS = re.compile(r"^(?:%s)," % "|".join(BAI2_CODES))
+BAI2_NEXT = re.compile(r"/[ \t]*(?=(?:%s),)" % "|".join(BAI2_CODES))
 
-    Read by hand, as the `camt.053` is, because the example imports neither
-    mock. A record ends at `/`, and an `88` continues the one before it. The
-    `01` gives the file number, the `02` the as-of date, the `03` the account
-    and its `010` opening and `015` closing ledger balances, and each `16` a
-    movement: amounts are in cents, and the direction is the type code's range,
-    100 to 399 a credit and 400 to 699 a debit, so no particular code need be
-    known. The `EndToEndId` is the bank reference number. Only funds type `Z`,
-    `0` and `1` are read, which carry no availability fields; any other raises.
+
+def bai2_records(text: str) -> List[List[str]]:
+    """The records of a BAI2 file as lists of fields, continuations folded in.
+
+    A record may end at `/`, at the end of its line, or share a line with the
+    next; an `88` continues the field stream of the record before it.
     """
-    records: List[List[str]] = []
+    raw: List[str] = []
     for line in text.splitlines():
-        line = line.strip()
-        if not line:
+        line = line.rstrip()
+        if not line.strip():
             continue
-        fields = line[:-1].split(",") if line.endswith("/") else line.split(",")
+        if not BAI2_STARTS.match(line.lstrip()):
+            if not raw:
+                raise ValueError("a BAI2 file starts with a record code, not %r"
+                                 % line.strip()[:40])
+            raw[-1] += "\n" + (line[:-1] if line.endswith("/") else line)
+            continue
+        raw += [p[:-1] if p.endswith("/") else p
+                for p in BAI2_NEXT.split(line.lstrip()) if p.strip()]
+    records: List[List[str]] = []
+    for record in raw:
+        fields = record.split(",")
         if fields[0] == "88" and records:
             records[-1] += fields[1:]
         else:
             records.append(fields)
+    return records
+
+
+def funds_width(fields: List[str]) -> int:
+    """How many fields a funds type takes, starting with the type itself.
+
+    Blank, `Z`, `0`, `1` and `2` stand alone; `V` adds a date and a time, `S`
+    three amounts, and `D` a count and that many (days, amount) pairs.
+    """
+    kind = fields[0] if fields else ""
+    if kind in ("", "Z", "0", "1", "2"):
+        return 1
+    if kind == "V":
+        return 3
+    if kind == "S":
+        return 4
+    if kind == "D":
+        return 2 + 2 * int(fields[1] or "0")
+    raise ValueError("funds type %r is not one BAI2 defines" % kind)
+
+
+def bai2_statements(text: str) -> List[Dict]:
+    """Every account in a run of BAI2 files, as the same plain statement.
+
+    Read by hand, as the `camt.053` is, because the example imports neither
+    mock. The `01` gives the file number, the `02` the as-of date, the `03` the
+    account and its `010` opening and `015` closing ledger balances, and each
+    `16` a movement: amounts are in cents, and the direction is the type code's
+    range, 100 to 399 a credit and 400 to 699 a debit, so no particular code
+    need be known. The `EndToEndId` is the bank reference number and the file's
+    `MsgId` the customer reference, found after however many fields the funds
+    type takes; the text after them runs to the end of the record, commas and
+    all, and is not needed here. An account the bank reports
+    without both ledger balances - an intraday position, say - comes back with
+    `opening` and `closing` of None rather than stopping the file: it is not a
+    statement, but the accounts beside it may be.
+    """
     out: List[Dict] = []
     number = day = ""
     current: Optional[Dict] = None
-    for fields in records:
+    for fields in bai2_records(text):
         code = fields[0]
         if code == "01":
             number = fields[5]
         elif code == "02":
             day = "20%s-%s-%s" % (fields[4][:2], fields[4][2:4], fields[4][4:6])
         elif code == "03":
-            summary = fields[3:]
-            balances = {summary[i]: cents(summary[i + 1])
-                        for i in range(0, len(summary) - 1, 4)}
-            if "010" not in balances or "015" not in balances:
-                raise ValueError("account %s has no 010 and 015 balances" % fields[1])
+            balances, at = {}, 3
+            while at + 2 < len(fields):
+                if fields[at]:
+                    balances[fields[at]] = cents(fields[at + 1])
+                at += 3 + funds_width(fields[at + 3:])
             current = {"account": fields[1], "number": number, "day": day,
-                       "opening": balances["010"], "closing": balances["015"],
+                       "opening": balances.get("010"), "closing": balances.get("015"),
                        "lines": []}
         elif code == "16" and current is not None:
-            if fields[3] not in ("Z", "0", "1"):
-                raise ValueError("funds type %r on %s is not read here"
-                                 % (fields[3], fields[4]))
             kind = int(fields[1])
             if not (100 <= kind <= 699):
                 raise ValueError("type code %s is neither a credit nor a debit" % fields[1])
+            after = 3 + funds_width(fields[3:])
+            refs = fields[after:after + 2] + ["", ""]
             current["lines"].append({
                 "amount": str(cents(fields[2])),
                 "side": "CRDT" if kind < 400 else "DBIT",
-                "booked_on": day, "end_to_end_id": fields[4],
-                "msg_id": fields[5] if len(fields) > 5 else "", "returned_for": ""})
+                "booked_on": day, "end_to_end_id": refs[0], "msg_id": refs[1],
+                "returned_for": ""})
         elif code == "49" and current is not None:
             out.append(current)
             current = None
