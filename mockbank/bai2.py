@@ -27,44 +27,52 @@ Type codes
 ==============  ==============================================================
 ``010``         opening ledger balance
 ``015``         closing ledger balance
-``495``         the debit for a payment that left the account (**placeholder**)
-``165``         the credit for a payment that came back (**placeholder**)
-``195``         money arriving from somebody else, #91 (**placeholder**)
+``447``         the debit for a payment that left the account
+``257``         the credit for a payment that came back
+``142``         money arriving from somebody else, #91
 ==============  ==============================================================
 
-``010`` and ``015`` are the two status codes this mock needs and are not in
-doubt. **The transaction codes are still placeholders.** They are listed in
-``PLACEHOLDER_CODES`` so that nothing else in the package has to know which is
-which.
+Every code here is settled against a source outside the project (#127), and
+each has a test in ``tests/test_bai2_type_codes.py`` that pastes the evidence
+and would fail if the source changed. There are two sources, both from
+moov-io/bai2 and vendored under ``tests/samples/external/``:
 
-#57 was meant to settle them against a file from outside the project, and the
-file it found could not. ``bai2-sample1.txt`` carries ``100`` and ``400`` (a
-credit and a debit summary total), ``108`` and ``409`` (a detail credit and
-debit), and ``040``/``045`` (available balances). None of those is an outgoing
-customer transfer, one coming back, or a transfer received, which are the three
-movements this mock books, so the sample settles a great deal about the *file*
-and nothing about these codes. The one public repository holding the full BAI code list carries
-**no licence at all**, so it is neither vendored here nor cited as authority.
+* ``bai2-type-codes.go``, moov's transcription of the specification's type
+  code table ("Appendix A of Cash Management Balance Reporting Specifications
+  Version 2"), which gives each code its direction and its description;
+* ``bai2-sample3.txt`` and ``bai2-sample4.txt``, a bank's own exports, which
+  show which code a bank writes for which movement.
 
-Unverified codes plainly marked is the honest state. They are not quietly
-promoted to settled because #57 closed.
+``447``, *ACH Disbursement Funding Debit*: the code ``bai2-sample4.txt`` writes
+for ``ACH Credit Payment``, an ACH credit the account holder sent, SEC ``CCD``
+and ``CTX``, which is exactly what a NACHA account pays with.
 
-The first draft used ``455`` for the debit and kept ``165`` for the return,
-both reasoned from "these are ACH movements". That was shown to be the wrong
-reasoning in review: in BAI2 **"preauthorized" describes a movement the *other*
-party initiated** - a direct debit pulling from the account, or a credit pushed
-into it. Neither is what this mock books. What leaves these accounts is a
-payment the account holder sent, and what comes back is one of those returning.
-So ``455`` was not merely unverified, it described the wrong originator.
+``257``, *Individual ACH Return Item*, a credit. **The evidence for our case is
+the table's description, not the sample.** The only ``257`` in the samples is
+an ``ACH Debit Payment Return`` - a debit the account holder collected, coming
+back - while ours is an ACH credit the account holder sent, coming back. The
+description covers both, and it is the only individual-item return code on the
+credit side (``168`` is a settlement total).
 
-``495`` replaces it on that reasoning, with ``466`` (an ACH settlement) named as
-the other candidate. ``165`` stays for the moment because #56 names it
-explicitly and an issue is the maintainer's to change, but the same objection
-applies to it and is recorded on the pull request rather than acted on here.
+``142``, *ACH Credit Received*: the code ``bai2-sample3.txt`` writes for ACH
+credits arriving (``PPD``). A NACHA account's rail is ACH, and this statement is
+only written for NACHA accounts.
 
-Swapping one unverified code for another is not progress on its own, which is
-why both are marked rather than quietly corrected: the honest state is that the
-reasoning improved and the evidence did not.
+**What they replaced, and why.** Until #127 these were ``495``, ``165`` and
+``195``, marked as placeholders because no licensed code list existed when #57
+looked. The same sources show each meant something else: ``bai2-sample4.txt``
+writes ``495`` for an ``Outgoing Wire``, ``165`` for the proceeds of the
+account holder's own ``ACH Debit Collection``, and ``195`` for an ``Incoming
+Wire``. So ``165`` for a return was wrong, not merely unverified, and
+``495``/``195`` described the wrong rail.
+
+A reader that takes a movement's direction from the code's range - 100 to 399 a
+credit, 400 to 699 a debit, as ``examples/payment_run.py`` does - reads the new
+codes exactly as it read the old ones. A reader that matched on the old codes
+does not.
+
+``PLACEHOLDER_CODES`` stays, empty: a code that cannot be sourced goes back into
+it, rather than being quietly left as if it were settled.
 
 This module was written against the BAI2 record layout as it is commonly
 reproduced, not against the published BAI specification, which the project does
@@ -89,10 +97,11 @@ were wrong rather than only here: the ``02``'s two parties (see ``_parties``),
 the notation for a positive amount (see ``_signed``), and the reason given for
 keeping movement totals out of the ``03`` (see ``_account``).
 
-What it could **not** settle is the two transaction codes above, and what it
-exposed is that ``read`` cannot parse a real BAI2 file at all - it does not
-declare the ``88`` continuation record, and it assumes a funds type occupies one
-field where a value-dated one occupies three. That is #114, and
+What it could **not** settle is the transaction codes above - #127 did, from
+two more of moov-io/bai2's files - and what it exposed is that ``read`` could
+not parse a real BAI2 file at all - it did not declare the ``88`` continuation
+record, and it assumed a funds type occupies one field where a value-dated one
+occupies three. That is #114, and
 ``tests/test_bai2_external.py`` pins each way it fails so that none of them can
 be fixed silently or quietly rot.
 """
@@ -100,7 +109,7 @@ from __future__ import annotations
 
 import datetime
 from collections import namedtuple
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 NAME = "BAI2"
 VERSION = 2
@@ -119,21 +128,18 @@ CONTROL_TOTALS_ARE_SIGNED = True
 COUNTS_INCLUDE_THE_TRAILER = True
 
 # Status codes for the balances this mock reports, and transaction codes for the
-# two movements it books. See the module docstring for why these two.
+# three movements it books. See the module docstring for the evidence for each.
 OPENING_LEDGER = "010"
 CLOSING_LEDGER = "015"
 
-# **Still placeholders after #57.** See the module docstring: the balance codes
-# are certain and these are not, so they are named here and nowhere else. The
-# outside sample #57 vendored settled the record layout, the counts, the control
-# totals and the 02's parties, and could not settle these: it books nothing that
-# is an outgoing customer transfer, a return of one, or a transfer received.
-DEBIT = "495"
-RETURNED_CREDIT = "165"
-# Money arriving (#91): Incoming Money Transfer, by the reasoning that gives the
-# debit 495 - a transfer, not a "preauthorized" movement the other party pulled.
-RECEIVED_CREDIT = "195"
-PLACEHOLDER_CODES = (DEBIT, RETURNED_CREDIT, RECEIVED_CREDIT)
+# Settled against moov-io/bai2's type code table and a bank's own exports
+# (#127); the module docstring gives the evidence for each, and
+# `tests/test_bai2_type_codes.py` holds each to it.
+DEBIT = "447"             # ACH Disbursement Funding Debit: "ACH Credit Payment"
+RETURNED_CREDIT = "257"   # Individual ACH Return Item
+RECEIVED_CREDIT = "142"   # ACH Credit Received (#91)
+# Codes still unverified. Empty since #127; one that loses its source goes back.
+PLACEHOLDER_CODES: Tuple[str, ...] = ()
 
 # `Z` means the amount is immediately available; BAI2's other funds types say
 # when it becomes so. Everything this mock books is already booked, so there is

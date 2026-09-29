@@ -280,15 +280,18 @@ reason in ISO 20022's words (`R01` is `AM04`, `R02` is `AC04`, `R03` is
 `AC01`). A BAI2 statement carries no reason at all; the `R` code is in the
 return file.
 
-**What the BAI2 statement does not yet settle.** It is held to files from
-outside the project, which fixed who the `02` names as originator, what a record
-count covers, and that a balance or a control total may state its sign - though
-most real files do not, so signing is this mock's choice rather than the format's
-requirement. They could not settle the transaction type codes on the `16`
-records: `495` for a payment and
-`165` for one coming back are placeholders, and a reader should take a
+**What the BAI2 statement is held to.** It is held to files from outside the
+project, which fixed who the `02` names as originator, what a record count
+covers, and that a balance or a control total may state its sign - though most
+real files do not, so signing is this mock's choice rather than the format's
+requirement. They also settled the transaction type codes on the `16` records
+(#127): `447` for a payment sent (ACH Disbursement Funding Debit, which is what
+a bank writes for an ACH credit payment), `257` for one coming back (Individual
+ACH Return Item) and `142` for money arriving (ACH Credit Received). Before 0.5
+these were `495`, `165` and `195`, which a real bank writes for an outgoing wire,
+the proceeds of a debit collection and an incoming wire. A reader that takes a
 movement's direction from the code's range, 100 to 399 a credit and 400 to 699 a
-debit, as `examples/payment_run.py` does.
+debit, as `examples/payment_run.py` does, reads both the same.
 
 `mockbank.bai2.read` reads a real bank's file as well as the mock's own
 ([#114](https://github.com/rseufert/mock-bank/issues/114)). A `88` continuation
@@ -361,11 +364,10 @@ curl -s -X POST http://127.0.0.1:8080/_mock/credits -H 'Content-Type: applicatio
   `RmtInf/Strd/CdtrRefInf/Ref`. A receiving system that reads the structured
   field can be tested against one that has to parse the prose.
 - **For an account that banks in NACHA the statement is BAI2**, as it is for
-  that account's debits, and money arriving is a `16` of type code `195`, an
-  incoming transfer: the `EndToEndId` as the bank reference, the structured
-  reference as the customer reference and the payer's name as the text. `195`
-  is a placeholder, like the other two codes. The `camt.054` goes to every
-  account, whatever its format.
+  that account's debits, and money arriving is a `16` of type code `142`, an
+  ACH credit received: the `EndToEndId` as the bank reference, the structured
+  reference as the customer reference and the payer's name as the text. The
+  `camt.054` goes to every account, whatever its format.
 - **Amounts are minor units** and the currency is the account's; a credit in
   another is refused, as the mock does no FX, and so is one to a closed or
   unknown account, or for a value date already past.
@@ -972,7 +974,7 @@ than half-supporting it.
 | 0.2 | Returns (`pacs.004`, `return-later`), folder transport, retention, the `payment_run` example | **Done.** `payment_run`'s thirteen tests pass in CI against mock-sap from PyPI |
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Done.** `procure_to_pay`'s ten tests pass in CI against mock-sap and mock-edi from PyPI |
-| 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are settled or kept as placeholders on purpose | In progress. What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
+| 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source | In progress. What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
 
 ## Contributing
 
