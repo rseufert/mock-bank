@@ -56,14 +56,14 @@ did not write. `tests/test_bai2_external.py` reads it.
 | --- | --- | --- | --- |
 | `bai2-sample1.txt` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `d3e11b628d3d59fd6911836b9ca328cb8b7621f2` | `test/testdata/sample1.txt` | Two account sections in one group, each with an `88` continuation carrying credit and debit summaries, eleven and six `16` details, and every amount on a `V` (value-dated) funds type. It settles what the writer's record counts and control totals mean, and it is the file that showed the reader cannot read real BAI2 at all |
 | `bai2-sample2.txt` | same | `test/testdata/sample2.txt` | Four groups, five accounts, and the file that settled how continuations work (#114). `88` follows an `03`, a `16` and another `88`; a summary group **splits across the boundary**, its type code ending one record and its amount beginning the next; funds types `S`, `V`, `1` and blank appear, and `D` with its (days, amount) pairs; balances are written `+4350000`, `2830000` and `-500000`, so signed and bare amounts sit in one file |
-| `bai2-sample3.txt` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `aee8612bc3e12439f201fc305b551e27a74c4e36` | `test/testdata/sample3.txt` | A bank's export whose `16` texts name the movement. It settled `142` as the code a bank writes for an ACH credit received (`PPD`) (#127). It also packs several records onto one line, which is #128's to read |
+| `bai2-sample3.txt` | same | `test/testdata/sample3.txt` | A bank's export whose `16` texts name the movement. It settled `142` as the code a bank writes for an ACH credit received (`PPD`) (#127). It also packs several records onto one line, which is #128's to read |
 | `bai2-sample4.txt` | same | `test/testdata/sample4-continuations-newline-delimited.txt` | A bank's export with an `SEC` code and `GS ID` on every `16`. It settled `447` as the code for an ACH credit payment the account holder sent (`CCD`, `CTX`), and showed that `495`, `165` and `195`, the codes it replaced, are written for an outgoing wire, a debit collection's proceeds and an incoming wire (#127). Its text fields carry commas and most records have no `/`, which is #128's to read |
-| `bai2-type-codes.go` | same | `pkg/bai2/type_codes_data.go` | moov's transcription of the type code table ("Appendix A of Cash Management Balance Reporting Specifications Version 2"): each code's direction, level and description. The evidence for `257`, *Individual ACH Return Item*: the samples' only `257` is a returned debit, and ours is a returned credit, so the table is what covers our case (#127) |
+| `bai2-type-codes.go` | [moov-io/bai2](https://github.com/moov-io/bai2) @ `aee8612bc3e12439f201fc305b551e27a74c4e36` - **a later commit** than the rows above, because the table does not exist at `d3e11b6` | `pkg/bai2/type_codes_data.go` | moov's transcription of the type code table ("Appendix A of Cash Management Balance Reporting Specifications Version 2"): each code's direction, level and description. The evidence for `257`, *Individual ACH Return Item*: the samples' only `257` is a returned debit, and ours is a returned credit, so the table is what covers our case (#127) |
 
 moov-io/bai2 is **Apache License 2.0**. Its `LICENSE` at that commit is
 byte-for-byte the copy already here as `LICENSE-Apache-2.0.txt`, so no second
-copy is kept. The same holds at `aee8612`, the commit the three files #127 added
-are pinned to. It has **no `NOTICE` file** - `NOTICE-moov-ach.txt` is
+copy is kept. The same holds at `aee8612`, the later commit `bai2-type-codes.go`
+is pinned to. It has **no `NOTICE` file** - `NOTICE-moov-ach.txt` is
 moov-io/ach's and does not cover it. Copyright The Moov Authors.
 
 SHA-256 of each file as fetched, so a re-pin is a visible change:
