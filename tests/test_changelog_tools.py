@@ -138,6 +138,24 @@ class AFragmentThatWouldVanish(ToolCase):
         self.assertEqual(code, 1)
         self.assertIn("empty", out)
 
+    def test_a_fragment_that_starts_with_a_bullet_is_refused(self):
+        # --assemble adds the `- `, so #127's and #132's fragments came out as
+        # `- - **...**` and nothing said so (#138). Either marker, and after a
+        # blank first line too.
+        for text in ("- **Something** (#42).\n", "* **Something** (#42).\n",
+                     "\n- **Something** (#42).\n"):
+            with self.subTest(text=text):
+                self.fragment("42.added.md", text)
+                code, out = self.run_tool()
+                self.assertEqual(code, 1, out)
+                self.assertIn("42.added.md starts with a bullet", out)
+
+    def test_a_list_inside_the_entry_is_not_a_leading_bullet(self):
+        self.fragment("42.added.md", "**Something** (#42). It does two things:\n\n"
+                                     "- one;\n- and the other.\n")
+        code, out = self.run_tool()
+        self.assertEqual(code, 0, out)
+
     def test_a_well_named_fragment_passes(self):
         self.fragment("42.added.md")
         code, out = self.run_tool()

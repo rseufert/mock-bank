@@ -206,10 +206,18 @@ def check_fragments():
                 "%s has the kind `%s`, which is not one of %s"
                 % (path, found.group(2), ", ".join(KINDS)))
         with open(os.path.join(directory, name), encoding="utf-8") as handle:
-            if not handle.read().strip():
-                problems.append(
-                    "%s is empty; it holds the entry's text, written as a "
-                    "changelog bullet is written" % path)
+            body = handle.read()
+        if not body.strip():
+            problems.append(
+                "%s is empty; it holds the entry's text, written as a "
+                "changelog bullet is written" % path)
+        elif BULLET.match(body.lstrip("\n")):
+            # --assemble writes the `- ` and indents what follows, so a fragment
+            # that starts with its own came out as `- - **...**` (#138).
+            problems.append(
+                "%s starts with a bullet; it holds the entry's text alone, "
+                "because --assemble adds the `- ` and indents the lines after it"
+                % path)
     return problems
 
 
