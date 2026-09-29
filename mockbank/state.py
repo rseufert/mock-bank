@@ -9,8 +9,8 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any, Dict
 
-from . import (__version__, accounts, clock as clock_module, db, drop, nacha, outbox,
-               validate)
+from . import (__version__, accounts, clock as clock_module, db, drop, messages, nacha,
+               outbox, validate)
 from .accounts import BEHAVIOURS
 from .routes import SUPPORTED
 from .routes.control import PLANNED
@@ -157,6 +157,14 @@ class State:
         # Either door takes a NACHA file as well as a pain.001 (#53), and then
         # names the accounts it holds by IBAN, which is all `decide` knows.
         payment_file, findings = validate.inspect(body, content_type, today)
+        if isinstance(payment_file, messages.CollectionFile):
+            # Read and validated since #131's first step, booked by its second:
+            # until then refused by name, the way any message the pipeline does
+            # not take is, rather than read as a pain.001 with no payments.
+            payment_file, findings = None, findings + [validate.refusal(
+                "the file is a %s, a direct debit initiation; the mock reads and "
+                "validates collections (POST /_mock/validate) but does not book them "
+                "yet (#131)" % payment_file.message)]
         accounts.resolve(conn, payment_file)
         decision = accounts.decide(payment_file, findings, conn, self.clock, now,
                                    self.config.allow_duplicates)

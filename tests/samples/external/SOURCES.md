@@ -25,6 +25,8 @@ invalid ones do not.
 | `pain.002.001.10-sepa-status.xml` | `pain.002.001.10` | [apiome/apiome](https://github.com/apiome/apiome) @ `80f60429eb4c80b8c36a6fe1d6a33f9e3474b706` | `apiome-ui/examples/sepa/07-status-set/pain002.xml` | A SEPA status report with transaction-level statuses |
 | `camt.053.001.08-sepa-statement.xml` | `camt.053.001.08` | same | `apiome-ui/examples/sepa/06-typical-camt053-statement.xml` | A day's statement: balances, entries, related parties |
 | `camt.054.001.08-notification.xml` | `camt.054.001.08` | same | `apiome-ui/examples/iso20022/05-camt.054-notification.xml` | A notification with charges and supplementary data |
+| `pain.008.001.08-be-sdd-core.xml` | `pain.008.001.08` | [sebastienrousseau/pain001](https://github.com/sebastienrousseau/pain001) @ `b86d0de5c7704a1fa6159f009c8e0ab3a3801bc4` | `pain001/corpus/data/market/be/sepa-direct-debit/be.sepa.sdd-core.pain.008.001.08.xml` | A Belgian SEPA Core direct debit, recurring: one collection, the mandate id and date on the transaction and the creditor scheme id on the batch. Its provenance file at that commit gives its SHA-256 as `6426fd54243af6bf29da43f5aafaae31cae6a324af2bffabe59b253decfdd242`, and the bytes here match (#131) |
+| `pain.008.001.08-direct-debit.xml` | `pain.008.001.08` | [apiome/apiome](https://github.com/apiome/apiome) @ `80f60429eb4c80b8c36a6fe1d6a33f9e3474b706` | `apiome-ui/examples/iso20022/04-pain.008-direct-debit.xml` | Two batches, a recurring and a first collection, with the creditor scheme id on each transaction rather than the batch, and unstructured remittance (#131) |
 
 The three ISO 20022 projects publish under the **Apache License 2.0**, a copy of which
 is `LICENSE-Apache-2.0.txt`. None of them has a `NOTICE` file. The
@@ -175,6 +177,7 @@ from these pinned commits and must match these SHA-256s before use:
 | --- | --- | --- | --- |
 | `pain.001.001.09.xsd` | [prog-nov/iso20022-struct-go](https://github.com/prog-nov/iso20022-struct-go) (Apache-2.0) @ `b105620042e86826436edfdc45fdfa079b19894e` | `xsd/pain.001.001.09.xsd` | `de038b373e47b0077b1832ddd81f4b2f1eb25d35721f62da1e38b7f5a09fda24` |
 | `pain.001.001.03.xsd` | same | `xsd/pain.001.001.03.xsd` | `6bb5c6f24250ab807f31f6164142bafd6d43bad8d162a926e258ff4c11e128af` |
+| `pain.008.001.08.xsd` | same | `xsd/pain.008.001.08.xsd` | `7edf4e4ce34c47a5567af6a327e22af4ed4007f715822af9f353c94ecc10f5ba` |
 | `pain.002.001.10.xsd` | same | `xsd/pain.002.001.10.xsd` | `2f9f8d0e9891fa9f31ccf0576397afe501614384d688ae6e43ba694b3d24b0cf` |
 | `pacs.004.001.09.xsd` | same | `xsd/pacs.004.001.09.xsd` | `e2b13023bed19429bd8347ed9e13d31e6dec33fa4a8ef07dd03138d5442826b9` |
 | `camt.053.001.08.xsd` | [genkgo/camt](https://github.com/genkgo/camt) (MIT) @ `56e047d1599854ca34db0ccabce15230fcdd3f16` | `assets/camt.053.001.08.xsd` | `c3cfac080dc31476bde7444b05d00e1b23558d5e44529e58d0ad562e6013873d` |

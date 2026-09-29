@@ -74,7 +74,8 @@ Amount.__doc__ = "An amount as an integer number of minor units and its currency
 STRUCTURAL = "FF01"
 
 CHOICES = {
-    "read": "pain.001.001.09, and pain.001.001.03 read into the same mapping",
+    "read": "pain.001.001.09, and pain.001.001.03 read into the same mapping; "
+            "pain.008.001.08 read and validated, not yet booked (#131)",
     "written": "pain.002.001.10, camt.054.001.08, camt.053.001.08, camt.052.001.08, "
                "pacs.004.001.09",
     "bank_transaction_code": "PMNT/ICDT/ESCT on every debit the mock books, "
@@ -175,6 +176,16 @@ CODE_SETS = {
         "DEBT": "BorneByDebtor",
         "SHAR": "Shared",
         "SLEV": "FollowingServiceLevel",
+    },
+    "PaymentMethod2Code": {
+        "DD": "DirectDebit",
+    },
+    "SequenceType3Code": {
+        "FRST": "First: the first collection of a series under one mandate",
+        "RCUR": "Recurring: a collection that follows the first",
+        "FNAL": "Final: the last collection of the series",
+        "OOFF": "OneOff: a single collection under its own mandate",
+        "RPRE": "Represented: a collection presented again after a return",
     },
     "Priority2Code": {
         "HIGH": "High",
@@ -564,12 +575,18 @@ def party_or_agent(v, name):
     return Choice(name, party(v, "Pty"), agent(v, "Agt"), iso="Party40Choice")
 
 
-def payment_type(v):
+def payment_type(v, sequence=False):
+    """``PmtTpInf``. A direct debit's carries the sequence type as well - first,
+    recurring, final or one-off - between the local instrument and the category
+    purpose (``PaymentTypeInformation29``); a credit transfer's does not."""
     service = code_or_proprietary("SvcLvl")
-    return Group("PmtTpInf", Code("InstrPrty", codes="Priority2Code").opt,
-                 service.many() if v >= 9 else service.opt,
-                 code_or_proprietary("LclInstrm", pattern="External35Code").opt,
-                 code_or_proprietary("CtgyPurp").opt)
+    children = [Code("InstrPrty", codes="Priority2Code").opt,
+                service.many() if v >= 9 else service.opt,
+                code_or_proprietary("LclInstrm", pattern="External35Code").opt]
+    if sequence:
+        children.append(Code("SeqTp", codes="SequenceType3Code").opt)
+    children.append(code_or_proprietary("CtgyPurp").opt)
+    return Group("PmtTpInf", *children)
 
 
 def remittance(v):
@@ -716,6 +733,37 @@ def pain001(v):
     return Group("Document", Group("CstmrCdtTrfInitn", header, batch.many(1)))
 
 
+def pain008():
+    """A direct debit initiation (#131): the account holder asks the bank to
+    collect from debtors under their mandates. The creditor is the batch's and
+    the debtor each transaction's - the mirror of a ``pain.001``."""
+    v = 9
+    header = Group("GrpHdr", Ident("MsgId"), DateTime("CreDtTm"), Count("NbOfTxs"),
+                   Dec("CtrlSum").opt, party(v, "InitgPty"), iso="GroupHeader83")
+    payment_id = Group("PmtId", Ident("InstrId").opt, Ident("EndToEndId"),
+                       Ident("UETR", 36, pattern="UUIDv4Identifier").opt)
+    mandate = Group("MndtRltdInf", Ident("MndtId").opt, Date("DtOfSgntr").opt,
+                    Bool("AmdmntInd").opt, iso="MandateRelatedInformation14")
+    direct_debit = Group("DrctDbtTx", mandate.opt, party(v, "CdtrSchmeId").opt,
+                         Ident("PreNtfctnId").opt, Date("PreNtfctnDt").opt,
+                         iso="DirectDebitTransaction10")
+    transaction = Group(
+        "DrctDbtTxInf", payment_id, payment_type(v, sequence=True).opt, Amt("InstdAmt"),
+        Code("ChrgBr", codes="ChargeBearerType1Code").opt, direct_debit.opt,
+        party(v, "UltmtCdtr").opt, agent(v, "DbtrAgt"), party(v, "Dbtr"),
+        account(v, "DbtrAcct"), party(v, "UltmtDbtr").opt,
+        code_or_proprietary("Purp").opt, remittance(v).opt,
+        iso="DirectDebitTransactionInformation23")
+    batch = Group(
+        "PmtInf", Ident("PmtInfId"), Code("PmtMtd", codes="PaymentMethod2Code"),
+        Bool("BtchBookg").opt, Count("NbOfTxs").opt, Dec("CtrlSum").opt,
+        payment_type(v, sequence=True).opt, Date("ReqdColltnDt"),
+        party(v, "Cdtr"), account(v, "CdtrAcct"), agent(v, "CdtrAgt"),
+        party(v, "UltmtCdtr").opt, Code("ChrgBr", codes="ChargeBearerType1Code").opt,
+        party(v, "CdtrSchmeId").opt, transaction.many(1), iso="PaymentInstruction29")
+    return Group("Document", Group("CstmrDrctDbtInitn", header, batch.many(1)))
+
+
 def pain002():
     v = 9
     per_status = Group("NbOfTxsPerSts", Count("DtldNbOfTxs"),
@@ -828,6 +876,9 @@ MESSAGES = {m.name: m for m in (
             "Customer credit transfer initiation: the payment file a client sends"),
     Message("pain.001.001.03", "in", pain001(3),
             "The 2009 version of the same, still accepted and read into the same mapping"),
+    Message("pain.008.001.08", "in", pain008(),
+            "Customer direct debit initiation: collections the account holder asks "
+            "the bank to make (read and validated; booking follows, #131)"),
     Message("pain.002.001.10", "out", pain002(),
             "Customer payment status report: accepts or rejects the file, batches and payments"),
     Message("camt.054.001.08", "out", camt054(),

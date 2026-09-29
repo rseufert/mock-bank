@@ -34,7 +34,7 @@ BROKEN = {
     "pain001_broken_order.xml": ("error", "FF01", BODY + "/GrpHdr/MsgId", "out of order"),
     "pain001_broken_namespace.xml": ("error", "FF01", PAYMENT % 3 + "/Amt/InstdAmt", "urn:example:other"),
     "pain001_broken_signed.xml": ("error", "FF01", "/", "signature"),
-    "pain001_broken_unknown_message.xml": ("error", "FF01", "/", "pain.008.001.08"),
+    "pain001_broken_unknown_message.xml": ("error", "FF01", "/", "pain.007.001.09"),
     "pain001_broken_not_xml.xml": ("error", "FF01", "/", "not well-formed XML"),
 }
 
