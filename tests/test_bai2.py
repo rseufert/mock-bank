@@ -94,6 +94,42 @@ class OneStatementWrittenTwice(unittest.TestCase):
                          camt["entries"])
         self.assertEqual(len(ba.entries), 3)
 
+    def test_the_entries_name_the_same_payee_in_both(self):
+        """The assertion that was missing, and the reason #129 survived.
+
+        This class exists to hold the two renderings to each other, and it
+        compared the reference and the amount of each entry and stopped there. So
+        the `camt.053` said `Umbrella, Logistics, S.A.` and the BAI2 statement
+        said `Umbrella  Logistics  S.A.` in two releases, 0.3 and 0.4, and every test here
+        passed.
+
+        Names with the awkward characters in them, because a plain name agrees
+        under any amount of mangling.
+        """
+        rows = [payment(1, "INV-1", 1000, name="Umbrella, Logistics, S.A."),
+                payment(2, "INV-2", 2000, name="A/S Nordisk"),
+                payment(3, "INV-3", 3000, name="Ampersand & Co. (S.A.)")]
+        camt, ba, _ = both(10875000, 12500000, rows)
+        self.assertEqual([e.text for e in ba.entries], camt["payees"])
+        self.assertEqual(camt["payees"],
+                         ["Umbrella, Logistics, S.A.", "A/S Nordisk",
+                          "Ampersand & Co. (S.A.)"],
+                         "and both of them say what the caller asked for")
+
+    def test_money_arriving_names_the_same_payer_in_both(self):
+        """The same comparison for a credit, which names a payer not a payee.
+
+        Money arriving (#91) goes through the other branch of `_transaction`,
+        and that branch had the same defect: it sanitised the payer's name, so
+        the `camt.053` said `Customer, Ltd` and the BAI2 statement said
+        `Customer  Ltd`. Fixing one branch and not the other is exactly what
+        made this worth a test rather than a one-line change.
+        """
+        arriving = dict(INCOMING, debtor_name="Customer, Ltd")
+        camt, ba, _ = both(0, 125000, [arriving])
+        self.assertEqual([e.text for e in ba.entries], camt["payees"])
+        self.assertEqual(camt["payees"], ["Customer, Ltd"])
+
     def test_the_account_is_named_by_the_same_iban(self):
         camt, ba, _ = both(1000, 875, THREE[:1])
         self.assertEqual(ba.account, camt["iban"])
@@ -125,6 +161,15 @@ class OneStatementWrittenTwice(unittest.TestCase):
                             ba.closing)
 
 
+# Money arriving (#91), as `credits.booked_on` gives it to the statement. The
+# `camt.053` writer needs the fields the BAI2 one does not, so this carries both.
+INCOMING = {"id": 3, "amount": 125000, "currency": "EUR", "credit": True,
+            "incoming": True, "end_to_end_id": "CUST-77",
+            "reference": "RF18539007547034", "debtor_name": "Customer, Ltd",
+            "debtor_iban": "NL18MOCK0000000009", "debtor_bic": "MOCKNL2A",
+            "value_date": "2026-10-01", "note": ["INV-1001"]}
+
+
 class TheTypeCodes(unittest.TestCase):
 
     def codes(self, text):
@@ -140,18 +185,16 @@ class TheTypeCodes(unittest.TestCase):
         self.assertEqual(bai2.PLACEHOLDER_CODES, ())
 
     def test_money_arriving_is_a_received_credit_not_a_return(self):
-        # The row `credits.booked_on` gives the statement, as the outbox marks it.
-        arriving = {"id": 3, "amount": 125000, "currency": "EUR", "credit": True,
-                    "incoming": True, "end_to_end_id": "CUST-77",
-                    "reference": "RF18539007547034", "debtor_name": "Customer, Ltd",
-                    "value_date": "2026-10-01", "note": ["INV-1001"]}
+        arriving = dict(INCOMING)
         text = bai2.write_statement(ACCOUNT, DAY, 7, 0, 125000, [arriving],
                                     created_at=AT)
         self.assertEqual(self.codes(text), ["142"])
         self.assertEqual(bai2.RECEIVED_CREDIT, "142")
         [detail] = [l for l in text.splitlines() if l.startswith("16,")]
-        self.assertEqual(detail.split(",")[3:],
-                         ["Z", "CUST-77", "RF18539007547034", "Customer  Ltd/"])
+        # The payer's name keeps its comma too (#129). Split on the first five
+        # commas only: the text runs to the terminator and may contain them.
+        self.assertEqual(detail.split(",", 6)[3:],
+                         ["Z", "CUST-77", "RF18539007547034", "Customer, Ltd/"])
         self.assertEqual(bai2.trailers_agree(text), [])
 
     def test_a_credit_that_is_not_a_return_is_refused_rather_than_mislabelled(self):
@@ -251,23 +294,110 @@ class TheTrailers(unittest.TestCase):
 
 
 class FieldsThatCouldEndARecordEarly(unittest.TestCase):
-    """BAI2 has no escape, so a comma in a name would end the field."""
+    """BAI2 has no escape, so a comma in a *delimited* field would end it.
 
-    def test_a_comma_in_a_creditor_name_does_not_shift_the_fields(self):
+    The 16's text is not delimited - it runs to the terminator - which #128
+    taught the reader and #129 taught the writer. So these now check two things
+    where they used to check one: the fields still line up, **and** the name
+    survives. Asserting only the first is how a statement came to misname a
+    payee in two releases, 0.3 and 0.4.
+    """
+
+    def test_a_comma_in_a_creditor_name_survives_and_shifts_nothing(self):
         rows = [payment(1, "INV-1", 1000, name="Umbrella, Logistics, S.A.")]
         _, ba, text = both(2000, 1000, rows)
         self.assertEqual([(e.reference, e.amount) for e in ba.entries],
                          [("INV-1", 1000)])
-        self.assertNotIn(",,", text.splitlines()[3])
-        self.assertEqual(ba.entries[0].text, "Umbrella  Logistics  S.A.")
+        self.assertEqual(len(bai2.read(text)), 7, "still one record a line")
+        # The half that was missing. This asserted `Umbrella  Logistics  S.A.`
+        # until #129 - the mangled form, pinned as correct because the test was
+        # written to prove the fields did not shift and that much was true.
+        self.assertEqual(ba.entries[0].text, "Umbrella, Logistics, S.A.")
 
-    def test_a_slash_in_a_name_does_not_end_the_record(self):
+    def test_a_slash_in_a_name_survives_and_does_not_end_the_record(self):
         rows = [payment(1, "INV-1", 1000, name="A/S Nordisk")]
         _, ba, text = both(2000, 1000, rows)
         # 01, 02, 03, one 16, 49, 98, 99: a terminator inside a field must not
-        # split a line into two records.
+        # split a line into two records - and must not be taken out of the name
+        # either. `sample5` carries twenty-two slashes inside fields.
         self.assertEqual(len(bai2.read(text)), 7)
-        self.assertEqual(ba.entries[0].text, "A S Nordisk")
+        self.assertEqual(ba.entries[0].text, "A/S Nordisk")
+
+    def test_a_name_ending_in_a_slash_keeps_it(self):
+        # The writer appends the terminator, so this line ends `//`. `_ended`
+        # takes one off and the field keeps its own.
+        rows = [payment(1, "INV-1", 1000, name="Nordisk A/S/")]
+        _, ba, text = both(2000, 1000, rows)
+        self.assertEqual(len(bai2.read(text)), 7)
+        self.assertEqual(ba.entries[0].text, "Nordisk A/S/")
+
+    def test_a_line_break_in_a_name_cannot_forge_a_record(self):
+        """The guard on `_free_text`, which nothing held until now.
+
+        Since #128 a line beginning with a declared code and a separator starts
+        a record, so a payee called `Foo\n49,+0,2` would put a second `49` into
+        the file - a forged account trailer, from a creditor's name. Removing
+        the control and line-break replacement from `_free_text` passed every
+        other test in this suite.
+
+        `trailers_agree` would go on to report such a file as inconsistent,
+        which is the wrong file caught late rather than never written.
+        """
+        for name, forged in (("Foo\n49,+0,2", "49"), ("Bar\r16,999,1,Z", "16"),
+                             ("Baz\u202849,+0,2", "49")):
+            with self.subTest(name=name):
+                rows = [payment(1, "INV-1", 1000, name=name)]
+                _, _, text = both(2000, 1000, rows)
+                codes = [r.code for r in bai2._fold(text)]
+                self.assertEqual(codes.count("16"), 1, codes)
+                self.assertEqual(len(bai2.read(text)), 7, codes)
+                self.assertEqual(bai2.trailers_agree(text), [])
+                self.assertEqual(codes.count(forged),
+                                 1 if forged == "49" else 1, codes)
+
+    def test_a_control_character_in_a_name_is_still_replaced(self):
+        # The BAI2 writer alone, not `both`: a `camt.053` carrying `\x01` is not
+        # well-formed XML, so the comparison cannot be made for this one. That
+        # asymmetry is the point - XML would refuse the character and BAI2 has
+        # no way to refuse anything, so the writer has to.
+        rows = [payment(1, "INV-1", 1000, name="Bad\x01Name\tHere")]
+        text = bai2.write_statement(ACCOUNT, DAY, 7, 2000, 1000, rows,
+                                    created_at=AT)
+        self.assertEqual(bai2.statements(text)[0].entries[0].text,
+                         "Bad Name Here")
+        self.assertEqual(len(bai2.read(text)), 7)
+
+    def test_a_name_that_would_split_the_record_is_neutralised(self):
+        """The one sequence a run-to-end field cannot carry (#129).
+
+        `/16,` is what `_records` reads as the end of a record, so the writer
+        replaces the separator that completes it - keeping the slash, the digits
+        and every other comma in the name.
+        """
+        for name, expected in (
+                ("Umbrella/16,Inc", "Umbrella/16 Inc"),
+                ("Ref/49,/98,end", "Ref/49 /98 end"),
+                # The case that rules out neutralising the slash instead:
+                # blanking or removing one exposes the one before it, because
+                # the reader's pattern allows whitespace after the slash.
+                ("A//16,B", "A//16 B"),
+                ("X/ 16,Y", "X/ 16 Y")):
+            with self.subTest(name=name):
+                rows = [payment(1, "INV-1", 1000, name=name)]
+                _, ba, text = both(2000, 1000, rows)
+                self.assertEqual(len(bai2.read(text)), 7,
+                                 "the record must not split")
+                self.assertEqual(ba.entries[0].text, expected)
+                self.assertNotIn(name, text,
+                                 "the dangerous form must not be on the wire")
+
+    def test_neutralising_it_is_not_needed_for_a_code_without_a_separator(self):
+        # `Unit 4/88 Harbour St` is an address, not two records - #128's rule
+        # needs the separator, so the writer must not touch this.
+        rows = [payment(1, "INV-1", 1000, name="Unit 4/88 Harbour St")]
+        _, ba, text = both(2000, 1000, rows)
+        self.assertEqual(len(bai2.read(text)), 7)
+        self.assertEqual(ba.entries[0].text, "Unit 4/88 Harbour St")
 
     def test_a_reference_with_a_comma_still_reconciles(self):
         _, ba, _ = both(2000, 1000, [payment(1, "INV,1", 1000)])
