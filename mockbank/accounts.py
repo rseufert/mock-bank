@@ -518,8 +518,18 @@ def scheduled_returns(conn, identifier: str, account_format: str) -> List[Dict[s
     waiting = db.rows(conn, "SELECT return_due, return_reason FROM payment"
                             " WHERE account_id = ? AND return_due IS NOT NULL"
                             " AND returned_at IS NULL", (identifier,))
-    return [row for row in waiting if row["return_reason"]
-            and not reason_fits(row["return_reason"], account_format)]
+    stuck = [row for row in waiting if row["return_reason"]
+             and not reason_fits(row["return_reason"], account_format)]
+    # A collection on its way back is in the same position (#176): its reason
+    # is an R code or an ISO 20022 one by the format the account had when it
+    # was set. A debit comes back with more R codes than a credit does.
+    fits = (nacha.DEBIT_RETURN_REASONS if account_format == "nacha"
+            else schema.CODE_SETS["ExternalReturnReason1Code"])
+    collected = db.rows(conn, "SELECT return_due, return_reason FROM collection"
+                              " WHERE account_id = ? AND return_due IS NOT NULL"
+                              " AND returned_at IS NULL", (identifier,))
+    return stuck + [row for row in collected if row["return_reason"]
+                    and row["return_reason"] not in fits]
 
 
 def check_parameters(behaviour: str, parameters: Dict[str, Any],

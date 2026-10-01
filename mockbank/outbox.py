@@ -173,15 +173,18 @@ def _key(conn, kind, account, day, reports, file_id=None) -> str:
     return "%s#%d" % (base, used + 1) if used else base
 
 
-def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
+def _queue_return_file(conn, account, rows, day, file_id, now, reports=None) -> None:
     """A NACHA account's returns for one day and one original file, as the
-    return file NACHA sends where ISO 20022 sends a pacs.004 (#54)."""
+    return file NACHA sends where ISO 20022 sends a pacs.004 (#54). The rows
+    are payments that came back, or collections (#176)."""
     for row in rows:
-        # The account the payment was made to, as the file named it: a held
-        # account's domestic number, since resolve gave the payment its IBAN.
-        held = accounts.by_iban(conn, row.get("creditor_iban") or "")
-        row["creditor_number"] = (held["account_number"] if held
-                                  else row.get("creditor_iban") or "")
+        # The account the payment was made to - or the collection taken from -
+        # as the file named it: a held account's domestic number, since
+        # resolve gave the row its IBAN.
+        party = "debtor" if row.get("collected") else "creditor"
+        held = accounts.by_iban(conn, row.get(party + "_iban") or "")
+        row[party + "_number"] = (held["account_number"] if held
+                                  else row.get(party + "_iban") or "")
     sequence = db.next_value(conn, "nacha.return:" + account["id"])
     modifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[(sequence - 1) % 36]
     body = nacha.return_file(accounts.ROUTING, account, rows, day, now, modifier)
@@ -189,7 +192,8 @@ def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
         "INSERT INTO message (type, account, file_id, due_at, body, key)"
         " VALUES (?,?,?,?,?,?)",
         (nacha.RETURN, account["id"], file_id, db.stamp(now), body,
-         _key(conn, nacha.RETURN, account["id"], day.isoformat(), RETURNED, file_id)))
+         _key(conn, nacha.RETURN, account["id"], day.isoformat(), reports or RETURNED,
+              file_id)))
 
 
 def upcoming(conn, file_id) -> List[Dict[str, Any]]:
@@ -266,14 +270,18 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
                              " AND account.closed = 0", (accounts.ACCEPTED,)):
         expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
                       None, COLLECTED))
-    for row in db.rows(conn, "SELECT collection.account_id, return_due, file_id"
-                             " FROM collection JOIN account ON account.id = collection.account_id"
+    for row in db.rows(conn, "SELECT collection.account_id, return_due, file_id, booked_at,"
+                             " account.format FROM collection"
+                             " JOIN account ON account.id = collection.account_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
                              " AND account.closed = 0"):
-        for kind_, file_id in ((messages.PACS004.name, row["file_id"]),
-                               (messages.CAMT054.name, None)):
-            expected.add((row["return_due"], kind_, row["account_id"], file_id,
-                          COLLECTION_RETURNED))
+        answer = nacha.RETURN if row["format"] == "nacha" else messages.PACS004.name
+        expected.add((row["return_due"], answer, row["account_id"], row["file_id"],
+                      COLLECTION_RETURNED))
+        if row["booked_at"]:
+            # Money goes back only for a collection that settled.
+            expected.add((row["return_due"], messages.CAMT054.name, row["account_id"],
+                          None, COLLECTION_RETURNED))
     for row in db.rows(conn, "SELECT payment.*, account.format FROM payment"
                              " JOIN account ON account.id = payment.account_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
@@ -389,8 +397,16 @@ def _release_collection_returns(conn, now, today, clock):
     for row in direct_debit.book_returns(conn, today, clock, now):
         by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
         by_day.setdefault((row["account_id"], row["return_due"]), []).append(row)
+    # A NACHA account's rejected collections come back too, as return entries,
+    # though nothing is debited: they never settled (#176).
+    for row in direct_debit.rejected_returns_due(conn, today, now):
+        by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
     for (account_id, day, file_id), rows in sorted(by_file.items()):
         account = accounts.require(conn, account_id)
+        if account["format"] == "nacha":
+            _queue_return_file(conn, account, rows, datetime.date.fromisoformat(day),
+                               file_id, now, COLLECTION_RETURNED)
+            continue
         sequence = db.next_value(conn, "pacs.004:" + account_id)
         body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
                                       "MB-P004-%s-%d" % (account_id[:18], sequence), now)
