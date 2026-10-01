@@ -49,6 +49,16 @@ import tempfile
 # older copy of the pattern and so could not see a step-named fragment waiting
 # (#167). Importing works because running `tools/release.py` puts `tools/` on
 # `sys.path` ahead of everything.
+#
+# Bytecode off *before* the import, because importing a sibling writes
+# `tools/__pycache__/` into the tree this tool is about to judge, and it refuses
+# to release from a tree that is not clean - so the import would have dirtied the
+# very thing it checks. This repository happens to ignore `__pycache__`, so a real
+# release was never refused by it; a release tool that passes its own clean-tree
+# check only because of an ignore rule is one rule away from refusing every
+# release, and the throwaway trees in the tests have no such rule. Keeping the
+# import is what keeps one definition of the name, so the write is what goes.
+sys.dont_write_bytecode = True
 from check_changelog import FRAGMENT_NAME                            # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -145,6 +145,11 @@ class ReleaseToolCase(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
 
+    def porcelain(self):
+        """`git status --porcelain` in the throwaway tree, as the tool sees it."""
+        return subprocess.run(["git", "status", "--porcelain"], cwd=self.tree,
+                              stdout=subprocess.PIPE).stdout.decode()
+
     def run_tool(self, name, *args):
         result = subprocess.run([sys.executable, os.path.join("tools", name)] + list(args),
                                 cwd=self.tree, stdout=subprocess.PIPE,
@@ -357,6 +362,21 @@ class ReleaseRefusesBeforeItDoesAnything(ReleaseToolCase):
         code, out = self.release("0.2.0", "--dry-run")
         self.assertEqual(code, 1)
         self.assertRefused(out, "99.added.md", "waiting")
+
+    def test_a_dry_run_leaves_the_tree_as_it_found_it(self):
+        """The tool must not dirty the tree whose cleanliness it refuses on.
+
+        `release.py` imports a sibling for `FRAGMENT_NAME` (#167), and an import
+        writes `__pycache__` unless that is turned off - here, into the very tree
+        the tool is about to judge, so the clean-tree check refused before any
+        other check ran. It passed on the author's machine because the environment
+        had `PYTHONDONTWRITEBYTECODE=1`, and the real repository ignores
+        `__pycache__`, so nothing local said otherwise until CI did.
+        """
+        self.assertEqual(self.porcelain(), "", "the tree started dirty")
+        self.release("0.2.0", "--dry-run")
+        self.assertEqual(self.porcelain(), "",
+                         "the tool left something behind in the tree it checks")
 
     def test_a_step_named_fragment_is_still_waiting(self):
         # `check_changelog.py` has allowed `<issue>.<kind>.<step>.md` since #57,
