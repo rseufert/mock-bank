@@ -150,6 +150,31 @@ class BeforeItSettles(ReturningCase):
                          {"accepted": 1, "rejected": 1, "returned": 0, "booked": 1})
 
 
+class TheFormatCannotChangeUnderAReturn(ReturningCase):
+    """#166's case f, for a collection: its reason is stored when the return is
+    set, in the terms of the format the account had then."""
+
+    def test_a_nacha_account_with_a_collection_on_its_way_back_stays_nacha(self):
+        self.collect([{"id": "INV-1", "cents": 1250}], effective=MONDAY)
+        self.refuse("INV-1", "R10")                  # comes back on Monday
+        resp = self.request("PATCH", "/_mock/accounts/ACME", body={"format": "iso20022"})
+        self.assertEqual(resp.status, 400, resp.body)
+        self.assertIn("R10", resp.json()["error"])
+        self.advance(TUESDAY)                        # written, as a return file
+        self.assertEqual(len(self.return_files()), 1)
+        resp = self.request("PATCH", "/_mock/accounts/ACME", body={"format": "iso20022"})
+        self.assertEqual(resp.status, 200, resp.body)
+
+    def test_an_iso20022_account_with_one_on_its_way_back_stays_iso20022(self):
+        self.request("PATCH", "/_mock/accounts/ACME", body={"format": "iso20022"})
+        self.collect([{"id": "INV-1", "cents": 1250}])
+        self.advance(FRIDAY + datetime.timedelta(days=1))      # Saturday: settled
+        self.refuse("INV-1", "MD01")                           # goes back on Monday
+        resp = self.request("PATCH", "/_mock/accounts/ACME", body={"format": "nacha"})
+        self.assertEqual(resp.status, 400, resp.body)
+        self.assertIn("MD01", resp.json()["error"])
+
+
 class RejectedWhenItArrived(ReturningCase):
 
     def test_a_rejection_with_an_r_code_comes_back_the_next_business_day(self):
