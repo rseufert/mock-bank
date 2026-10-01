@@ -15,9 +15,12 @@ import unittest
 from decimal import Decimal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "examples"))
+# The repository root, not `examples/`: the examples are a package now
+# (`mockbank.examples`, #169) and import each other relatively, so they have to be
+# imported as part of one.
+sys.path.insert(0, os.path.dirname(HERE))
 
-import payment_run                                                   # noqa: E402
+from examples import payment_run                                      # noqa: E402
 
 from mockbank import bai2, messages                                  # noqa: E402
 

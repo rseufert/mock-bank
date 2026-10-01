@@ -843,7 +843,7 @@ goes wrong quietly:
 pip install mock-edi
 mock-edi --port 8080 &
 python3 -m mockbank --port 8090 &
-cd examples && python3 -m unittest -v test_pay_invoices
+python3 -m unittest -v examples.test_pay_invoices
 ```
 
 `EDI_URL` and `BANK_URL` point the tests at mocks running elsewhere. The tests
@@ -909,7 +909,7 @@ numbered as there, and what the rest of the suite adds to them:
 pip install mock-sap
 mock-sap --port 8000 &
 python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
-cd examples && python3 -m unittest -v test_payment_run
+python3 -m unittest -v examples.test_payment_run
 ```
 
 **NACHA mode.** `PaymentRun(..., file_format="nacha")` pays the same
@@ -941,7 +941,7 @@ tests run in this mode too, which is 0.3's definition of done, with one more
 for what an entry cannot carry:
 
 ```bash
-PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v test_payment_run
+PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v examples.test_payment_run
 ```
 
 In that mode the tests make ACME a dollar account in NACHA format and give the
@@ -965,6 +965,31 @@ writes to the open-item cube, which is read-only in SAP and, from mock-sap
 elsewhere. CI runs them against mock-sap from PyPI.
 
 ## Worked example: procure to pay, all three mocks
+
+**Running the examples from an install.** They ship in the wheel as
+`mockbank.examples`, so `pip install mock-bank` is enough to import and run them
+without cloning anything
+([#169](https://github.com/rseufert/mock-bank/issues/169)):
+
+```python
+from mockbank.examples import procure_to_pay, payment_run
+```
+
+```bash
+pip install mock-bank
+python3 -m unittest -v mockbank.examples.test_procure_to_pay
+```
+
+The files are the same ones this README links to - `examples/` is mapped onto that
+import path rather than copied - so nothing here goes stale when they change.
+Importing needs `mock-bank` alone: the examples reach mock-sap and mock-edi over
+HTTP and import neither.
+
+They are examples, not a supported client library, and the import path is the only
+promise made about them. `payment_run` can still pay an invoice twice in the ways
+[#164](https://github.com/rseufert/mock-bank/issues/164) lists - among them a
+reference carrying a comma or a slash, and two suppliers sharing an invoice
+number. Read them and copy them; do not put them in front of real money.
 
 [`examples/procure_to_pay.py`](examples/procure_to_pay.py) carries one purchase
 the whole way, joining this mock to both
@@ -1048,7 +1073,7 @@ git clone https://github.com/rseufert/mock-bank && cd mock-bank
 mock-sap --port 8000 &
 mock-edi --port 8080 &
 python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
-cd examples && python3 -m unittest -v test_procure_to_pay
+python3 -m unittest -v examples.test_procure_to_pay
 ```
 
 ## Docker

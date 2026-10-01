@@ -27,8 +27,9 @@ import urllib.parse
 import urllib.request
 from decimal import Decimal
 
-from bank_messages import call
-from payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
+from . import payment_run as payment_run_module
+from .bank_messages import call
+from .payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
                          SapSession, nacha_time_and_modifier, odata)
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
@@ -469,7 +470,12 @@ class TheNachaFileHeader(unittest.TestCase):
             Item("1/2026/1", GLOBEX, "GLX-1", "10.00", status="sent")],
             nacha_origin=ACME["company_id"])
         ack = "ACKNOWLEDGEMENT A1\nFILE %s\nSTATUS\n" % run.msg_id
-        with unittest.mock.patch("payment_run.call", return_value=(200, ack.encode())):
+        # `patch.object`, not `patch("payment_run.call")`: the module is
+        # `examples.payment_run` here and `mockbank.examples.payment_run` out of
+        # the wheel (#169), and a patch target written as a string would have to
+        # name one of them. The module object is the same either way.
+        with unittest.mock.patch.object(payment_run_module, "call",
+                                        return_value=(200, ack.encode())):
             PaymentRun(SAP, BANK, ACME, "nacha").read_status(run)
         self.assertEqual((run.items[0].status, run.duplicate), ("sent", False))
 
