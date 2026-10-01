@@ -9,8 +9,8 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any, Dict
 
-from . import (__version__, accounts, clock as clock_module, db, drop, messages, nacha,
-               outbox, validate)
+from . import (__version__, accounts, clock as clock_module, db, direct_debit, drop,
+               messages, nacha, outbox, validate)
 from .accounts import BEHAVIOURS
 from .routes import SUPPORTED
 from .routes.control import PLANNED
@@ -107,7 +107,8 @@ class State:
         the old one, which is what keeps its numbers (see ``db.next_value``).
         """
         with self.lock:
-            for table in ("statement", "counter", "message", "payment", "credit", "file",
+            for table in ("statement", "counter", "message", "payment", "collection", "credit",
+                          "file",
                           "request_log", "holiday", "account"):
                 self.conn.execute("DELETE FROM %s" % table)
             self.conn.commit()
@@ -157,21 +158,22 @@ class State:
         # Either door takes a NACHA file as well as a pain.001 (#53), and then
         # names the accounts it holds by IBAN, which is all `decide` knows.
         payment_file, findings = validate.inspect(body, content_type, today)
-        if isinstance(payment_file, messages.CollectionFile):
-            # Read and validated since #131's first step, booked by its second:
-            # until then refused by name, the way any message the pipeline does
-            # not take is, rather than read as a pain.001 with no payments.
-            payment_file, findings = None, findings + [validate.refusal(
-                "the file is a %s, a direct debit initiation; the mock reads and "
-                "validates collections (POST /_mock/validate) but does not book them "
-                "yet (#131)" % payment_file.message)]
-        accounts.resolve(conn, payment_file)
-        decision = accounts.decide(payment_file, findings, conn, self.clock, now,
-                                   self.config.allow_duplicates)
-        file_id = accounts.book(conn, decision)
-        # A NACHA account's rejections also come back as returns, next business
-        # day (#54); scheduled now, released on the clock like any return.
-        accounts.schedule_rejected_returns(conn, file_id, self.clock, today)
+        collecting = isinstance(payment_file, messages.CollectionFile)
+        if collecting:
+            # A pain.008 (#131): the same pipeline with the account holder on the
+            # creditor side, decided and recorded by `direct_debit`.
+            decision = direct_debit.decide(payment_file, findings, conn, self.clock, now,
+                                           self.config.allow_duplicates)
+            file_id = direct_debit.record(conn, decision)
+        else:
+            accounts.resolve(conn, payment_file)
+            decision = accounts.decide(payment_file, findings, conn, self.clock, now,
+                                       self.config.allow_duplicates)
+            file_id = accounts.book(conn, decision)
+            # A NACHA account's rejections also come back as returns, next
+            # business day (#54); scheduled now, released on the clock like any
+            # return.
+            accounts.schedule_rejected_returns(conn, file_id, self.clock, today)
         queued = outbox.queue_status(conn, decision, file_id, now,
                                      self.config.status_delay_ms, source)
         released = {row["id"] for row in self.release()}
@@ -179,8 +181,10 @@ class State:
         queued += outbox.upcoming(conn, file_id) if file_id else []
         # the rows went in in decision order, so they line up one for one
         booked = [r["booked_at"] is not None for r in db.rows(
-            conn, "SELECT booked_at FROM payment WHERE file_id = ? ORDER BY id",
-            (file_id,))]
+            conn, "SELECT booked_at FROM %s WHERE file_id = ? ORDER BY id"
+                  % ("collection" if collecting else "payment"), (file_id,))]
+        decided = [dict(d.to_json(), booked=done)
+                   for d, done in zip(decision.payments, booked)]
         answer = {
             "format": ("nacha" if payment_file is not None
                        and payment_file.message == nacha.NAME
@@ -192,8 +196,9 @@ class State:
             "reported": decision.reported,
             "accepted": len(decision.accepted),
             "rejected": len(decision.rejected),
-            "payments": [dict(d.to_json(), booked=done)
-                         for d, done in zip(decision.payments, booked)],
+            # One list or the other: a file is of payments or of collections.
+            "payments": [] if collecting else decided,
+            "collections": decided if collecting else [],
             "findings": [f._asdict() for f in findings],
             # What the bank will send, and when: the pain.002 (released at
             # once unless --status-delay-ms says otherwise) and a camt.054
@@ -231,6 +236,7 @@ class State:
                 "holidays": db.count(self.conn, "holiday"),
                 "clock": self.clock.snapshot(),
                 "payments": accounts.payment_counts(self.conn),
+                "collections": direct_debit.counts(self.conn),
                 "messages": {
                     "queued": db.count(self.conn, "message", "released_at IS NULL"),
                     "waiting": db.count(self.conn, "message",

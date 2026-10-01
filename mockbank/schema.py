@@ -122,6 +122,7 @@ CODE_SETS = {
     "ExternalStatusReason1Code": {
         "AC01": "IncorrectAccountNumber: the account number is invalid or missing",
         "AC02": "InvalidDebtorAccountNumber: the debtor account is invalid or not held by the bank",
+        "AC03": "InvalidCreditorAccountNumber: the creditor account is invalid or not held by the bank",
         "AC04": "ClosedAccountNumber: the account has been closed on the bank's books",
         "AC06": "BlockedAccount: the account is blocked",
         "AG01": "TransactionForbidden: the transaction is forbidden on this account type",
@@ -134,6 +135,7 @@ CODE_SETS = {
         "AM18": "InvalidNumberOfTransactions: the number of transactions does not match",
         "BE05": "UnrecognisedInitiatingParty: the initiating party is not known to the bank",
         "DT01": "InvalidDate: the date is invalid, for example in the past",
+        "MD02": "MissingMandatoryInformationInMandate: mandate information is missing",
         "DUPL": "DuplicatePayment: the file or payment has already been received",
         "FF01": "InvalidFileFormat: the file format is incomplete or invalid",
         "MD07": "EndCustomerDeceased: the end customer is deceased",

@@ -591,22 +591,9 @@ def decide(payment_file, findings, conn, clock, received_at, allow_duplicates=Fa
     in the file carries the behaviour.
     """
     errors = [f for f in findings if f.level == "error"]
-    if payment_file is None:
-        first = errors[0] if errors else None
-        return Decision(None, "RJCT", first.code if first else schema.STRUCTURAL,
-                        first.text if first else "the file could not be read")
-
-    payments = payment_file.payments
-    outside = [f for f in errors
-               if f.code == schema.STRUCTURAL or not any(_under(f.path, p.path) for p in payments)]
-    if outside:
-        return Decision(payment_file, "RJCT", outside[0].code,
-                        "%s: %s" % (outside[0].path, outside[0].text))
-
-    if not allow_duplicates and payment_file.msg_id and db.one(
-            conn, "SELECT id FROM file WHERE msg_id = ?", (payment_file.msg_id,)):
-        return Decision(payment_file, "RJCT", "DUPL",
-                        "MsgId %s has been received before" % payment_file.msg_id)
+    outright = rejected_outright(payment_file, errors, conn, allow_duplicates)
+    if outright:
+        return outright
 
     debtors = {id(batch): by_iban(conn, batch.debtor_account or "")
                for batch in payment_file.batches}
@@ -631,6 +618,27 @@ def decide(payment_file, findings, conn, clock, received_at, allow_duplicates=Fa
     status = "ACCP" if accepted == len(decided) else ("RJCT" if not accepted else "PART")
     return Decision(payment_file, status, payments=decided,
                     reported="silent" not in behaviours)
+
+
+def rejected_outright(payment_file, errors, conn, allow_duplicates=False):
+    """Rules 1 and 2 of ``decide``, which no account is asked about: the
+    ``Decision`` that rejects the whole file, or None. A file of collections
+    (#131) is held to the same two, through the same ``file`` table, so a
+    ``MsgId`` is a duplicate whichever kind of file used it first."""
+    if payment_file is None:
+        first = errors[0] if errors else None
+        return Decision(None, "RJCT", first.code if first else schema.STRUCTURAL,
+                        first.text if first else "the file could not be read")
+    outside = [f for f in errors if f.code == schema.STRUCTURAL
+               or not any(_under(f.path, p.path) for p in payment_file.payments)]
+    if outside:
+        return Decision(payment_file, "RJCT", outside[0].code,
+                        "%s: %s" % (outside[0].path, outside[0].text))
+    if not allow_duplicates and payment_file.msg_id and db.one(
+            conn, "SELECT id FROM file WHERE msg_id = ?", (payment_file.msg_id,)):
+        return Decision(payment_file, "RJCT", "DUPL",
+                        "MsgId %s has been received before" % payment_file.msg_id)
+    return None
 
 
 def _under(path, ancestor):
@@ -658,7 +666,7 @@ def _payment_reason(conn, debtor, batch, payment, errors, available):
         return "RC01", ("the creditor account %s's bank identifier does not resolve"
                         % creditor["iban"])
     if debtor["id"] not in available:
-        available[debtor["id"]] = debtor["balance"] - _pending(conn, debtor["id"])
+        available[debtor["id"]] = debtor["balance"] - pending_debits(conn, debtor["id"])
     if available[debtor["id"]] - payment.amount < -MAX_BALANCE:
         # Any behaviour: an overdraft this deep has a balance no statement can
         # write, so the bank will not book it (#106).
@@ -676,12 +684,24 @@ def _payment_reason(conn, debtor, batch, payment, errors, available):
     return None, None
 
 
-def _pending(conn, account_id):
+def pending_debits(conn, account_id):
     """What is accepted on an account and not yet booked, in minor units."""
     found = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
                          " WHERE account_id = ? AND status = ? AND booked_at IS NULL",
                    (account_id, ACCEPTED))
     return int(found["total"])
+
+
+def record_file(conn, decision):
+    """The ``file`` row for a decided file, of payments or of collections: its
+    id, or None for a file with no ``MsgId`` to record it under."""
+    if decision.msg_id is None:
+        return None
+    return conn.execute(
+        "INSERT INTO file (msg_id, message, received_at, status, reason, reported)"
+        " VALUES (?,?,?,?,?,?)",
+        (decision.msg_id, decision.payment_file.message, db.now(), decision.status,
+         decision.reason, int(decision.reported))).lastrowid
 
 
 def book(conn, decision):
@@ -693,15 +713,9 @@ def book(conn, decision):
     recorded: there is nothing a duplicate check could match it on. Returns
     the file's row id, or None.
     """
-    if decision.msg_id is None:
+    file_id = record_file(conn, decision)
+    if file_id is None:
         return None
-    received = db.now()
-    cursor = conn.execute(
-        "INSERT INTO file (msg_id, message, received_at, status, reason, reported)"
-        " VALUES (?,?,?,?,?,?)",
-        (decision.msg_id, decision.payment_file.message, received, decision.status,
-         decision.reason, int(decision.reported)))
-    file_id = cursor.lastrowid
     for d in decision.payments:
         p = d.payment
         conn.execute(

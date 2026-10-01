@@ -1,8 +1,8 @@
 """pain.008: a direct debit initiation, read and validated (#131, step a).
 
 The account holder asks the bank to collect from debtors under their mandates.
-This step reads the file and says what is wrong with it; booking is the next
-step, so until then the pipeline refuses a pain.008 by name. Two files from
+This step reads the file and says what is wrong with it; what the bank then
+decides is `tests/test_collections_decide.py`'s. Two files from
 outside the project are the ground truth for the reading, with every value
 below read off them by eye rather than out of the reader.
 """
@@ -23,9 +23,20 @@ def external(name):
         return handle.read()
 
 
-def pain008(collections, msg_id="DD-1", when="2026-01-20", ccy="EUR", nb=None, total=None):
-    """A pain.008 from ACME collecting [(EndToEndId, minor units)] in one batch."""
+def pain008(collections, msg_id="DD-1", when="2026-01-20", ccy="EUR", nb=None, total=None,
+            creditor="NL41MOCK0000000001", account_ccy="EUR", debtors=None, mandate=True):
+    """A pain.008 from ACME collecting [(EndToEndId, minor units)] in one batch.
+
+    `debtors` names a debtor account by EndToEndId, for the ones not at another
+    bank; `account_ccy` of None leaves the creditor account's currency unstated;
+    and `mandate` of False leaves the mandate out.
+    """
     amount = sum(minor for _, minor in collections)
+    account = {"Id": {"IBAN": creditor}}
+    if account_ccy:
+        account["Ccy"] = account_ccy
+    mandated = ({"MndtRltdInf": {"MndtId": "M-%s", "DtOfSgntr": "2025-06-01"}}
+                if mandate else {})
     return schema.serialize(PAIN008, {"CstmrDrctDbtInitn": {
         "GrpHdr": {"MsgId": msg_id, "CreDtTm": datetime.datetime(2026, 1, 2, 9, 0, tzinfo=datetime.timezone.utc),
                    "NbOfTxs": nb if nb is not None else len(collections),
@@ -34,16 +45,17 @@ def pain008(collections, msg_id="DD-1", when="2026-01-20", ccy="EUR", nb=None, t
         "PmtInf": [{"PmtInfId": msg_id + "-B1", "PmtMtd": "DD",
                     "PmtTpInf": {"SeqTp": "RCUR"}, "ReqdColltnDt": when,
                     "Cdtr": {"Nm": "ACME"},
-                    "CdtrAcct": {"Id": {"IBAN": "NL41MOCK0000000001"}, "Ccy": "EUR"},
+                    "CdtrAcct": account,
                     "CdtrAgt": {"FinInstnId": {"BICFI": "MOCKNL2A"}},
                     "DrctDbtTxInf": [
                         {"PmtId": {"EndToEndId": e2e},
                          "InstdAmt": schema.Amount(minor, ccy),
-                         "DrctDbtTx": {"MndtRltdInf": {"MndtId": "M-" + e2e,
-                                                       "DtOfSgntr": "2025-06-01"}},
+                         "DrctDbtTx": {key: dict(value, MndtId=value["MndtId"] % e2e)
+                                       for key, value in mandated.items()},
                          "DbtrAgt": {"FinInstnId": {"BICFI": "MOCKNL2A"}},
                          "Dbtr": {"Nm": "Customer " + e2e},
-                         "DbtrAcct": {"Id": {"IBAN": "NL30MOCK0000000005"}}}
+                         "DbtrAcct": {"Id": {"IBAN": (debtors or {}).get(
+                             e2e, "NL30MOCK0000000005")}}}
                         for e2e, minor in collections]}]}})
 
 
@@ -120,19 +132,16 @@ class WhatIsWrongWithOne(MockServerCase):
         self.assertIn(("error", "AM03"), self.findings(pain008([("C1", 1000)], ccy="USD")))
 
 
-class NotBookedYet(MockServerCase):
-    """Refused by name until step b, rather than read as a pain.001 with no payments."""
+class ACollectionIsNotAPayment(MockServerCase):
     config_kwargs = {"clock": "2026-01-02T09:00"}
 
-    def test_posting_one_is_refused_and_says_why(self):
-        before = self.get("/_mock/accounts/ACME").json()["balance"]
-        resp = self.post("/payments", body=pain008([("C1", 1000)]))
-        self.assertEqual(resp.status, 422, resp.body)
-        answer = resp.json()
-        self.assertEqual((answer["status"], answer["accepted"], answer["payments"]),
-                         ("RJCT", 0, []))
-        self.assertIn("does not book them yet (#131)", answer["reason_text"])
-        self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], before)
+    def test_a_collection_with_no_mandate_is_a_finding(self):
+        # The XSD leaves the mandate optional; a debtor's bank does not.
+        resp = self.post("/_mock/validate", body=pain008([("C1", 1000)], mandate=False),
+                         headers={"Accept": "application/json"})
+        [finding] = resp.json()["findings"]
+        self.assertEqual((finding["level"], finding["code"]), ("error", "MD02"))
+        self.assertIn("no MndtId and no DtOfSgntr", finding["text"])
 
     def test_the_reader_tells_a_collection_from_a_payment(self):
         # A pain.001 reads as payments and a pain.008 as collections; the
