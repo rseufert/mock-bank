@@ -106,7 +106,9 @@ class TheReleaseNotes(unittest.TestCase):
 class ReleaseToolCase(unittest.TestCase):
     """A throwaway repository on `main`, clean, with 0.2.0 dated and no tag."""
 
-    tools = ("release.py", "check_release.py")
+    # `release.py` imports `check_changelog` for `FRAGMENT_NAME` (#167), and the
+    # tool runs as a subprocess in this tree, so the sibling has to be here too.
+    tools = ("release.py", "check_release.py", "check_changelog.py")
 
     def setUp(self):
         self.tree = tempfile.mkdtemp()
@@ -142,6 +144,11 @@ class ReleaseToolCase(unittest.TestCase):
     def commit_all(self, message):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
+
+    def porcelain(self):
+        """`git status --porcelain` in the throwaway tree, as the tool sees it."""
+        return subprocess.run(["git", "status", "--porcelain"], cwd=self.tree,
+                              stdout=subprocess.PIPE).stdout.decode()
 
     def run_tool(self, name, *args):
         result = subprocess.run([sys.executable, os.path.join("tools", name)] + list(args),
@@ -355,6 +362,34 @@ class ReleaseRefusesBeforeItDoesAnything(ReleaseToolCase):
         code, out = self.release("0.2.0", "--dry-run")
         self.assertEqual(code, 1)
         self.assertRefused(out, "99.added.md", "waiting")
+
+    def test_a_dry_run_leaves_the_tree_as_it_found_it(self):
+        """The tool must not dirty the tree whose cleanliness it refuses on.
+
+        `release.py` imports a sibling for `FRAGMENT_NAME` (#167), and an import
+        writes `__pycache__` unless that is turned off - here, into the very tree
+        the tool is about to judge, so the clean-tree check refused before any
+        other check ran. It passed on the author's machine because the environment
+        had `PYTHONDONTWRITEBYTECODE=1`, and the real repository ignores
+        `__pycache__`, so nothing local said otherwise until CI did.
+        """
+        self.assertEqual(self.porcelain(), "", "the tree started dirty")
+        self.release("0.2.0", "--dry-run")
+        self.assertEqual(self.porcelain(), "",
+                         "the tool left something behind in the tree it checks")
+
+    def test_a_step_named_fragment_is_still_waiting(self):
+        # `check_changelog.py` has allowed `<issue>.<kind>.<step>.md` since #57,
+        # and `--assemble` takes them, so a release assembled the normal way
+        # loses nothing. This guard is for the abnormal one, and it carried its
+        # own older copy of the pattern, so a step-named fragment was invisible
+        # to it (#167). `changelog.d/` held two of them when that was filed.
+        self.write("changelog.d/131.added.read.md", "**A step.** Never assembled.\n")
+        self.commit_all("a step-named entry that missed the release")
+        self.git("push", "-q", "origin", "main")
+        code, out = self.release("0.2.0", "--dry-run")
+        self.assertEqual(code, 1, out)
+        self.assertRefused(out, "131.added.read.md", "waiting")
 
     def test_a_refusal_writes_no_tag(self):
         # The point of refusing before acting: nothing is half done afterwards.

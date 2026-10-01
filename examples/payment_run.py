@@ -724,6 +724,11 @@ def _bai2_continues(lines: List[str], index: int) -> bool:
     return False
 
 
+def _bai2_ended(piece: str) -> str:
+    """A record's text with its terminator off, where one really ends (#150)."""
+    return piece[:-1] if piece.endswith("/") else piece
+
+
 def bai2_records(text: str) -> List[List[str]]:
     """The records of a BAI2 file as lists of fields, continuations folded in.
 
@@ -740,9 +745,14 @@ def bai2_records(text: str) -> List[List[str]]:
         # record, because the join inserts nothing and a wrapped field's padding
         # is its content (#142). Everywhere else it is padding around a record
         # and comes off, as it did before. moov trims in exactly the same place.
-        line = trimmed
-        if not trimmed.endswith("/") and _bai2_continues(lines, index):
-            line = raw_line
+        # A `/` at the end of such a line is content for the same reason (#150):
+        # a `/` ends a record only when a record code follows it, on this line or
+        # the next non-blank one, or when nothing follows. `AB/` + `GS/RP0001`
+        # read as `ABGS/RP0001` before this, so a reference lost a character and
+        # the invoice behind it stopped matching. A line the next one continues
+        # therefore contributes its raw text, terminator and padding alike.
+        wrapped = _bai2_continues(lines, index)
+        line = raw_line if wrapped else trimmed
         if not BAI2_STARTS.match(line.lstrip()):
             if not raw:
                 raise ValueError("a BAI2 file starts with a record code, not %r"
@@ -752,10 +762,13 @@ def bai2_records(text: str) -> List[List[str]]:
             # scanner does the same, and `mockbank.bai2._records` is held to this
             # by `tests/test_payment_run_readers.py` - change one and that test
             # fails, which is the point of it.
-            raw[-1] += line[:-1] if line.endswith("/") else line
+            raw[-1] += line if wrapped else _bai2_ended(line)
             continue
-        raw += [p[:-1] if p.endswith("/") else p
-                for p in BAI2_NEXT.split(line.lstrip()) if p.strip()]
+        # Only the line's last piece can be carried into the next line: anything
+        # before it is followed by a record code here, so its `/` ends a record.
+        pieces = [p for p in BAI2_NEXT.split(line.lstrip()) if p.strip()]
+        raw += [p if (wrapped and position == len(pieces)) else _bai2_ended(p)
+                for position, p in enumerate(pieces, start=1)]
     records: List[List[str]] = []
     for record in raw:
         fields = record.split(",")

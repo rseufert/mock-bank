@@ -187,6 +187,55 @@ class ARealBanksFile(unittest.TestCase):
         self.assertEqual(payment_run.bai2_records(wrapped),
                          [[r.code] + list(r.values) for r in bai2._fold(wrapped)])
 
+    def test_a_slash_at_a_wrap_is_content_in_both_readers(self):
+        """#150, held across the two readers rather than in one of them.
+
+        No vendored file has this shape - five samples, two wrapped lines, and
+        neither ends in `/` - so the corpus cannot hold the readers together here
+        and a constructed file has to. Both lose the slash before #150, so a
+        reference read `ABGS/RP0001` and the invoice behind it stopped matching.
+        """
+        wrapped = ("01,BANK,CUST,261001,0000,1,,,2/\n"
+                   "02,ACME,BANK,1,261001,0000,USD,/\n"
+                   "03,0000000001,USD,010,+125000,,Z,015,+0,,Z/\n"
+                   "16,495,125000,Z,AB/\n"
+                   "GS/RP0001,MSG-1,Globex Supplies B.V./\n"
+                   "49,+125000,4/\n98,+125000,1,6/\n99,+125000,1,8/\n")
+        # Field list by field list, which is the statement of agreement that
+        # caught the one-sided revert on #142.
+        theirs = [[r.code] + list(r.values) for r in bai2._fold(wrapped)]
+        self.assertEqual(payment_run.bai2_records(wrapped), theirs)
+        # And the value each of them arrives at.
+        [statement] = payment_run.bai2_statements(wrapped)
+        [line] = statement["lines"]
+        self.assertEqual(line["end_to_end_id"], "AB/GS/RP0001")
+        self.assertEqual(line["msg_id"], "MSG-1")
+
+    def test_a_slash_at_each_of_two_wraps_in_one_field_is_kept(self):
+        """The case a one-line wrap cannot reach, found by mutation.
+
+        Reverting `payment_run`'s *continuation* branch to strip every trailing
+        slash passed the whole suite, because in a two-line wrap that branch only
+        ever sees the closing line, where the slash really is a terminator and
+        stripping it is right. The branch is only wrong when a continuation line is
+        itself continued - a field wrapped across three lines - which nothing
+        exercised. #142's own hole had this shape, and so did `_continues` on #146.
+        """
+        twice = ("01,BANK,CUST,261001,0000,1,,,2/\n"
+                 "02,ACME,BANK,1,261001,0000,USD,/\n"
+                 "03,0000000001,USD,010,+125000,,Z,015,+0,,Z/\n"
+                 "16,495,125000,Z,AB/\n"
+                 "CD/\n"
+                 "EF,MSG-1,Globex Supplies B.V./\n"
+                 "49,+125000,4/\n98,+125000,1,6/\n99,+125000,1,8/\n")
+        theirs = [[r.code] + list(r.values) for r in bai2._fold(twice)]
+        self.assertEqual(payment_run.bai2_records(twice), theirs)
+        [statement] = payment_run.bai2_statements(twice)
+        [line] = statement["lines"]
+        # Both slashes content, and the one closing the record still a terminator.
+        self.assertEqual(line["end_to_end_id"], "AB/CD/EF")
+        self.assertEqual(line["msg_id"], "MSG-1")
+
     def test_a_space_on_either_side_of_a_wrap_is_kept_by_both(self):
         """Joining with nothing means nothing is inserted - and nothing removed.
 

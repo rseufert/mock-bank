@@ -957,9 +957,21 @@ def _records(text: str):
         # the next line starts a record, it does
         # `bytes.TrimRight(b.currentLine.Bytes(), " \t")`, and on the
         # continuation path it leaves the buffer alone.
-        line = trimmed
-        if not trimmed.endswith(TERMINATOR) and _continues(lines, number):
-            line = raw_line
+        #
+        # A `/` at the end of such a line is its field's content for the same
+        # reason (#150). A `/` ends a record only when a record code follows it -
+        # on this line, or on the next non-blank one - or when nothing follows at
+        # all. That is #128's rule for a `/` inside a line, carried across a line
+        # break, and it leaves one rule where there were two. Before this, a
+        # reference written `AB/` + `GS/RP0001` read as `ABGS/RP0001`: the file
+        # meant `AB/GS/RP0001` and a character went missing, which for
+        # `payment_run` is an invoice that cannot be matched.
+        #
+        # So a line the next one continues contributes its raw text, terminator
+        # and padding alike; any other line contributes its trimmed text with a
+        # terminator taken off.
+        wrapped = _continues(lines, number)
+        line = raw_line if wrapped else trimmed
         if not STARTS_RECORD.match(line.lstrip()):
             if not out:
                 raise Unreadable(
@@ -999,22 +1011,32 @@ def _records(text: str):
             # recorded there rather than presented as settled, and the rule is
             # the PM's decision on that basis.
             where, so_far = out[-1]
-            out[-1] = (where, so_far + _ended(line))
+            out[-1] = (where, so_far + _ended(line, wrapped))
             continue
-        for piece in NEXT_RECORD.split(line.lstrip()):
-            if piece.strip():
-                out.append((number, _ended(piece)))
+        # Only the last piece of the line can be the one a wrap carries into the
+        # next: every piece before it is followed by a record code on this line,
+        # so its `/` is a terminator by the same rule.
+        pieces = [piece for piece in NEXT_RECORD.split(line.lstrip())
+                  if piece.strip()]
+        for position, piece in enumerate(pieces, start=1):
+            out.append((number, _ended(piece, wrapped and position == len(pieces))))
     return out
 
 
-def _ended(piece: str) -> str:
+def _ended(piece: str, carried: bool = False) -> str:
     """A record's text without its terminator, which is optional in practice.
 
     Only the terminator comes off. A field may be padded with spaces - sample1
     writes `RETURNED CHEQUE     ` in a fixed-width text field - and that padding
     is the field's content, not whitespace around a record. An earlier version
     here stripped it and turned a 20-character text into a 15-character one.
+
+    `carried` says the next non-blank line continues this record, which makes a
+    trailing `/` content rather than a terminator (#150): nothing ends here, so
+    there is no terminator to remove.
     """
+    if carried:
+        return piece
     return piece[:-1] if piece.endswith(TERMINATOR) else piece
 
 

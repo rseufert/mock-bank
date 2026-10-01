@@ -315,10 +315,15 @@ occupies one field, or three when it is value-dated, or four when availability i
 distributed over three periods, or 2 + 2n when it is distributed over named days;
 and an amount may carry an explicit sign or not. It also knows where a record
 ends ([#128](https://github.com/rseufert/mock-bank/issues/128)): a `16`'s text
-runs to the terminator with its commas, several records may share one line, and
-a record with no `/` ends at the newline. A `/` inside a field is content unless
-a record code and a separator follow it, and a line that does not begin with a
-record code continues the one above it, joined with nothing
+runs to the terminator with its commas, several records may share one line, and a
+record with no `/` ends at the newline when the next line starts a new one. One
+rule covers the terminator
+([#150](https://github.com/rseufert/mock-bank/issues/150)): **a `/` ends a record
+only when a record code and a separator follow it - on that line or on the next
+non-blank one - or when nothing follows at all.** Anywhere else it is the field's
+own content, so a reference written `AB/` and continued by `GS/RP0001` reads
+`AB/GS/RP0001` and not `ABGS/RP0001`. A line that does not begin with a record
+code continues the one above it, joined with nothing
 ([#142](https://github.com/rseufert/mock-bank/issues/142)) - so a field a
 fixed-width producer wrapped across two lines reads as one value. Nothing is
 inserted and nothing is dropped: a space or a column of padding on a line that is
