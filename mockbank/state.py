@@ -167,6 +167,9 @@ class State:
             decision = direct_debit.decide(payment_file, findings, conn, self.clock, now,
                                            self.config.allow_duplicates)
             file_id = direct_debit.record(conn, decision, now)
+            # A NACHA account's rejected collections come back as return
+            # entries too, as its rejected payments do (#54, #176).
+            direct_debit.schedule_rejected_returns(conn, file_id, self.clock, today)
         else:
             accounts.resolve(conn, payment_file)
             decision = accounts.decide(payment_file, findings, conn, self.clock, now,

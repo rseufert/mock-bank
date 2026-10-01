@@ -19,7 +19,7 @@ import datetime
 import json
 from typing import Any, Dict, List
 
-from . import accounts, db, messages, schema
+from . import accounts, db, messages, nacha, schema
 from .accounts import ACCEPTED, REJECTED, RETURNED
 
 # A behaviour describes the account it is set on. A collection reads the
@@ -238,10 +238,17 @@ def _schedule_return(conn, clock, row) -> None:
     wanted = dict(accounts.RETURN_LATER, **debtor["parameters"])
     if wanted["end_to_end_id"] and wanted["end_to_end_id"] != row["end_to_end_id"]:
         return
-    reason = messages.iso_return_reason(
-        accounts.return_reason(debtor["parameters"], debtor["format"]))
-    if reason not in schema.CODE_SETS["ExternalReturnReason1Code"]:
-        reason = "MS03"
+    reason = accounts.return_reason(debtor["parameters"], debtor["format"])
+    creditor = accounts.get(conn, row["account_id"])
+    if creditor["format"] == "nacha":
+        # The answer is a return file: an R code, the debtor's own or the one
+        # for its ISO 20022 reason, and "account closed" where there is none.
+        if reason not in nacha.DEBIT_RETURN_REASONS:
+            reason = nacha.RETURN_FOR.get(reason, accounts.NACHA_RETURN_REASON)
+    else:
+        reason = messages.iso_return_reason(reason)
+        if reason not in schema.CODE_SETS["ExternalReturnReason1Code"]:
+            reason = "MS03"
     due = clock.business_days_after(
         datetime.date.fromisoformat(row["settlement_date"]), wanted["days"])
     conn.execute("UPDATE collection SET return_due = ?, return_reason = ? WHERE id = ?",
@@ -269,11 +276,9 @@ def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
     Only for a debtor at another bank. One this bank holds decides by its own
     state and behaviour (Rick, on #131), so there is an account to set that on.
     """
-    reasons = sorted(set(schema.CODE_SETS["ExternalReturnReason1Code"])
-                     & set(schema.CODE_SETS["ExternalStatusReason1Code"]))
-    if not isinstance(body, dict) or set(body) - {"reason"} or body.get("reason") not in reasons:
-        raise Refused(400, 'the body names the reason, as in {"reason": "MD01"}: one '
-                           "of %s" % ", ".join(reasons))
+    if not isinstance(body, dict) or set(body) - {"reason"}:
+        raise Refused(400, 'the body names the reason and nothing else, as in '
+                           '{"reason": "MD01"}')
     found = db.rows(conn, "SELECT collection.*, file.msg_id, file.message FROM collection"
                           " JOIN file ON file.id = collection.file_id"
                           " WHERE end_to_end_id = ? ORDER BY collection.id DESC",
@@ -281,6 +286,17 @@ def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
     if not found:
         raise Refused(404, "no collection with EndToEndId %r" % end_to_end_id)
     row = found[0]
+    # The reason is said in the terms the creditor account is answered in: an
+    # R code where its answers are NACHA's (#176), an ISO 20022 reason that the
+    # status report can also carry everywhere else.
+    account = accounts.get(conn, row["account_id"] or "")
+    in_nacha = bool(account) and account["format"] == "nacha"
+    reasons = sorted(nacha.DEBIT_RETURN_REASONS if in_nacha else
+                     set(schema.CODE_SETS["ExternalReturnReason1Code"])
+                     & set(schema.CODE_SETS["ExternalStatusReason1Code"]))
+    if body.get("reason") not in reasons:
+        raise Refused(400, 'the body names the reason, as in {"reason": "%s"}: one of %s'
+                           % ("R10" if in_nacha else "MD01", ", ".join(reasons)))
     if row["status"] != ACCEPTED or row["return_due"]:
         raise Refused(409, "collection %s is %s, so there is nothing left to refuse"
                            % (end_to_end_id, "already on its way back" if row["return_due"]
@@ -291,12 +307,19 @@ def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
                            "debtor at another bank" % row["debtor_iban"])
     if row["booked_at"] is None:
         text = "refused by the debtor's bank before settlement"
+        # NACHA has no message that rejects one entry of a file it accepted, so
+        # a NACHA account is told as it is told anything comes back: a return
+        # entry, on the day the collection would have settled. Nothing booked,
+        # so nothing is debited (#54's option (a), for a collection).
+        due = row["settlement_date"] if in_nacha else None
         conn.execute("UPDATE collection SET status = ?, reason = ?, reason_text = ?,"
-                     " settlement_date = NULL WHERE id = ?",
-                     (REJECTED, body["reason"], text, row["id"]))
+                     " settlement_date = NULL, return_due = ?, return_reason = ?"
+                     " WHERE id = ?",
+                     (REJECTED, body["reason"], text, due, body["reason"] if due else None,
+                      row["id"]))
         conn.commit()
-        return dict(row, status=REJECTED, reason=body["reason"], reason_text=text), True
-    account = accounts.require(conn, row["account_id"])
+        return (dict(row, status=REJECTED, reason=body["reason"], reason_text=text),
+                not in_nacha)
     if (account["balance"] - accounts.pending_debits(conn, account["id"])
             - returns_due(conn, account["id"]) - row["amount"] < -accounts.MAX_BALANCE):
         raise Refused(409, "returning %s would overdraw account %s past the 18 digits "
@@ -309,10 +332,49 @@ def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
 
 
 def returns_due(conn, account_id: str) -> int:
-    """What is on its way back out of an account: collections to be returned."""
+    """What is on its way back out of an account: settled collections to be
+    returned. One refused before it settled comes back too, on a NACHA account,
+    and takes nothing with it: ``booked_at`` is what separates them (#144)."""
     return int(db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM collection"
                             " WHERE account_id = ? AND return_due IS NOT NULL"
+                            " AND booked_at IS NOT NULL"
                             " AND returned_at IS NULL", (account_id,))["total"])
+
+
+def schedule_rejected_returns(conn, file_id, clock, received_on) -> List[int]:
+    """Return, the next business day, what a NACHA account's file of collections
+    had rejected: the mirror of ``accounts.schedule_rejected_returns`` (#54,
+    option (a)). The acknowledgement already says rejected; ACH also answers
+    with a return entry, where the reason has an ``R`` code."""
+    if file_id is None:
+        return []
+    due = clock.business_days_after(received_on, 1).isoformat()
+    scheduled = []
+    for row in db.rows(conn, "SELECT collection.id, collection.reason, account.format"
+                             " FROM collection JOIN account ON account.id = collection.account_id"
+                             " WHERE collection.file_id = ? AND collection.status = ?",
+                       (file_id, REJECTED)):
+        code = nacha.RETURN_FOR.get(row["reason"])
+        if row["format"] == "nacha" and code:
+            conn.execute("UPDATE collection SET return_due = ?, return_reason = ?"
+                         " WHERE id = ?", (due, code, row["id"]))
+            scheduled.append(row["id"])
+    return scheduled
+
+
+def rejected_returns_due(conn, today: datetime.date, now) -> List[Dict[str, Any]]:
+    """The rejected collections whose return day has come, marked returned.
+    Nothing is debited: they never settled."""
+    due = db.rows(conn, "SELECT collection.*, file.msg_id, file.message FROM collection"
+                        " JOIN file ON file.id = collection.file_id"
+                        " WHERE collection.status = ? AND return_due IS NOT NULL"
+                        " AND return_due <= ? AND returned_at IS NULL ORDER BY collection.id",
+                  (REJECTED, today.isoformat()))
+    stamped = db.stamp(now)
+    for row in due:
+        conn.execute("UPDATE collection SET returned_at = ? WHERE id = ?",
+                     (stamped, row["id"]))
+    return [_return(dict(row, returned_at=stamped)) for row in due]
 
 
 def book_returns(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]:
@@ -326,9 +388,10 @@ def book_returns(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]
                         " account.closed AS closed FROM collection"
                         " JOIN file ON file.id = collection.file_id"
                         " JOIN account ON account.id = collection.account_id"
-                        " WHERE return_due IS NOT NULL AND return_due <= ?"
+                        " WHERE collection.status = ? AND booked_at IS NOT NULL"
+                        " AND return_due IS NOT NULL AND return_due <= ?"
                         " AND returned_at IS NULL ORDER BY collection.id",
-                  (today.isoformat(),))
+                  (ACCEPTED, today.isoformat()))
     later, stamped, returned = clock.next_business_day(today).isoformat(), db.stamp(now), []
     for row in due:
         if row.pop("closed"):
@@ -354,6 +417,7 @@ def returned_on(conn, account_id: str, day: str) -> List[Dict[str, Any]]:
         conn, "SELECT collection.*, file.msg_id FROM collection"
               " JOIN file ON file.id = collection.file_id"
               " WHERE account_id = ? AND returned_at IS NOT NULL"
+              " AND booked_at IS NOT NULL"
               " AND return_due = ? ORDER BY collection.id", (account_id, day))]
 
 
@@ -361,6 +425,7 @@ def returned_after(conn, account_id: str, day: str) -> int:
     """What went back after ``day``: undone to reach that day's closing balance."""
     return int(db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM collection"
                             " WHERE account_id = ? AND returned_at IS NOT NULL"
+                            " AND booked_at IS NOT NULL"
                             " AND return_due > ?", (account_id, day))["total"])
 
 

@@ -163,7 +163,9 @@ class AfterItSettled(RefusingCase):
         before = self.balance("ACME")
         self.collect([("C1", 1000)], ccy="USD", account_ccy="USD")
         self.advance(MONDAY)
-        self.refuse("C1", "AC04")
+        # The reason is said in the account's terms: an R code here (#176).
+        self.assertIn("one of R01", self.refuse("C1", "AC04", status=400)["error"])
+        self.refuse("C1", "R02")
         self.advance(TUESDAY)
         monday = [m["body"] for m in self.get("/_mock/mailbox?type=bai2").json()][-1]
         [statement] = bai2.statements(monday)
