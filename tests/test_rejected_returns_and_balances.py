@@ -5,8 +5,9 @@ next business day and credits nothing back, because nothing was debited.
 ``outbox._position`` did not know that: both of its queries took every payment
 with ``returned_at`` set as money that came back. So through 0.3.0, 0.4.0 and
 0.5.0 a NACHA account's statement understated both balances on the settlement
-day by the rejected total, and then booked that same total as ``257`` credits on
-the day the returns went out. The two errors cancel, which is why the account's
+day by the rejected total, and then booked that same total as credits on the day
+the returns went out - ``165`` in the first two releases and ``257`` from 0.5.0,
+where #127 settled the real type codes. The two errors cancel, which is why the account's
 own balance and every later statement were right.
 
 The file reconciles against itself either way - opening less the entries is the
