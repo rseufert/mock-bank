@@ -170,7 +170,9 @@ PAYMENT_TYPE_CLASSES = ("WEB", "TEL")
 
 # Each credit's automated return, which is what a return file carries (#54):
 # a returned checking credit is 21, a savings one 31, and so on.
-RETURN_OF = {"22": "21", "32": "31", "42": "41", "52": "51"}
+RETURN_OF = {"22": "21", "32": "31", "42": "41", "52": "51",
+             # ...and each debit's (#176): a returned checking debit is 26.
+             "27": "26", "37": "36", "47": "46"}
 # Returns the reader takes: of credits, which this bank writes, and of debits
 # (26, 36, 46), which it never sends but which a return file from anywhere
 # else may carry - moov-io/ach's `return-WEB.ach` has one of each (#55).
@@ -208,6 +210,16 @@ RETURN_FOR = {"AM04": "R01",    # insufficient funds
               "RC01": "R03"}    # no account, unable to locate
 RETURN_REASONS = {"R01": "insufficient funds", "R02": "account closed",
                   "R03": "no account, or unable to locate the account"}
+# What a debit comes back with (#176): those three, and the ones that are about
+# the authorization a collection is made under. From moov-io/ach's table
+# (`addenda99.go` @ 7ee7ad0); a credit is not returned for any of these five.
+DEBIT_RETURN_REASONS = dict(RETURN_REASONS, **{
+    "R05": "improper debit to a consumer account: a corporate debit the receiver "
+           "did not authorize",
+    "R07": "authorization revoked by the customer",
+    "R08": "payment stopped",
+    "R10": "the customer advises the originator is not known or not authorized",
+    "R29": "the corporate customer advises the debit is not authorized"})
 
 PADDING = "9" * LINE
 
@@ -741,7 +753,12 @@ def return_file(routing: str, originator: dict, returns: List[dict], day, create
     row with what the return has to echo - ``transaction_code``,
     ``entry_class``, ``instruction_id`` (the original trace), ``amount``,
     ``end_to_end_id``, ``creditor_name``, ``creditor_number`` and
-    ``creditor_clearing_id`` - and its ``return_reason``, an ``R`` code.
+    ``creditor_clearing_id`` - and its ``return_reason``, an ``R`` code. A
+    row with ``collected`` set is a collection coming back (#176): the other
+    party is its debtor (``debtor_name``, ``debtor_number``,
+    ``debtor_clearing_id``), the entry is a returned debit (``26``, ``36``,
+    ``46``), and it counts in the debit totals, as moov-io/ach's own return
+    file counts one (#55).
 
     Everything a reader checks is computed here, never copied: the entry and
     addenda counts, the entry hash, the credit totals, the block count and the
@@ -761,58 +778,67 @@ def return_file(routing: str, originator: dict, returns: List[dict], day, create
     by_class: Dict[str, List[dict]] = {}
     for row in returns:
         by_class.setdefault(row.get("entry_class") or "CCD", []).append(row)
-    file_hash = file_credits = file_count = sequence = 0
+    file_hash = file_count = sequence = 0
+    file_totals = {"credit": 0, "debit": 0}
     for number, (entry_class, rows) in enumerate(sorted(by_class.items()), start=1):
+        # Credits only, or debits only: one original file is of one kind.
+        service = 225 if all(row.get("collected") for row in rows) else 220
         records.append(line(RECORDS["5"], **{
-            "record type code": 5, "service class code": 220,
+            "record type code": 5, "service class code": service,
             "company name": originator["name"][:16], "company identification": company,
             "standard entry class code": entry_class,
             "company entry description": "RETURN",
             "effective entry date": day.strftime("%y%m%d"),
             "originator status code": "1", "originating DFI identification": odfi,
             "batch number": number}))
-        batch_hash = batch_credits = batch_count = 0
+        batch_hash = batch_count = 0
+        batch_totals = {"credit": 0, "debit": 0}
         for row in rows:
             sequence += 1
             trace = "%s%07d" % (odfi, sequence)
+            party = "debtor" if row.get("collected") else "creditor"
+            code = RETURN_OF.get(row.get("transaction_code")
+                                 or ("27" if row.get("collected") else "22"),
+                                 "26" if row.get("collected") else "21")
             # A return goes back to the bank that sent the payment, so its
             # receiving DFI is this bank; the original receiving bank is named
             # in the addenda.
             records.append(line(RECORDS["6"], **{
                 "record type code": 6,
-                "transaction code": RETURN_OF.get(row.get("transaction_code") or "22", "21"),
+                "transaction code": code,
                 "receiving DFI identification": odfi, "check digit": routing[8],
-                "DFI account number": (row.get("creditor_number") or "")[:17],
+                "DFI account number": (row.get(party + "_number") or "")[:17],
                 "amount": row["amount"],
                 "individual identification number": (row.get("end_to_end_id") or "")[:15],
-                "individual name": (row.get("creditor_name") or "")[:22],
+                "individual name": (row.get(party + "_name") or "")[:22],
                 "addenda record indicator": 1, "trace number": trace}))
             records.append(line(RETURN_ADDENDA, **{
                 "record type code": 7, "addenda type code": 99,
                 "return reason code": row["return_reason"],
                 "original entry trace number": row.get("instruction_id") or "0",
                 "original receiving DFI identification":
-                    (row.get("creditor_clearing_id") or "0")[:8],
+                    (row.get(party + "_clearing_id") or "0")[:8],
                 "trace number": trace}))
             batch_hash += int(odfi)
-            batch_credits += row["amount"]
+            batch_totals[side(code)] += row["amount"]
             batch_count += 2
         records.append(line(RECORDS["8"], **{
-            "record type code": 8, "service class code": 220,
+            "record type code": 8, "service class code": service,
             "entry/addenda count": batch_count, "entry hash": batch_hash % 10 ** 10,
-            "total debit entry dollar amount": 0,
-            "total credit entry dollar amount": batch_credits,
+            "total debit entry dollar amount": batch_totals["debit"],
+            "total credit entry dollar amount": batch_totals["credit"],
             "company identification": company,
             "originating DFI identification": odfi, "batch number": number}))
         file_hash += batch_hash
-        file_credits += batch_credits
+        for key in file_totals:
+            file_totals[key] += batch_totals[key]
         file_count += batch_count
     records.append(line(RECORDS["9"], **{
         "record type code": 9, "batch count": len(by_class),
         "block count": -(-(len(records) + 1) // BLOCK),
         "entry/addenda count": file_count, "entry hash": file_hash % 10 ** 10,
-        "total debit entry dollar amount": 0,
-        "total credit entry dollar amount": file_credits}))
+        "total debit entry dollar amount": file_totals["debit"],
+        "total credit entry dollar amount": file_totals["credit"]}))
     while len(records) % BLOCK:
         records.append(PADDING)
     return "\n".join(records) + "\n"

@@ -460,7 +460,13 @@ def write_pain002_refusal(collection, msg_id, created_at) -> bytes:
 # code: the same reason, in the other vocabulary.
 ISO_RETURN_REASON = {"R01": "AM04",    # insufficient funds
                      "R02": "AC04",    # account closed
-                     "R03": "AC01"}    # no account, or unable to locate it
+                     "R03": "AC01",    # no account, or unable to locate it
+                     # ...and what only a debit comes back with (#176)
+                     "R05": "AG01",    # a debit this type of account does not take
+                     "R07": "MD01",    # authorization revoked: no mandate now
+                     "R08": "MS02",    # payment stopped: the customer's own reason
+                     "R10": "MD01",    # originator not authorized: no mandate
+                     "R29": "MD01"}    # corporate customer: not authorized
 
 
 def iso_return_reason(code):
@@ -615,7 +621,7 @@ def _collected(c, day):
         tx["RtrInf"] = {
             "OrgnlBkTxCd": {"Domn": {"Cd": original[0], "Fmly": {
                 "Cd": original[1], "SubFmlyCd": original[2]}}},
-            "Rsn": {"Cd": c["return_reason"]}}
+            "Rsn": {"Cd": iso_return_reason(c["return_reason"])}}
     domain, family, sub = schema.RETURNED_COLLECTION if returned else schema.COLLECTED_CREDIT
     return {
         "Amt": amount, "CdtDbtInd": side, "Sts": {"Cd": "BOOK"},

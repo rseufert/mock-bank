@@ -114,7 +114,7 @@ sends them.
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
 | `camt.052` | Out | When you ask: `POST /_mock/accounts/<id>/report` | The intraday report: the day so far for one account, with its opening balance (`OPBD`), the balance now (`ITBD`) and every entry booked today, on the same terms as the statement the day will end with. `statement-gap` does not apply to it, so a reconciler can see the entry the statement then leaves out |
 | `pacs.004` | Out | N business days after settlement, under `return-later` | A payment that had settled, coming back: its `EndToEndId`, what comes back and when, and the return reason. A `camt.054` credit comes with it, and the day's `camt.053` shows a `CRDT` entry whose `RtrInf` names the reason |
-| NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH, for an account whose `format` is `nacha`: a plain acknowledgement where an ISO 20022 account gets a `pain.002`, a NACHA return file where it gets a `pacs.004`, and a BAI2 statement where it gets a `camt.053` |
+| NACHA in, returns out (`R01`, `R02`, `R03`, and for a collection `R05`, `R07`, `R08`, `R10`, `R29`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH, payments and collections, for an account whose `format` is `nacha`: a plain acknowledgement where an ISO 20022 account gets a `pain.002`, a NACHA return file where it gets a `pacs.004`, and a BAI2 statement where it gets a `camt.053` |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model; `pain.008.001.08`, from the
@@ -257,12 +257,43 @@ the absence of any authorization field; and
 the prenotes and the payment type code. `tests/samples/external/nacha-gl-debit.ach`
 is a debit file from the second.
 
-**What a NACHA collection is answered with** is the account's format, not the
-file's: a NACHA-format account gets the plain acknowledgement and a BAI2
-statement line `165` when the collection settles; an ISO 20022 account in
-dollars gets a `pain.002` and a `camt.054`. A collection coming back in NACHA
-terms - a return file with an `R` code - is the next step of #176; until it
-lands, refusing or returning one is answered as for a `pain.008`.
+**What a collection is answered with** is the creditor account's format, not
+the file's. An ISO 20022 account in dollars that sends a NACHA file of debits
+gets a `pain.002`, a `camt.054` and, for one that comes back, a `pacs.004`. A
+NACHA account gets what it gets for a payment, whichever way the money moves:
+
+| | A NACHA-format account is sent |
+| --- | --- |
+| For the file | the plain acknowledgement, `nacha.ack` |
+| When something books or comes back | a `camt.054`: notifications stay ISO 20022 on every account |
+| For what comes back | a NACHA return file, `nacha.return` |
+| At the end of the day | a BAI2 statement |
+
+**A collection comes back as a returned debit.** The return file carries one
+entry per collection - transaction code `26`, `36` or `46`, the return of a
+`27`, `37` or `47` - with an addenda `99` giving the `R` code, the original
+trace number and the receiver's bank, in the debit totals. Three things send
+one back:
+
+- **`POST /_mock/collections/<EndToEndId>/refuse`**, the receiver's bank saying
+  no, with an `R` code on a NACHA account: `R01`, `R02`, `R03`, and the ones
+  about the authorization, `R05`, `R07`, `R08`, `R10` and `R29`. After the
+  collection settled the money goes back, as for a `pain.008`. **Before it
+  settled** NACHA has no message that rejects one entry of a file the bank
+  accepted, so the collection is rejected, nothing ever books, and the return
+  entry goes out on the day it would have settled.
+- **A rejection when the file arrived**, where the reason has an `R` code
+  (`AM04` is `R01`, `AC04` is `R02`): the acknowledgement says rejected, and the
+  entry comes back in a return file the next business day too, as a rejected
+  payment does. Nothing was credited, so nothing is debited.
+- **`return-later` on a debtor account this bank holds**, after its `days`. The
+  debtor's reason is said as an `R` code: its own if it has one, the one for
+  its ISO 20022 reason if there is one, and `R02` otherwise.
+
+On the `camt.054` the reason is in ISO 20022's words: `R05` is `AG01`, `R07`,
+`R10` and `R29` are `MD01`, and `R08` is `MS02`. The `R` codes are moov-io/ach's
+table (`addenda99.go` @ `7ee7ad0`); `tests/samples/external/nacha-return-WEB.ach`
+is a returned debit from outside, which the mock's reader has taken since #55.
 
 **Both doors take a NACHA file**, `POST /payments` and the drop directory, and
 it is decided by the same engine as a `pain.001`; the JSON answer's `format`
@@ -575,7 +606,8 @@ bank's answer, and what it does depends on when it arrives:
 
 The reason is an ISO 20022 return reason the status report can also carry:
 `AC04`, `AM04`, `MD01` (no mandate), `MD06` (the debtor asked for it back),
-`MS02` and the others the error lists. With the same `EndToEndId` in several
+`MS02` and the others the error lists. On a NACHA-format account it is an `R`
+code instead, and the answer is a return file; see the NACHA section above. With the same `EndToEndId` in several
 files, the newest is the one refused. A collection already rejected, already on
 its way back or already returned is `409`, and so is a return that would
 overdraw the account past what a statement can write.
@@ -1199,7 +1231,7 @@ than half-supporting it.
 | --- | --- |
 | EBICS, SWIFT FIN and SWIFTNet transport | Both need certificates and cryptography, which breaks zero dependencies; the same call mock-edi made on S/MIME. HTTP and folders cover testing. |
 | Signed or encrypted files | Same reason; an encrypted file is refused with a message saying so. |
-| Direct debits beyond `pain.008.001.08` and NACHA | 0.6 collects with `pain.008.001.08` (#131) and with a NACHA file's debit entries ([#176](https://github.com/rseufert/mock-bank/issues/176)); a NACHA collection coming back as a return file is that issue's next step. Out on purpose: `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
+| Direct debits beyond `pain.008.001.08` and NACHA | 0.6 collects with `pain.008.001.08` (#131) and with a NACHA file's debit entries ([#176](https://github.com/rseufert/mock-bank/issues/176)). Out on purpose: `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
 

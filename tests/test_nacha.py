@@ -157,11 +157,16 @@ class EveryReturnedDebitIsRead(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertIn(code, nacha.RETURNS)
 
-    def test_every_credit_has_its_return_and_every_return_a_side(self):
-        for credit, returned in nacha.RETURN_OF.items():
-            with self.subTest(credit=credit):
+    def test_every_entry_the_mock_reads_has_its_return_on_its_own_side(self):
+        # A credit's return is a credit and a debit's a debit (#55), and every
+        # code the mock reads as a payment or a collection has one (#176).
+        self.assertEqual(set(nacha.RETURN_OF), nacha.CREDITS | nacha.DEBITS)
+        for code, returned in nacha.RETURN_OF.items():
+            with self.subTest(code=code):
                 self.assertIn(returned, nacha.RETURNS)
-                self.assertEqual(nacha.side(credit), "credit")
+                self.assertEqual(nacha.side(code), nacha.side(returned))
+                self.assertEqual(nacha.side(code),
+                                 "credit" if code in nacha.CREDITS else "debit")
         for code in nacha.RETURNS:
             with self.subTest(code=code):
                 self.assertIn(nacha.side(code), ("credit", "debit"))
