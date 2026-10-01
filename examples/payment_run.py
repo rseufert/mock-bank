@@ -88,6 +88,18 @@ TRANSFER = {"", "T"}
 # The mailbox types a statement arrives as, and the NACHA return file an ACH
 # payment's reason comes back in; and what each is called in a problem.
 STATEMENT_KINDS = ("camt.053", "bai2")
+# What a BAI2 statement cannot carry back unchanged (#171, #164 item 2). BAI2 has
+# no escape character, so `mockbank.bai2._safe` replaces anything that would end a
+# field, a record or a line with a space - and SAP matches the structured
+# reference exactly. A reference that comes back changed never clears its invoice,
+# so every run selects it again and pays it again.
+#
+# This is `mockbank.bai2.UNSAFE + CONTROLS`, written out because this example
+# imports no mock; `tests/test_payment_run_readers.py` holds the two equal, so the
+# copy cannot drift from the writer it is about.
+UNCARRIABLE = ((",", "/", "\u2028", "\u2029", "\u0085")
+               + tuple(chr(code) for code in range(0x20)) + ("\x7f",))
+
 NACHA_RETURN = "nacha.return"
 WHAT = {"camt.053": "statement", "bai2": "BAI2 statement",
         NACHA_RETURN: "return file"}
@@ -308,6 +320,19 @@ class PaymentRun:
                 "reference %r is not up to 15 ASCII characters without a space, "
                 "as a NACHA entry's identification number is" % item.reference)
             return
+        if self.nacha:
+            cannot_carry = sorted({c for c in item.reference if c in UNCARRIABLE})
+            if cannot_carry:
+                # Not a NACHA limit: the entry would carry it. The statement that
+                # has to bring it back is the one that cannot, so the payment
+                # could never be matched to its invoice and the invoice would be
+                # paid again on the next run.
+                item.status, item.reason = "skipped", (
+                    "reference %r holds %s, which a BAI2 statement cannot carry "
+                    "back unchanged, so the payment could not be matched to the "
+                    "invoice" % (item.reference,
+                                 ", ".join(repr(c) for c in cannot_carry)))
+                return
         if self.nacha and Decimal(item.amount) >= NACHA_AMOUNT_LIMIT:
             item.status, item.reason = "skipped", (
                 "%s is more than a NACHA entry's ten digits hold" % item.amount)
@@ -606,9 +631,28 @@ class PaymentRun:
                       findings=applied.get("FINDINGS", []))
         run.statements.append(record)
 
-        by_reference = {i.reference: i for i in run.paying()}
+        # Keyed on the accounting document, not the invoice number (#171, #164
+        # item 5). An invoice number is a supplier's own sequence, so two
+        # suppliers can both bill `INV-1`: keyed on the reference, SAP's row for
+        # one supplier's document would be attributed to the other supplier's
+        # item. The accounting document is SAP's own identifier and is unique, and
+        # SAP returns it on every CLEARED and REOPENED row. mock-sap#87 is the
+        # other half - it makes SAP pick the right item; this makes the run agree
+        # with whichever item SAP picked.
+        by_document = {i.document.rsplit("/", 1)[-1]: i for i in run.paying()}
+
+        def attributed(line, what):
+            """SAP's row matched to the item it is about, or a problem said out loud."""
+            document = line.get("ACCOUNTINGDOCUMENT")
+            if not document:
+                run.problems.append(
+                    "SAP's %s row for statement %s names no accounting document, "
+                    "so it could not be matched to an item: %r" % (what, number, line))
+                return None
+            return by_document.get(document)
+
         for line in record["cleared"]:
-            item = by_reference.get(line["REFERENCE"])
+            item = attributed(line, "cleared")
             if item is not None and item.status == "accepted":
                 item.status, item.reason = "cleared", line["CLEARINGDOCUMENT"]
         # A return is a credit on a later statement under the original
@@ -617,7 +661,7 @@ class PaymentRun:
         why = {e["end_to_end_id"]: e["returned_for"] for e in lines if e["side"] == "CRDT"}
         why.update(run.return_reasons)
         for line in record["reopened"]:
-            item = by_reference.get(line["REFERENCE"])
+            item = attributed(line, "reopened")
             if item is not None and item.status == "cleared":
                 item.status = "returned"
                 item.reason = "%s, returned on %s; SAP reversed the clearing in %s" % (
