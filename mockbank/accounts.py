@@ -699,19 +699,26 @@ def pending_debits(conn, account_id):
     return int(found["total"])
 
 
-def record_file(conn, decision):
+def record_file(conn, decision, received_at):
     """The ``file`` row for a decided file, of payments or of collections: its
-    id, or None for a file with no ``MsgId`` to record it under."""
+    id, or None for a file with no ``MsgId`` to record it under.
+
+    ``received_at`` is the bank clock's moment of receipt - the same one
+    ``decide`` judged the cutoff on (#147). It used to be stored as real time,
+    so the decision was taken on one clock and the record kept the other, and a
+    file taken in on the bank's Thursday carried the real Monday. It is reported
+    beside the file's ``msg_id`` on each of its payments.
+    """
     if decision.msg_id is None:
         return None
     return conn.execute(
         "INSERT INTO file (msg_id, message, received_at, status, reason, reported)"
         " VALUES (?,?,?,?,?,?)",
-        (decision.msg_id, decision.payment_file.message, db.now(), decision.status,
-         decision.reason, int(decision.reported))).lastrowid
+        (decision.msg_id, decision.payment_file.message, db.stamp(received_at),
+         decision.status, decision.reason, int(decision.reported))).lastrowid
 
 
-def book(conn, decision):
+def book(conn, decision, received_at):
     """Record a decided file and its payments.
 
     Booking the debits is ``book_due``'s, which ``outbox.release_due`` calls
@@ -719,8 +726,11 @@ def book(conn, decision):
     step. A file the mock could not read far enough to have a MsgId is not
     recorded: there is nothing a duplicate check could match it on. Returns
     the file's row id, or None.
+
+    ``received_at`` is passed through to ``record_file``, which stamps the file
+    with it (#147).
     """
-    file_id = record_file(conn, decision)
+    file_id = record_file(conn, decision, received_at)
     if file_id is None:
         return None
     for d in decision.payments:
@@ -742,21 +752,28 @@ def book(conn, decision):
     return file_id
 
 
-def book_due(conn, today, commit=True):
+def book_due(conn, today, now, commit=True):
     """Debit every accepted payment whose settlement date has come.
 
     ``outbox.release_due`` calls it when a file arrives and as the clock
     moves. Returns the payments booked, oldest first.
+
+    ``now`` is the bank clock's moment, because the bank clock is what decided
+    this: the payments booked are those due on the bank's ``today``. Stamping
+    real time here recorded a different clock from the one that chose the
+    row, and a payment booked on the bank's Thursday carried the real Monday
+    (#147).
     """
     due = db.rows(conn, "SELECT * FROM payment WHERE status = ? AND booked_at IS NULL"
                         " AND settlement_date <= ? AND account_id IS NOT NULL ORDER BY id",
                   (ACCEPTED, today.isoformat()))
-    now = db.now()
+    stamped = db.stamp(now)
     for row_ in due:
         conn.execute("UPDATE account SET balance = balance - ? WHERE id = ?",
                      (row_["amount"], row_["account_id"]))
-        conn.execute("UPDATE payment SET booked_at = ? WHERE id = ?", (now, row_["id"]))
-        row_["booked_at"] = now
+        conn.execute("UPDATE payment SET booked_at = ? WHERE id = ?",
+                     (stamped, row_["id"]))
+        row_["booked_at"] = stamped
     if commit:
         conn.commit()
     return due
@@ -813,44 +830,62 @@ def schedule_rejected_returns(conn, file_id, clock, received_on):
     return scheduled
 
 
-def rejected_returns_due(conn, today):
+def rejected_returns_due(conn, today, now):
     """The rejected payments whose return day has come, marked returned. Nothing
-    is credited: they were never debited."""
+    is credited: they were never debited.
+
+    ``now`` is the bank clock's, like every stamp whose row the bank clock
+    chose: ``return_due <= today`` is a bank-clock comparison (#147).
+    """
     due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message FROM payment"
                         " JOIN file ON file.id = payment.file_id"
                         " WHERE payment.status = ? AND return_due IS NOT NULL"
                         " AND return_due <= ? AND returned_at IS NULL ORDER BY payment.id",
                   (REJECTED, today.isoformat()))
-    now = db.now()
+    stamped = db.stamp(now)
     for row_ in due:
-        conn.execute("UPDATE payment SET returned_at = ? WHERE id = ?", (now, row_["id"]))
-        row_["returned_at"] = now
+        conn.execute("UPDATE payment SET returned_at = ? WHERE id = ?",
+                     (stamped, row_["id"]))
+        row_["returned_at"] = stamped
     return due
 
 
-def book_returns(conn, today):
+def book_returns(conn, today, now):
     """Credit back every payment whose return day has come, and mark it
-    returned. Returns those payments, oldest first, with their file's MsgId."""
+    returned. Returns those payments, oldest first, with their file's MsgId.
+
+    ``now`` is the bank clock's, for the same reason as ``book_due``'s: the
+    balance moves because the bank clock reached ``return_due`` (#147).
+    """
     due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message FROM payment"
                         " JOIN file ON file.id = payment.file_id"
                         " WHERE payment.status = ? AND booked_at IS NOT NULL"
                         " AND return_due IS NOT NULL AND return_due <= ?"
                         " AND returned_at IS NULL ORDER BY payment.id",
                   (ACCEPTED, today.isoformat()))
-    now = db.now()
+    stamped = db.stamp(now)
     for row_ in due:
         conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",
                      (row_["amount"], row_["account_id"]))
         conn.execute("UPDATE payment SET status = ?, returned_at = ? WHERE id = ?",
-                     (RETURNED, now, row_["id"]))
-        row_["status"], row_["returned_at"] = RETURNED, now
+                     (RETURNED, stamped, row_["id"]))
+        row_["status"], row_["returned_at"] = RETURNED, stamped
     return due
 
 
 def payments(conn, end_to_end_id=None):
     """Every payment the bank decided on, newest first, or those with one
-    EndToEndId (which is unique within a file, not across files)."""
-    sql = ("SELECT payment.*, file.msg_id FROM payment JOIN file ON file.id = payment.file_id")
+    EndToEndId (which is unique within a file, not across files).
+
+    The file's ``received_at`` comes with its ``msg_id``: the bank-clock moment
+    the file was taken in, which is the moment the cutoff was judged on and so
+    the one that explains ``settlement_date``. It was written to the row and
+    served nowhere before #147, leaving a client no bank-clock receipt time at
+    all - the nearest was the ``pain.002``'s ``releasedAt``, which is the same
+    moment only when ``--status-delay-ms`` is zero.
+    """
+    sql = ("SELECT payment.*, file.msg_id, file.received_at FROM payment"
+           " JOIN file ON file.id = payment.file_id")
     if end_to_end_id is None:
         return db.rows(conn, sql + " ORDER BY payment.id DESC")
     return db.rows(conn, sql + " WHERE end_to_end_id = ? ORDER BY payment.id DESC",
