@@ -10,7 +10,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Dict
 
 from . import (__version__, accounts, clock as clock_module, db, direct_debit, drop,
-               messages, nacha, outbox, validate)
+               messages, nacha, outbox, schema, validate)
 from .accounts import BEHAVIOURS
 from .routes import SUPPORTED
 from .routes.control import PLANNED
@@ -166,11 +166,22 @@ class State:
             accounts.resolve(conn, payment_file)
             decision = direct_debit.decide(payment_file, findings, conn, self.clock, now,
                                            self.config.allow_duplicates)
+            unanswerable = outbox.unanswerable(conn, decision, now, source)
+            if unanswerable:
+                return self._cannot_answer(payment_file, decision, findings,
+                                           unanswerable, collecting=True)
             file_id = direct_debit.record(conn, decision, now)
         else:
             accounts.resolve(conn, payment_file)
             decision = accounts.decide(payment_file, findings, conn, self.clock, now,
                                        self.config.allow_duplicates)
+            # Before anything is booked: a file carrying a value the bank cannot
+            # echo has no answer, and booking it only moves the failure onto the
+            # release path, where it made every later call a 500 (#166 d and e).
+            unanswerable = outbox.unanswerable(conn, decision, now, source)
+            if unanswerable:
+                return self._cannot_answer(payment_file, decision, findings,
+                                           unanswerable)
             file_id = accounts.book(conn, decision, now)
             # A NACHA account's rejections also come back as returns, next
             # business day (#54); scheduled now, released on the clock like any
@@ -208,6 +219,42 @@ class State:
             "queued": queued,
         }
         return answer, decision, findings
+
+    def _cannot_answer(self, payment_file, decision, findings, why,
+                       collecting=False):
+        """The answer to a file the bank cannot write a status report for.
+
+        Refused, not booked. The value the writer refused is the file's own - its
+        `MsgId`, its control sum - so there is no status report to send, and a
+        file the bank cannot answer for is of no use to it. Nothing is written
+        here, which is the point: #166's cases d and e booked the file first and
+        then failed writing the answer, and the half-done work made every later
+        advance and mailbox read a 500 until the mock was reset.
+
+        The `pain.002`'s own finding is already in `findings`, naming the field;
+        this adds what the bank did about it.
+        """
+        refused = accounts.Decision(
+            payment_file, "RJCT", schema.STRUCTURAL,
+            "the bank could not write a status report for this file, so it is "
+            "refused rather than taken and left unanswered: %s" % why)
+        answer = {
+            "format": ("nacha" if payment_file is not None
+                       and payment_file.message == nacha.NAME
+                       else "iso20022" if payment_file is not None else None),
+            "msg_id": refused.msg_id,
+            "status": refused.status,
+            "reason": refused.reason,
+            "reason_text": refused.reason_text,
+            "reported": False,
+            "accepted": 0,
+            "rejected": 0,
+            "payments": [],
+            "collections": [],
+            "findings": [f._asdict() for f in findings],
+            "queued": [],
+        }
+        return answer, refused, findings
 
     def close(self) -> None:
         """Close the database, under the lock every request takes.

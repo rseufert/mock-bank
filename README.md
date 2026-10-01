@@ -418,6 +418,27 @@ a folder client has to match the refusal to.
 Each payment keeps its `EndToEndId` through every message, so a client can
 match a status, a statement line and a return to the invoice it paid.
 
+**What the bank refuses because it could not answer for it.** A value can be
+readable and still be one no later message can hold, and taking it in is worse
+than refusing it: the file is booked, and the failure arrives later, on the
+release path, where it made every `POST /_mock/advance` and every mailbox read
+answer 500 until the mock was reset
+([#166](https://github.com/rseufert/mock-bank/issues/166)). So each of these is
+settled at the door, before anything is written:
+
+| Given | Answer |
+| --- | --- |
+| `PATCH /_mock/accounts/<id>` with a name no message can carry — empty, or only spaces | `400`, naming the element the writer refused. A name longer than the standard allows is **written**, shortened to fit, not refused |
+| A `pain.001` whose own identifiers cannot be echoed back — a `MsgId` over 35 characters, a control sum of more than 18 digits | `422`, `RJCT`/`FF01`, saying the status report could not be written. Nothing booked and nothing queued, because the `pain.002` would have to carry the same value back |
+| On a NACHA account, an `InstrId` longer than a return addenda's original entry trace number | that payment is rejected, `FF01`. A NACHA account's rejections come back as returns ([#54](https://github.com/rseufert/mock-bank/issues/54)), and at receipt the bank cannot know whether this one will |
+| Changing an account's `format` while a return is already scheduled on one of its payments | `400`, saying how many, with which reason, and the last day one is due. The reason is stored when the payment books, so the switch would leave a return nothing can write. It is allowed again once they have gone back |
+
+A creditor or debtor account that is **not** an IBAN is none of these: it is
+valid input, and the bank writes it back the way it came — in `Id/IBAN` when it
+strictly is an IBAN, and in `Id/Othr/Id` when it is not. `NL30 MOCK 0000 0000 05`
+is accepted, matched to the account it names, and reported as `Othr/Id`, because
+the `IBAN` element holds no spaces.
+
 ## Money arriving
 
 Everything above is money leaving, or coming back. `POST /_mock/credits` makes
