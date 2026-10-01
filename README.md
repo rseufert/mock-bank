@@ -307,8 +307,15 @@ and an amount may carry an explicit sign or not. It also knows where a record
 ends ([#128](https://github.com/rseufert/mock-bank/issues/128)): a `16`'s text
 runs to the terminator with its commas, several records may share one line, and
 a record with no `/` ends at the newline. A `/` inside a field is content unless
-a record code and a separator follow it. Five files from moov-io/bai2 are held
-to that. Three of them reconcile, and the check worth naming is that every
+a record code and a separator follow it, and a line that does not begin with a
+record code continues the one above it, joined with nothing
+([#142](https://github.com/rseufert/mock-bank/issues/142)) - so a field a
+fixed-width producer wrapped across two lines reads as one value. Nothing is
+inserted and nothing is dropped: a space or a column of padding on a line that is
+continued is the field's own content and survives the wrap, while trailing
+whitespace on a line that ends its record is padding around the record and comes
+off. Five files from moov-io/bai2 are held to that. Three of them reconcile, and
+the check worth naming is that every
 control total and record count in those, recomputed from the records it covers,
 comes out as stated. The other two state totals that contradict themselves,
 which is those files and not the reader. One limit remains, because BAI2 has no

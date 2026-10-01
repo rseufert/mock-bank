@@ -140,6 +140,129 @@ class ARealBanksFile(unittest.TestCase):
                     [(Decimal(d.amount).scaleb(-2), "CRDT" if int(d.type_code) < 400
                       else "DBIT", d.reference, d.customer_reference) for d in theirs])
 
+    def test_both_readers_split_every_file_into_the_same_fields(self):
+        """The agreement, one level below the movements - and it had a hole.
+
+        The test above compares each movement's amount, side and two references.
+        It does **not** compare the text, and both wraps in the corpus -
+        `sample3` line 18 and `sample5` line 62 - fall in a text field, so the two
+        readers could disagree about how a wrap joins and nothing here noticed:
+        reverting `payment_run`'s join alone, while `mockbank.bai2` kept #142's,
+        passed this whole suite.
+
+        Comparing the field lists closes it. It is also the stronger statement of
+        what "two readers agree" should mean - not that they agree about the four
+        values one caller happens to use, but that they cut the same file into the
+        same fields.
+        """
+        for name in SAMPLES:
+            with self.subTest(sample=name):
+                text = sample(name)
+                theirs = [[r.code] + list(r.values) for r in bai2._fold(text)]
+                self.assertEqual(payment_run.bai2_records(text), theirs)
+
+    def test_a_wrap_inside_a_reference_reads_as_one_value_here_too(self):
+        """`payment_run` on the case #142 exists for, held on its own.
+
+        No vendored file wraps outside a `16`'s text, so the agreement test above
+        can only hold the readers together where a sample happens to wrap - and
+        the field that matters to this reader is the one it reconciles on. A
+        newline left in `end_to_end_id` is a payment that stops matching its
+        invoice, and that is this reader's job, not `mockbank.bai2`'s.
+        """
+        wrapped = ("01,BANK,CUST,261001,0000,1,,,2/\n"
+                   "02,ACME,BANK,1,261001,0000,USD,/\n"
+                   "03,0000000001,USD,010,+125000,,Z,015,+0,,Z/\n"
+                   "16,495,125000,Z,INV-2026-\n"
+                   "0101,MSG-1,Globex Supplies B.V./\n"
+                   "49,+125000,4/\n98,+125000,1,6/\n99,+125000,1,8/\n")
+        [statement] = payment_run.bai2_statements(wrapped)
+        [line] = statement["lines"]
+        self.assertEqual(line["end_to_end_id"], "INV-2026-0101")
+        self.assertEqual(line["msg_id"], "MSG-1")
+        self.assertEqual((Decimal(line["amount"]), line["side"]),
+                         (Decimal("1250.00"), "DBIT"))
+        # And the same text through the other reader, which is the claim the
+        # agreement test cannot make about a field no sample wraps.
+        self.assertEqual(payment_run.bai2_records(wrapped),
+                         [[r.code] + list(r.values) for r in bai2._fold(wrapped)])
+
+    def test_a_space_on_either_side_of_a_wrap_is_kept_by_both(self):
+        """Joining with nothing means nothing is inserted - and nothing removed.
+
+        Both readers used to `rstrip()` every line before joining, so a producer
+        that wrapped *after* a space lost it: `PAYMENT FOR ` + `INVOICE 12` read
+        `PAYMENT FORINVOICE 12`. Until #142 the line break kept the words apart,
+        so the rule traded one defect for another. moov trims only a copy, for the
+        record-code test, and appends to its buffer untouched.
+
+        Whitespace after a terminator is a different thing - it is outside the
+        record - and still comes off.
+        """
+        def read(text):
+            fields = [[r.code] + list(r.values) for r in bai2._fold(text)]
+            self.assertEqual(payment_run.bai2_records(text), fields, text)
+            return fields[0][-1]
+
+        # A space before the break, which the producer wrote and meant.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,PAYMENT FOR \n"
+                              "INVOICE 12/\n"),
+                         "PAYMENT FOR INVOICE 12")
+        # One on each side: both are content, so both survive.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,PAYMENT FOR \n"
+                              " INVOICE 12/\n"),
+                         "PAYMENT FOR  INVOICE 12")
+        # A fixed-width field padded to its column, which is what wraps in the
+        # first place. sample1 writes `RETURNED CHEQUE     ` this way.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,ACME      \n"
+                              "LTD       /\n"),
+                         "ACME      LTD       ")
+        # Outside the record: the terminator's trailing whitespace still goes.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,DONE/   \n"), "DONE")
+        # And the end of the file continues nothing, so an unterminated last
+        # record's trailing whitespace is padding around it, not content. With
+        # no terminator and no line after it, this is the one case where the
+        # lookahead has nothing to look at.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,TAIL   \n"), "TAIL")
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,TAIL   "), "TAIL")
+
+    def test_padding_every_line_changes_only_the_two_wrapped_records(self):
+        """Trailing whitespace is content only where a wrap joins to it.
+
+        The space before a wrap has to survive, because the join inserts nothing.
+        Everywhere else trailing whitespace is padding *around* a record and must
+        come off, as it did before #142 - a `49,+125000,2   ` that ends its record
+        states 2, not `2   `. A first draft of this kept it on every line with no
+        terminator, which read 17 of `sample4`'s 31 records differently once its
+        lines were padded; v0.5.0 read none differently. moov draws the line in
+        the same place, trimming at its `fullLine` label and leaving the buffer
+        alone on the continuation path.
+
+        So: pad every line of all five files and the fields must not move, except
+        in the one record per file that is actually wrapped, where the padding now
+        falls inside the field by design.
+        """
+        wrapped_at = {"bai2-sample3.txt": 18, "bai2-sample5.txt": 62}
+        for name in SAMPLES:
+            with self.subTest(sample=name):
+                raw = sample(name)
+                padded = "".join(line.rstrip("\r\n") + "   " + "\n"
+                                 for line in raw.splitlines(True))
+                before = list(bai2._fold(raw))
+                after = list(bai2._fold(padded))
+                self.assertEqual(len(before), len(after))
+                moved = [b.line for b, a in zip(before, after)
+                         if list(b.values) != list(a.values)]
+                self.assertEqual(
+                    moved, [wrapped_at[name]] if name in wrapped_at else [],
+                    "%s: padding moved fields in records that are not wrapped" % name)
+                # Both readers, on both texts: a rule only one of them follows is
+                # the defect this file exists to catch.
+                self.assertEqual(payment_run.bai2_records(raw),
+                                 [[r.code] + list(r.values) for r in before])
+                self.assertEqual(payment_run.bai2_records(padded),
+                                 [[r.code] + list(r.values) for r in after])
+
     def test_sample3_adds_up_account_by_account(self):
         # Packed records and a wrapped one: if either were read wrong, a
         # movement would be lost or invented and an account would not add up.

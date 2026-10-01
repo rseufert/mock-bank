@@ -551,19 +551,33 @@ class HowARecordEnds(unittest.TestCase):
                  bai2._records("16,142,2500,Z,,,REF1,text/88,more/\n")]
         self.assertEqual(len(split), 2, split)
 
-    def test_a_wrapped_line_keeps_the_break_it_was_written_with(self):
-        """sample3's wrapped 16, pinned to the character.
+    def test_a_wrapped_line_joins_with_nothing(self):
+        """sample3's wrapped 16, pinned to the character (#142).
 
-        Joining with a space passed before this test. It must not: a space is a
-        character the field could have contained and a line break is not, so
-        joining with one would be indistinguishable from the producer having
-        written it. The `,       1111111111` on the end is the `88` that follows,
-        which joins with a separator because that is what a continuation
-        continues.
+        **This asserted the opposite until #142**, and the change is deliberate:
+        it pinned `...1111111111\\n111111111111111...`, keeping the line break
+        inside the field. #128's argument for that was confused - it said a space
+        is a character the field could have contained and a newline is not, so
+        joining with a space would be indistinguishable from the producer having
+        written one. True, and an argument against a *space*; it says nothing
+        against joining with **nothing**, which never got considered. A newline
+        left in a value is a character no producer meant either.
+
+        moov-io/bai2's scanner joins with nothing, and no file anywhere attests
+        the case either way - the two wraps in existence both fall in a `16`'s
+        text. **This** one is filler; `sample5`'s is not, and
+        `test_sample5s_wrap_runs_a_gs_id_into_the_eref_that_follows` pins what it
+        reads. One implementation, no file, and the PM's decision on that basis;
+        #142 records it as exactly that, with both of sample5's readings.
+
+        The `,       1111111111` on the end is the `88` that follows, which joins
+        with a separator, because that is what a continuation continues.
         """
         wrapped = [r for r in bai2._fold(text(THREE))
-                   if r.code == "16" and any("\n" in v for v in r.values)]
+                   if r.code == "16" and r.line == 18]
         self.assertEqual(len(wrapped), 1, "one wrapped record in sample3")
+        self.assertNotIn("\n", "".join(wrapped[0].values),
+                         "no line break survives in any field")
         # Two, not three: the `16` and its `88`. **A wrapped line is not a
         # record**, so it does not count toward a trailer's record count - and
         # that is not my reading, it is sample3's own arithmetic, whose trailers
@@ -573,8 +587,68 @@ class HowARecordEnds(unittest.TestCase):
                          "which is what makes the count above a fact")
         self.assertEqual(
             bai2.detail(wrapped[0].values).text,
-            "111111     ACH_SETL           1111111111\n"
-            "111111111111111        ,       1111111111")
+            "111111     ACH_SETL           1111111111111111111111111"
+            "        ,       1111111111")
+
+    def test_sample5s_wrap_runs_a_gs_id_into_the_eref_that_follows(self):
+        """The second wrap in the corpus, pinned - and it is not filler (#142).
+
+        `sample3`'s wrap falls in a run of repeated digits, which reads as
+        meaninglessly one way as the other. **`sample5`'s does not.** Line 62 ends
+        `GS ID: SC213480000120999` with no terminator and line 63 is
+        `88:EREF: 07370568132` - a continuation typed with a colon where the
+        separator should be, so it is a wrap and not an `88` record, and its
+        content is a reference somebody meant.
+
+        Joined with nothing, the GS ID runs straight into `88:EREF`::
+
+            0.5.0:  '... GS ID: SC213480000120999\\n88:EREF: 07370568132'
+            now:    '... GS ID: SC21348000012099988:EREF: 07370568132'
+
+        moov-io/bai2's scanner reads it the same way, so this does not contradict
+        the rule's source - but #142's decision was taken on "no file
+        adjudicates", and this file bears on it. The two readings are posted there
+        for the PM to confirm or change. Pinned here because until now only the
+        two-reader agreement test touched this record, and that says the readers
+        agree, not what the value is.
+        """
+        [wrapped] = [r for r in bai2._fold(text(FIVE))
+                     if r.code == "16" and r.line == 62]
+        # Lines 62 to 66: the 16, its wrap, and the three 88s that follow.
+        # Unlike sample3, sample5's own trailers contradict themselves - see
+        # `TheTwoFixturesWhoseOwnArithmeticIsWrong` - so the count is read off
+        # the file's lines here and not argued from a control total.
+        self.assertEqual(wrapped.lines, 5)
+        lines = text(FIVE).splitlines()[61:66]
+        self.assertTrue(lines[0].startswith("16,255,931,"), lines[0][:20])
+        self.assertEqual(lines[1], "88:EREF: 07370568132")
+        self.assertTrue(all(l.startswith("88,") for l in lines[2:]), lines[2:])
+        self.assertNotIn("\n", "".join(wrapped.values))
+        detail = bai2.detail(wrapped.values)
+        self.assertEqual(detail.reference, "SC2134800001999")
+        self.assertIn("GS ID: SC21348000012099988:EREF: 07370568132", detail.text)
+        # The join inserts nothing and drops nothing: the characters either side
+        # of the break are exactly those of the two lines.
+        self.assertIn("SC213480000120999" + "88:EREF: 07370568132", detail.text)
+
+    def test_a_wrap_inside_a_reference_reads_as_one_value(self):
+        """The case #142 exists for, and the reason the rule is not cosmetic.
+
+        A fixed-width producer wraps wherever its column falls, which need not be
+        the last field. `payment_run` reconciles on the bank reference, so a
+        newline left inside it is a payment that stops matching its invoice.
+
+        No vendored sample wraps here - both that exist fall in a `16`'s text - so
+        this is constructed, and #142 says so rather than implying a file behind
+        it.
+        """
+        wrapped = ("16,495,125000,Z,INV-2026-\n"
+                   "0101,MSG-1,Globex Supplies B.V./\n")
+        one = bai2.detail(bai2._fold(wrapped)[0].values)
+        self.assertEqual(one.reference, "INV-2026-0101")
+        self.assertEqual(one.customer_reference, "MSG-1")
+        self.assertEqual(one.text, "Globex Supplies B.V.")
+        self.assertEqual(one.amount, 125000)
 
     def test_a_line_that_does_not_start_with_a_code_continues_the_one_above(self):
         # sample3 wraps a 16's text onto a second line that carries the

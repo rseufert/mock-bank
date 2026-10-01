@@ -714,6 +714,16 @@ BAI2_STARTS = re.compile(r"^(?:%s)," % "|".join(BAI2_CODES))
 BAI2_NEXT = re.compile(r"/[ \t]*(?=(?:%s),)" % "|".join(BAI2_CODES))
 
 
+def _bai2_continues(lines: List[str], index: int) -> bool:
+    """Whether the line after `lines[index]` continues its record: the next line
+    that is not blank, and only if it does not start with a record code."""
+    for later in lines[index + 1:]:
+        if not later.rstrip():
+            continue
+        return not BAI2_STARTS.match(later.lstrip())
+    return False
+
+
 def bai2_records(text: str) -> List[List[str]]:
     """The records of a BAI2 file as lists of fields, continuations folded in.
 
@@ -721,15 +731,28 @@ def bai2_records(text: str) -> List[List[str]]:
     next; an `88` continues the field stream of the record before it.
     """
     raw: List[str] = []
-    for line in text.splitlines():
-        line = line.rstrip()
-        if not line.strip():
+    lines = text.splitlines()
+    for index, raw_line in enumerate(lines):
+        trimmed = raw_line.rstrip()
+        if not trimmed:
             continue
+        # Trailing whitespace survives only when the next line continues this
+        # record, because the join inserts nothing and a wrapped field's padding
+        # is its content (#142). Everywhere else it is padding around a record
+        # and comes off, as it did before. moov trims in exactly the same place.
+        line = trimmed
+        if not trimmed.endswith("/") and _bai2_continues(lines, index):
+            line = raw_line
         if not BAI2_STARTS.match(line.lstrip()):
             if not raw:
                 raise ValueError("a BAI2 file starts with a record code, not %r"
                                  % line.strip()[:40])
-            raw[-1] += "\n" + (line[:-1] if line.endswith("/") else line)
+            # Joined with nothing (#142): a wrapped line continues the one
+            # above and the break is not part of any field. moov-io/bai2's own
+            # scanner does the same, and `mockbank.bai2._records` is held to this
+            # by `tests/test_payment_run_readers.py` - change one and that test
+            # fails, which is the point of it.
+            raw[-1] += line[:-1] if line.endswith("/") else line
             continue
         raw += [p[:-1] if p.endswith("/") else p
                 for p in BAI2_NEXT.split(line.lstrip()) if p.strip()]
