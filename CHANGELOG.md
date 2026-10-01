@@ -13,6 +13,439 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.6.0] - 2026-10-01
+
+### Added
+
+- **A direct debit initiation, `pain.008.001.08`, is read and validated** (#131,
+  the first step of direct debits). `POST /_mock/validate` reads one into
+  collections: the creditor account and the requested collection date per batch,
+  and per collection the debtor, the amount, the mandate id and its date of
+  signature, the sequence type and the creditor scheme identifier. The last two are
+  taken from the batch where a collection leaves them out. It reports what a
+  `pain.001` would get, turned round to the creditor's side: a wrong count or sum,
+  a repeated `EndToEndId`, a collection date already past, and an amount in
+  another currency than the creditor account. The message is declared in the
+  dictionary and checked against the published XSD, and two files from outside the
+  project read with no finding. **Collections are not booked yet.**
+  `POST /payments` and the drop folder refuse a `pain.008` by name until the next
+  step books them.
+
+- **A `pain.008` is decided and answered with a `pain.002`** (#131, the second
+  step of direct debits). `POST /payments` and the drop folder take a file of
+  collections through the same pipeline as a `pain.001`, with the account holder
+  on the creditor side: the creditor account must be one the bank holds (`AC03`
+  if not), open (`AC04`) and in the collection's currency (`AM03`), and a
+  collection that states no mandate or no date of signature is `MD02`. **A debtor
+  account the bank holds decides the collection by its own state and behaviour**:
+  closed or `closed-account` is `AC04`, and `insufficient-funds` is `AM04` when
+  the collection is more than that account has available. The debtor's balance is
+  read and never changed, because the mock books only the account holder's side.
+  `reject-file` and `silent` on the creditor account act on the file it sends, as
+  they do for a `pain.001`. The README has the table. An accepted collection is
+  given its settlement date: the requested collection date, rolled to a business
+  day, and never before the business day after the bank can start on the file.
+  `GET /_mock/collections` and `GET /_mock/collections/<EndToEndId>` show what was
+  decided, and `/_mock/state` counts them. **Nothing is booked yet**: no balance
+  moves and no `camt.054` is sent until the next step. A `--db` file from 0.4 or
+  0.5 gains the `collection` table when it is opened (schema version 9).
+
+- **An accepted collection credits the creditor account on its settlement date**
+  (#131, the third step of direct debits). The bank sends a `camt.054` with a
+  `CRDT` entry for each collection, one notification per account and settlement
+  date, and the day's `camt.053`, the BAI2 statement of a NACHA-format account and
+  a `camt.052` carry the same entries. An entry names the debtor, the
+  `EndToEndId`, the file's `MsgId` and the mandate, and its bank transaction code
+  is `PMNT`/`IDDT`/`ESDD`, as banks' own example statements write for a collected
+  direct debit; the README names two. On a BAI2 statement it is type code `165`,
+  which a bank's export writes for the proceeds of a debit collection. A collection
+  that would take the account past the 18 digits a statement can write is rejected
+  `AM02`; a day that becomes a holiday moves the collections still to settle on
+  it; and an account closed while a collection waited is not credited until it is
+  reopened. The notification is listed in `GET /_mock/queue` until it settles, and
+  `GET /_mock/collections` shows the file's `received_at` and each collection's
+  `booked_at`, both on the bank clock. Only the account holder's side books: a
+  debtor the bank holds is not debited. The debtor's bank refusing or returning a
+  collection is the next step.
+
+- **The debtor's bank can refuse a collection or send it back** (#131, the last
+  step of direct debits). `POST /_mock/collections/<EndToEndId>/refuse` with
+  `{"reason": "MD01"}` is that bank's answer for a debtor at another bank. Before
+  the collection settles it is rejected with the reason: the bank sends a further
+  `pain.002` naming the original file and batch with that one transaction `RJCT`,
+  and nothing books. After it settled the money goes back on the first day the
+  bank can book it: the creditor account is debited, and the bank sends a
+  `pacs.004` naming the `pain.008` and a `camt.054` debit, with the entry on that
+  day's `camt.053`, BAI2 statement and `camt.052`. The debit's bank transaction
+  code is `PMNT`/`IDDT`/`UPDD`, from the same two example statements as the
+  credit's, and on a BAI2 statement it is type code `557`. Until a return books,
+  both of its messages are listed in `GET /_mock/queue`. **A debtor account this
+  bank holds with `return-later` sends a settled collection back by itself**,
+  after its `days` and with its `reason`, and refusing one by hand is `409`:
+  its own state and behaviour decide. A collection already rejected, on its way
+  back or returned is `409` too, as is a return that would overdraw the account
+  past what a statement can write. What is left of direct debits in the README's
+  out-of-scope table is `pain.008.001.02` and a mandate register; a NACHA file's
+  debit entries as collections follow in #176.
+
+- **`GET /_mock/queue` lists what the bank is going to send and has not released**
+  (#155), soonest first, each with `dueAt`. Until now that was visible only in the
+  answer to `POST /payments` and as a bare count in `/_mock/state`, so a caller who
+  did not post the file could not ask what was coming. Two kinds of entry, told
+  apart by `written`: a message already written and held back, which is a status
+  report under `--status-delay-ms` and has an `id`; and a message the bank will
+  write when something books, which has none yet - the `camt.054` for payments
+  accepted and not yet settled, the one for money arriving, and the `pacs.004` or
+  NACHA return file and the credit a return brings. Those are due at the start of
+  their day in bank time, and `reports` says which of them an entry is. Every
+  entry has a `key`, and the message arrives in `GET /_mock/mailbox` under the same
+  `key`, so a reader can pair what was waiting with what arrived: type, account,
+  the day it books under and what it reports for a message the bank will write,
+  `m<id>` for one already written. A database from an earlier version gains the
+  `message.key` column (schema version 10), and its old messages answer to
+  `m<id>`. `?type=`
+  filters on a prefix, as the mailbox does. Reading it releases nothing and takes
+  nothing. A statement is not listed: one is written for every open account when
+  the clock is advanced past the end of a business day, not for anything that has
+  happened.
+
+- **The worked examples ship in the wheel, as `mockbank.examples`** (#169). After
+  `pip install mock-bank`, `procure_to_pay` and everything it composes can be
+  imported and run without cloning the repository:
+
+  ```python
+  from mockbank.examples import procure_to_pay, payment_run, invoice_check
+  ```
+
+  Asked for by mock-films, which plays this three-mock choreography and had no way
+  to reach the code: `examples/` was in the sdist and in no importable place.
+
+  `pyproject.toml` maps `examples/` onto that import path rather than moving or
+  copying the files, so every README link still points at the file a reader is
+  reading about. The modules import each other relatively, which means one import
+  mechanism rather than a flat one inside the repository and a packaged one in the
+  wheel - so the repository's own invocation changes from
+  `cd examples && python3 -m unittest -v test_payment_run` to
+  `python3 -m unittest -v examples.test_payment_run`.
+
+  Importing needs `mock-bank` alone. The examples reach mock-sap and mock-edi over
+  HTTP and import neither, and CI checks that from a clean install with nothing else
+  in it.
+
+  The import path is the only promise made about them. They are examples, not a
+  supported client library: `payment_run` can still pay an invoice twice in the ways
+  #164 lists.
+
+- **A NACHA file of debit entries is a file of collections** (#176). An entry
+  with transaction code `27`, `37` or `47` is read as a collection, with the
+  company as the creditor and the receiver as the debtor, and is decided, recorded
+  and booked by the code a `pain.008` goes through: the creditor account has to be
+  one the bank holds and in dollars, a debtor the bank holds decides by its own
+  state and behaviour, and on the settlement date the creditor account is
+  credited. The answer follows the account's format, not the file's: a NACHA
+  account gets its acknowledgement and a BAI2 statement line `165`, an ISO 20022
+  account a `pain.002` and a `camt.054`. **A NACHA file carries no mandate**, so
+  none is asked for and `MD02` does not apply; a `WEB` or `TEL` debit's payment
+  type code is recorded as the sequence type. The entry's own code decides which
+  kind a file is, whatever its service class. A file with both credits and debits
+  is refused with a finding that says why, where it used to be refused for the
+  debit alone; a prenote, a zero-dollar entry and a loan debit are each named for
+  what they are. A `--db` file gains three columns on `collection` (schema version
+  11). A NACHA collection coming back as a return file is the next step.
+
+- **A NACHA account's collection comes back as a return file** (#176). A NACHA
+  return file now carries collections as well as payments: one entry per
+  collection with transaction code `26`, `36` or `46`, an addenda `99` with the
+  `R` code, the original trace number and the receiver's bank, counted in the
+  debit totals. `POST /_mock/collections/<EndToEndId>/refuse` takes an `R` code on
+  a NACHA-format account - `R01`, `R02`, `R03`, and for the authorization `R05`,
+  `R07`, `R08`, `R10` and `R29` - where it takes an ISO 20022 reason on any other.
+  After the collection settled the money goes back with the return file and a
+  `camt.054` debit, which says the reason in ISO 20022. Before it settled the
+  collection is rejected and nothing books, and because NACHA has no message that
+  rejects one entry of an accepted file, the return entry goes out on the day it
+  would have settled. A collection rejected when the file arrived, for a reason
+  with an `R` code, comes back in a return file the next business day as a
+  rejected payment does, and `return-later` on a debtor account the bank holds
+  sends a settled collection back with the `R` code for its reason. An ISO 20022
+  account that sends a NACHA file of debits is answered as before, with a
+  `pain.002` and a `pacs.004`. The README lists what a NACHA account is sent.
+
+### Changed
+
+- **A wrapped line joins the record above with nothing, not with a line break**
+  (#142). This changes released behaviour, in 0.5.0 only: 0.3.0 and 0.4.0 refused
+  such a file outright (`line 4 does not end with '/'`), and 0.5.0 read it with a
+  `\n` left in the middle of the wrapped field, which is what #128 settled.
+
+  ```
+  16,495,125000,Z,INV-2026-
+  0101,MSG-1,Globex Supplies B.V./
+
+  v0.3.0, v0.4.0:  Unreadable: line 4 does not end with '/'
+  v0.5.0:          reference = 'INV-2026-\n0101'
+  now:             reference = 'INV-2026-0101'
+  ```
+
+  That matters beyond tidiness because `examples/payment_run.py` reconciles on the
+  bank reference, so a wrapped reference was a payment that could not be matched to
+  its invoice. Both readers change together, and
+  `tests/test_payment_run_readers.py` now compares the two **field list by field
+  list** rather than only the four values one caller uses — reverting one reader's
+  join alone used to pass the whole suite, because both wraps in the corpus fall in
+  a text field and the comparison stopped short of the text.
+
+  Joining with nothing inserts nothing and **drops** nothing: a line that is
+  continued keeps its trailing spaces, so `PAYMENT FOR ` followed by `INVOICE 12`
+  reads `PAYMENT FOR INVOICE 12` and a fixed-width `ACME      ` keeps its column.
+  Both readers used to strip every line before joining, and until this change the
+  line break was what held those words apart. Trailing whitespace anywhere else is
+  padding *around* a record and still comes off, exactly as before: a
+  `49,+125000,2   ` that ends its record states 2. moov draws the line in the same
+  place, trimming where the next line starts a record and leaving its buffer alone
+  on the continuation path.
+
+  #128 kept the break on an argument that does not hold: it said a space is a
+  character the field could have contained and a newline is not, which argues
+  against joining with a *space* and says nothing against joining with nothing. A
+  newline left in a value is a character no producer meant either.
+
+  **One implementation and no file.** moov-io/bai2's scanner joins with nothing — a
+  newline never reaches its buffer and the continuation path appends to the same
+  one. No BAI2 file in that repository wraps outside a `16`'s text, so nothing
+  attests the case this rule is for. Of the two wraps that exist, `sample3`'s is
+  filler that reads as meaninglessly either way; `sample5`'s is not — line 62 ends
+  `GS ID: SC213480000120999` and line 63 is `88:EREF: 07370568132`, so the two
+  references now run together. moov reads that the same way, and both readings are
+  recorded on #142. One source rather than proof, and the rule is the PM's decision
+  on that basis.
+
+- **A booking is stamped with the bank's clock, not the host's** (#147). A payment's
+  `booked_at` and a credit's recorded real time while the bank clock decided the
+  booking, so a payment the bank booked on its own Sunday carried the real date of
+  the run, and a reader ordering control-plane events by timestamp got two clocks
+  mixed.
+
+  ```
+  --clock 2026-10-01T09:00, then advance
+
+  was:  booked_at = 2026-10-01T05:19:13Z   (the real moment of the run)
+  now:  booked_at = 2026-10-01T09:00:02Z   (the bank's)
+  ```
+
+  The rule, now stated in the README with a table: a stamp that records a moment
+  **the bank clock decided** is on the bank clock, and a stamp that records when
+  this process did something is on the real one. On the bank clock: a message's
+  `releasedAt` and `dueAt` as before, and now a payment's `booked_at`, a credit's
+  `booked_at`, a payment's `returned_at` for both kinds of return, and a file's
+  `received_at`. Still real time, deliberately: `/_mock/requests`' `at`, `started`
+  in `/_mock/state`, and the pickup folder's record of having written a file - each
+  of those is about this process rather than about the bank's day.
+
+  A credit's `received_at` was already bank time, because `create` is handed the
+  bank's now; a file's was not, although `accounts.decide` judges the cutoff on
+  exactly that moment. So one credit used to carry both clocks and could report a
+  `received_at` later than the `booked_at` that followed it.
+
+  **A file's `received_at` is now reported**, beside its `msg_id` on each of its
+  payments at `GET /_mock/payments` and `GET /_mock/payments/<EndToEndId>`. It was
+  written to the row and served nowhere, so a client had no bank-clock moment of
+  receipt at all: the nearest was the `pain.002`'s `releasedAt`, which is the same
+  moment only when `--status-delay-ms` is zero. A file of collections is stamped
+  the same way - `accounts.record_file` is shared with `pain.008` since #131 step
+  b1 - and serving it on `GET /_mock/collections` is that feature's own step.
+
+  A database carried over from 0.5.0 with `--db` keeps the real-time stamps on the
+  rows it already had, so one listing can show both clocks after an upgrade. Only
+  new bookings are on the bank clock; nothing rewrites old rows.
+
+  Nothing in the bank reads these values - every query tests them for `NULL` - so
+  balances, statements, reports and returns are unchanged. Reported by the
+  mock-films team, who read the control plane over HTTP.
+
+- **A `/` at the end of a wrapped line is the field's content, not a terminator**
+  (#150). One rule now covers the terminator: a `/` ends a record only when a
+  record code and a separator follow it - on that line or on the next non-blank one
+  - or when nothing follows at all. Before this it always ended a record at a line
+  break, even where the next line continued it, and the character was dropped.
+
+  ```
+  16,495,125000,Z,AB/
+  GS/RP0001,MSG-1,Globex/
+
+  v0.5.0:  reference = 'AB\nGS/RP0001'     the slash lost, a newline left in
+  0.6/#142: reference = 'ABGS/RP0001'      the slash lost, the lines joined
+  now:      reference = 'AB/GS/RP0001'     what the file says
+  ```
+
+  So this changes released behaviour in 0.5.0 **and** in 0.6's own #142: both lose
+  the slash, by different routes. v0.4.0 refused a file of this shape outright
+  (`line 2 has record code 'GS/RP0001', which is not declared`), because a wrapped
+  line was not something it read at all.
+
+  It matters for the same reason #142 did: `examples/payment_run.py` reconciles on
+  the bank reference, so a reference missing a character is an invoice that cannot
+  be matched. Both readers change together and
+  `tests/test_payment_run_readers.py` holds them to each other field list by field
+  list.
+
+  No vendored file has this shape - five BAI2 samples, two wrapped lines between
+  them, and neither ends in `/` - so the case is pinned by a constructed file, and
+  all five samples read exactly as before, record for record. moov's scanner at
+  `aee8612` appears to end the record at the `/`, which is option 2 of the three on
+  the issue; that reading comes from the code and not from running it, no Go
+  toolchain being available, and the decision does not rest on it. If somebody runs
+  moov and it differs, that is a new issue.
+
+### Fixed
+
+- **A rejected payment moves no balance on a statement or a report** (#144). A
+  NACHA account's rejections are answered as return entries the next business day
+  and nothing is credited back, because nothing was debited (#54, option (a)).
+  `outbox._position` did not know that: it read every payment with a `returned_at`
+  as money that came back. So the statement for the settlement day understated both
+  balances by the rejected total, and the day the returns went out booked that
+  total as credits that never happened. Written that way by 0.3.0, 0.4.0 and
+  0.5.0 - as `165` in the first two and as `257` from 0.5.0, where #127 settled the
+  real type codes; the credit is wrong in all three. The two errors cancel, so the
+  account's own balance and every later statement were right, and the file
+  reconciles against itself - which is why no reader and no control total could
+  find it. The `camt.052` for a NACHA account
+  read the same numbers, and `still_to_arrive` reserved balance headroom for
+  returns that were never going to credit. A return now moves a balance only if the
+  payment was booked. Also new: the check that catches this on its own, one file
+  run into one account as both `nacha` and `iso20022` so the BAI2 statement and the
+  `camt.053` for the same day are compared with each other instead of each with
+  itself.
+
+- **Input the bank cannot answer for is refused at the door, not booked and then
+  left unanswerable** (#166, the first of two parts). Six values were accepted that
+  a later message could not hold. Four of them then made **every**
+  `POST /_mock/advance` and every mailbox read answer 500 until the mock was reset,
+  because the same unwritable message was retried on each one.
+
+  Settled at the door now, before anything is written:
+
+  - An account **name** no message can carry - empty, or only spaces - is `400`,
+    naming the element the writer refused. A name longer than the standard allows is
+    written, shortened to fit, rather than refused.
+  - A `pain.001` whose own identifiers cannot be echoed back - a `MsgId` over 35
+    characters, a control sum of more than 18 digits - is `422`, `RJCT`/`FF01`,
+    saying the status report could not be written. Nothing is booked and nothing is
+    queued: the `pain.002` would have to carry the same value back, so there is no
+    answer to send.
+  - On a NACHA account, an **`InstrId`** longer than a return addenda's original
+    entry trace number rejects that payment with `FF01`. A NACHA account's
+    rejections come back as returns (#54), and at receipt the bank cannot know
+    whether this payment will.
+  - Changing an account's **`format`** while a return is already scheduled on one of
+    its payments is `400`, saying how many, with which reason, and the last day one
+    is due. A return's reason is stored when the payment books, so the switch would
+    leave behind a reason the new format cannot write. It is allowed again once the
+    returns have gone back.
+
+  **A creditor or debtor account that is not an IBAN is written back the way it
+  came.** This one was not bad input: an account given as `Othr/Id` is valid, and
+  the bank accepted it. The writers put it into an `Id/IBAN` element, which holds no
+  spaces, and refused it on the way out. They now choose by the XSD's own pattern -
+  `Id/IBAN` when it strictly is an IBAN, `Id/Othr/Id` when it is not - so
+  `NL30 MOCK 0000 0000 05` is accepted, matched to the account it names, and
+  reported as `Othr/Id`. `schema.iban_is_valid` forgives spaces on the way in,
+  deliberately, which is what made it the wrong test for the way out.
+
+  The pattern throughout is `credits.create`'s, which has refused an unreportable
+  credit at the door since #106: write the message once, now, the way the release
+  will write it, and refuse the input the writer refuses.
+
+  Still to come, in the second part: one message that cannot be written must not
+  stop the others.
+
+  Found by DJ's review of the three mocks.
+
+- **One message the bank cannot write no longer stops the others** (#166, the second
+  and last part). Part 1 shut the doors on values a later message could not hold;
+  this is what happens when one gets through anyway - and one always can, because a
+  `--db` file carries rows an older mock wrote, before a guard existed.
+
+  Before, the writer's `ValueError` came out of the release itself: the day's other
+  bookings were abandoned with it, and **every** later `POST /_mock/advance` and
+  mailbox read tried the same message again and answered 500, until the mock was
+  reset. One account with an unwritable name stopped the whole bank.
+
+  Now the booking stands - a payment that booked has booked, a return that came back
+  has come back - and only the message is given up on, with the writer's own
+  complaint kept:
+
+  ```
+  GET /_mock/unsent
+  [{"type": "camt.053.001.08", "account": "OLD", "day": "2026-10-01",
+    "problem": ".../Acct/Ownr/Nm: Nm is empty", "at": "2026-10-01T09:00:00Z"}]
+  ```
+
+  `GET /_mock/state` counts them under `messages.unsent`, so a tester sees something
+  is missing without knowing to look. Three things follow, each on purpose:
+
+  - **Every other message of that release is still written.** One account's
+    unwritable statement stops neither another account's nor the day's bookings.
+  - **Nothing retries it.** The value will not fix itself, so retrying would add a
+    row per advance for ever. A statement given up on is recorded as issued with no
+    message, so `GET /_mock/accounts/<id>/statements` shows `"message_id": null`.
+    That null means "no message to fetch" and nothing more: `--retention-days` nulls
+    it as well, when a `camt.053` that was sent and collected ages out.
+    `GET /_mock/unsent` is what says the bank could not write one.
+  - **A reset forgets it**, because a reset is a new bank; on `--db` it survives a
+    restart, because the row that caused it does.
+
+  `POST /_mock/accounts/<id>/report` is outside this: it answers one request, so a
+  report it cannot write fails that call and blocks nothing.
+
+  Schema version 12 adds the `unsent` table. A `--db` file from 11 gains it empty -
+  nothing is invented for a message an older mock failed to write, because nothing
+  recorded it.
+
+  **One door part 1 missed is closed too.** `POST /_mock/accounts` did not try the
+  writers the way `PATCH` does, and `create` falls back to the id only when the name
+  is *empty* - a name of only spaces is truthy, so it survived. That made every
+  later advance a 500 with no payment involved at all, since the end-of-day
+  `camt.053` names the account. It is refused now, and creating an account with no
+  name still takes the id.
+
+  Found by DJ's review of the three mocks.
+
+- **A payment run no longer pays an invoice twice in two of the ways it could**
+  (#171, the two of the five listed on issue 164 that need nothing from mock-sap).
+
+  **A reference a BAI2 statement cannot carry back unchanged is skipped, with the
+  character named.** BAI2 has no escape character, so a `,` or a `/` in the
+  reference is replaced with a space on the way back, and SAP matches the structured
+  reference exactly. The payment was made, never matched to its invoice, and the
+  invoice stayed open - so the next run selected it and paid it again, with nothing
+  in either log saying anything had gone wrong. The run cannot change what the
+  statement carries, so skipping it beforehand is the only honest answer it has:
+
+  ```
+  reference 'GLX,4711' holds ',', which a BAI2 statement cannot carry back
+  unchanged, so the payment could not be matched to the invoice
+  ```
+
+  The characters are `bai2.UNSAFE` and `bai2.CONTROLS` - a comma, a slash, the three
+  Unicode line separators, and the C0 controls with `DEL`. The example imports no
+  mock and so writes the set out, and `tests/test_payment_run_readers.py` holds the
+  copy equal to the writer's own, because a copy that nothing checks drifts.
+
+  **A clearing is attributed by accounting document, not by invoice number.** An
+  invoice number is a supplier's own sequence, so two suppliers can both bill
+  `INV-1`. The run built `{item.reference: item}`, which collapsed the two into one
+  entry before any matching happened and dropped the earlier one - so a clearing
+  could be recorded against an item SAP never cleared while the item it did clear
+  was left looking unpaid, and paid again. SAP returns `ACCOUNTINGDOCUMENT` on every
+  `CLEARED` and `REOPENED` row and it is unique; the run reads it now. A row that
+  names no accounting document goes into `run.problems` rather than passing
+  silently. rseufert/mock-sap#87 is the other half: it makes SAP pick the right item,
+  and this makes the run agree with whichever item SAP picked.
+
+  The three other faults on issue 164 need mock-sap and stay there.
+
 ## [0.5.0] - 2026-09-29
 
 ### Added
@@ -771,7 +1204,8 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/rseufert/mock-bank/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rseufert/mock-bank/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rseufert/mock-bank/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rseufert/mock-bank/compare/v0.2.0...v0.3.0
