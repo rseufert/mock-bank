@@ -138,10 +138,16 @@ def _reason(conn, creditor, batch, collection, errors, available):
     return None, None
 
 
-def record(conn, decision):
+def record(conn, decision, received_at):
     """Record a decided file and its collections; the file's row id, or None
-    for a file with no ``MsgId``. Nothing is booked here."""
-    file_id = accounts.record_file(conn, decision)
+    for a file with no ``MsgId``. Nothing is booked here.
+
+    ``received_at`` is the bank clock's moment of receipt, as it is for a file
+    of payments: one stamp, one rule, from the shared ``accounts.record_file``
+    (#147). ``GET /_mock/collections`` does not report it yet - #131's own step
+    serves it there, the way a payment reports it beside its ``msgId``.
+    """
+    file_id = accounts.record_file(conn, decision, received_at)
     if file_id is None:
         return None
     for d in decision.payments:
