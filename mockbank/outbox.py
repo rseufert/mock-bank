@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List
 
-from . import accounts, bai2, credits, db, messages, nacha
+from . import accounts, bai2, credits, db, direct_debit, messages, nacha
 
 
 # Every message type that is not XML, and the extension it is written under.
@@ -46,6 +46,7 @@ TEXT_TYPES = dict(nacha.TEXT_TYPES, **bai2.TEXT_TYPES)
 # What a message the bank writes on booking reports: `reports` in
 # `GET /_mock/queue`, and part of the message's key (#155).
 SETTLING, ARRIVING, RETURNED = "payments settling", "money arriving", "payments returned"
+COLLECTED = "collections settling"
 
 
 def queue_status(conn, decision, file_id, now, delay_ms=0,
@@ -161,10 +162,19 @@ def upcoming(conn, file_id) -> List[Dict[str, Any]]:
                          " WHERE file_id = ? AND status = ? AND booked_at IS NULL"
                          " AND account_id IS NOT NULL ORDER BY settlement_date, account_id",
                    (file_id, accounts.ACCEPTED))
-    return [{"type": messages.CAMT054.name, "account": r["account_id"],
-             "due_on": r["settlement_date"],
-             "key": _key(conn, messages.CAMT054.name, r["account_id"],
-                         r["settlement_date"], SETTLING)} for r in rows]
+    out = [{"type": messages.CAMT054.name, "account": r["account_id"],
+            "due_on": r["settlement_date"],
+            "key": _key(conn, messages.CAMT054.name, r["account_id"],
+                        r["settlement_date"], SETTLING)} for r in rows]
+    # ...and a file of collections brings its credits' (#131).
+    collected = db.rows(conn, "SELECT DISTINCT account_id, settlement_date FROM collection"
+                              " WHERE file_id = ? AND status = ? AND booked_at IS NULL"
+                              " ORDER BY settlement_date, account_id",
+                        (file_id, accounts.ACCEPTED))
+    return out + [{"type": messages.CAMT054.name, "account": r["account_id"],
+                   "due_on": r["settlement_date"],
+                   "key": _key(conn, messages.CAMT054.name, r["account_id"],
+                               r["settlement_date"], COLLECTED)} for r in collected]
 
 
 def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
@@ -178,7 +188,8 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
       ``GET /_mock/mailbox/<id>`` shows it;
     - a message the bank **will write** when something books, which is most of
       what a caller means by "about to send": the ``camt.054`` for payments
-      accepted and not yet settled, the one for money arriving, and what a
+      accepted and not yet settled, the one for money arriving, the one for
+      collections not yet settled, and what a
       return brings - a ``pacs.004`` or a NACHA return file per original file,
       and a ``camt.054`` credit where money comes back. These have no ``id``
       yet, and are due at the start of their day in bank time, which is when
@@ -212,6 +223,12 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
                              " WHERE booked_at IS NULL AND account.closed = 0"):
         expected.add((row["booking_date"], messages.CAMT054.name, row["account_id"],
                       None, ARRIVING))
+    for row in db.rows(conn, "SELECT collection.account_id, settlement_date FROM collection"
+                             " JOIN account ON account.id = collection.account_id"
+                             " WHERE collection.status = ? AND booked_at IS NULL"
+                             " AND account.closed = 0", (accounts.ACCEPTED,)):
+        expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
+                      None, COLLECTED))
     for row in db.rows(conn, "SELECT payment.*, account.format FROM payment"
                              " JOIN account ON account.id = payment.account_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
@@ -269,6 +286,7 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
             (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
              _key(conn, messages.CAMT054.name, account_id, day, SETTLING)))
     _release_credits(conn, now, today, clock)
+    _release_collections(conn, now, today, clock)
     released = db.rows(conn, "SELECT id, type, account, due_at FROM message"
                              " WHERE released_at IS NULL AND due_at <= ? ORDER BY id",
                        (stamp,))
@@ -295,6 +313,24 @@ def _release_credits(conn, now, today, clock):
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
             (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
              _key(conn, messages.CAMT054.name, account_id, day, ARRIVING)))
+
+
+def _release_collections(conn, now, today, clock):
+    """Book the collections that settle today, and say so: a ``camt.054`` credit
+    per account and settlement date, the same granularity as the debits (#131)."""
+    stamp = db.stamp(now)
+    by_day: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in direct_debit.book_due(conn, today, clock, now):
+        by_day.setdefault((row["account_id"], row["settlement_date"]), []).append(row)
+    for (account_id, day), rows in sorted(by_day.items()):
+        account = accounts.require(conn, account_id)
+        sequence = db.next_value(conn, "camt.054:" + account_id)
+        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
+                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        conn.execute(
+            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.CAMT054.name, account_id, day, COLLECTED)))
 
 
 def _release_returns(conn, now, today):
@@ -541,6 +577,9 @@ def _position(conn, account, day):
     later_credits += credits.booked_after(conn, account["id"], when)
     booked += [dict(c, incoming=True, credit=True)
                for c in credits.booked_on(conn, account["id"], when)]
+    # A collection (#131) is a credit too, on the day it settled.
+    later_credits += direct_debit.booked_after(conn, account["id"], when)
+    booked += direct_debit.booked_on(conn, account["id"], when)
     closing = account["balance"] + int(later_debits) - int(later_credits)
     opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
                             for p in booked)

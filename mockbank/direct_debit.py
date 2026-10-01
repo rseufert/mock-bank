@@ -8,11 +8,12 @@ holds, and either way **only the account holder's side is booked**: a payment
 into an account the bank holds does not credit that account, and a collection
 from one does not debit it.
 
-This module decides and records. Booking the credit on the settlement date is
-the next step.
+This module decides, records and books: on its settlement date an accepted
+collection credits the creditor account, and ``outbox`` reports it.
 """
 from __future__ import annotations
 
+import datetime
 import json
 from typing import Any, Dict, List
 
@@ -62,7 +63,10 @@ def decide(collection_file, findings, conn, clock, received_at, allow_duplicates
        b. a collection-level finding: its code (``AM03``, ``AM05``, ``MD02``);
        c. a collection in another currency than the creditor account: ``AM03``;
        d. a held debtor account that is closed or ``closed-account``: ``AC04``;
-       e. a held debtor account with ``insufficient-funds``: ``AM04`` for each
+       e. a collection that would take the creditor account past the 18
+          digits a statement can write, with what is already on its way to it:
+          ``AM02`` (#106);
+       f. a held debtor account with ``insufficient-funds``: ``AM04`` for each
           collection larger than what that account has available - its
           balance less its own payments accepted and not yet booked, less the
           collections this file has already taken from it. **Read, never
@@ -88,13 +92,15 @@ def decide(collection_file, findings, conn, clock, received_at, allow_duplicates
                                  "the creditor account's behaviour is reject-file")
     earliest = clock.next_business_day(clock.settlement_date(received_at))
     available: Dict[str, int] = {}
+    room: Dict[str, int] = {}
     decided = []
     for batch in collection_file.batches:
         creditor = creditors[id(batch)]
         wanted = batch.requested_collection_date
         when = clock.settlement_date(received_at, max(wanted or earliest, earliest))
         for collection in batch.collections:
-            reason, text = _reason(conn, creditor, batch, collection, errors, available)
+            reason, text = _reason(conn, creditor, batch, collection, errors, available,
+                                   room)
             decided.append(accounts.PaymentDecision(
                 collection, batch, creditor, REJECTED if reason else ACCEPTED, reason,
                 text, None if reason else when))
@@ -104,7 +110,7 @@ def decide(collection_file, findings, conn, clock, received_at, allow_duplicates
                              reported="silent" not in behaviours)
 
 
-def _reason(conn, creditor, batch, collection, errors, available):
+def _reason(conn, creditor, batch, collection, errors, available, room):
     """The code and prose a collection is rejected with, or (None, None)."""
     if creditor is None:
         held = ", ".join(a["iban"] for a in accounts.listing(conn))
@@ -119,11 +125,21 @@ def _reason(conn, creditor, batch, collection, errors, available):
         return "AM03", ("the amount is in %s but the creditor account %s is held in %s"
                         % (collection.currency, creditor["iban"], creditor["currency"]))
     debtor = accounts.by_iban(conn, collection.debtor_account or "")
-    if debtor is None:
-        # Another bank's customer: nothing about it can be known at acceptance.
-        return None, None
-    if debtor["closed"] or debtor["behaviour"] == "closed-account":
+    if debtor and (debtor["closed"] or debtor["behaviour"] == "closed-account"):
         return "AC04", "the debtor account %s is closed" % debtor["iban"]
+    if creditor["id"] not in room:
+        # What the creditor account can still take: the ceiling, less its
+        # balance and everything already due to be credited to it (#106).
+        room[creditor["id"]] = (accounts.MAX_BALANCE - creditor["balance"]
+                                - accounts.still_to_arrive(conn, creditor["id"]))
+    if collection.amount > room[creditor["id"]]:
+        return "AM02", ("%s would take the creditor account %s past the 18 digits a "
+                        "statement can write" % (schema.format_amount(
+                            collection.amount, collection.currency), creditor["iban"]))
+    if debtor is None:
+        # Another bank's customer: nothing more can be known at acceptance.
+        room[creditor["id"]] -= collection.amount
+        return None, None
     if debtor["behaviour"] == "insufficient-funds":
         if debtor["id"] not in available:
             available[debtor["id"]] = (debtor["balance"]
@@ -135,6 +151,7 @@ def _reason(conn, creditor, batch, collection, errors, available):
                                schema.format_amount(max(available[debtor["id"]], 0),
                                                     debtor["currency"])))
         available[debtor["id"]] -= collection.amount
+    room[creditor["id"]] -= collection.amount
     return None, None
 
 
@@ -169,10 +186,64 @@ def record(conn, decision, received_at):
     return file_id
 
 
+def book_due(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]:
+    """Credit every accepted collection whose settlement date has come. Returns
+    them, oldest first, with their file's ``MsgId``.
+
+    The creditor account is credited and nothing else: the debtor is another
+    bank's customer, or an account this bank holds and does not book (see the
+    module). Stamped with the bank clock's ``now``, as every booking is (#147).
+
+    Not into an account closed while the collection waited, for a credit's
+    reason (``credits.book_due``): a closed account gets no statement, so the
+    settlement date moves on a business day each time it comes due.
+    """
+    due = db.rows(conn, "SELECT collection.*, file.msg_id, account.closed AS closed"
+                        " FROM collection JOIN file ON file.id = collection.file_id"
+                        " JOIN account ON account.id = collection.account_id"
+                        " WHERE collection.status = ? AND booked_at IS NULL"
+                        " AND settlement_date <= ? ORDER BY collection.id",
+                  (ACCEPTED, today.isoformat()))
+    later, stamped, booked = clock.next_business_day(today).isoformat(), db.stamp(now), []
+    for row in due:
+        if row.pop("closed"):
+            conn.execute("UPDATE collection SET settlement_date = ? WHERE id = ?",
+                         (later, row["id"]))
+            continue
+        conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",
+                     (row["amount"], row["account_id"]))
+        conn.execute("UPDATE collection SET booked_at = ? WHERE id = ?",
+                     (stamped, row["id"]))
+        booked.append(_entry(dict(row, booked_at=stamped)))
+    return booked
+
+
+def _entry(row) -> Dict[str, Any]:
+    """A booked collection as the writers take it: a credit, and collected."""
+    return dict(row, remittance=json.loads(row["remittance"] or "[]"),
+                credit=True, collected=True)
+
+
+def booked_on(conn, account_id: str, day: str) -> List[Dict[str, Any]]:
+    return [_entry(r) for r in db.rows(
+        conn, "SELECT collection.*, file.msg_id FROM collection"
+              " JOIN file ON file.id = collection.file_id"
+              " WHERE account_id = ? AND booked_at IS NOT NULL"
+              " AND settlement_date = ? ORDER BY collection.id", (account_id, day))]
+
+
+def booked_after(conn, account_id: str, day: str) -> int:
+    """What was collected after ``day``: undone to reach that day's closing balance."""
+    return int(db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM collection"
+                            " WHERE account_id = ? AND booked_at IS NOT NULL"
+                            " AND settlement_date > ?", (account_id, day))["total"])
+
+
 def listing(conn, end_to_end_id=None) -> List[Dict[str, Any]]:
     """Every collection the bank decided on, newest first, or those with one
-    ``EndToEndId`` (unique within a file, not across files)."""
-    sql = ("SELECT collection.*, file.msg_id FROM collection"
+    ``EndToEndId`` (unique within a file, not across files). The file's
+    ``received_at`` comes with its ``msg_id``, as it does on a payment (#147)."""
+    sql = ("SELECT collection.*, file.msg_id, file.received_at FROM collection"
            " JOIN file ON file.id = collection.file_id")
     where, params = ("", ()) if end_to_end_id is None else (
         " WHERE end_to_end_id = ?", (end_to_end_id,))

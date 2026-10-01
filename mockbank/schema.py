@@ -250,10 +250,13 @@ BANK_TRANSACTION_CODES = {
                               "to Payment Return: the credit a return books",
     ("PMNT", "RCDT", "ESCT"): "Payments / Received Credit Transfers / SEPA Credit "
                               "Transfer: money arriving from somebody else (#91)",
+    ("PMNT", "IDDT", "ESDD"): "Payments / Issued Direct Debits / SEPA Core Direct "
+                              "Debit: the credit a collection books (#131)",
 }
 BOOKED_DEBIT = ("PMNT", "ICDT", "ESCT")
 RETURNED_CREDIT = ("PMNT", "ICDT", "RRTN")
 RECEIVED_CREDIT = ("PMNT", "RCDT", "ESCT")
+COLLECTED_CREDIT = ("PMNT", "IDDT", "ESDD")
 
 # Code sets checked by pattern rather than list, and identifier shapes.
 PATTERNS = {
@@ -658,7 +661,7 @@ def entry():
     refs = Group("Refs", Ident("MsgId").opt, Ident("AcctSvcrRef").opt,
                  Ident("PmtInfId").opt, Ident("InstrId").opt, Ident("EndToEndId").opt,
                  Ident("UETR", 36, pattern="UUIDv4Identifier").opt, Ident("TxId").opt,
-                 iso="TransactionReferences6")
+                 Ident("MndtId").opt, iso="TransactionReferences6")
     instructed = Group("InstdAmt", Amt("Amt"))
     amount_details = Group("AmtDtls", instructed.opt, Group("TxAmt", Amt("Amt")).opt)
     parties = Group("RltdPties", party_or_agent(v, "InitgPty").opt,

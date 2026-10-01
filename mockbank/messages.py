@@ -460,6 +460,8 @@ def _entry(p, day):
     """
     if p.get("incoming"):
         return _incoming(p, day)
+    if p.get("collected"):
+        return _collected(p, day)
     credit = bool(p.get("credit"))
     domain, family, sub = schema.RETURNED_CREDIT if credit else schema.BOOKED_DEBIT
     side = "CRDT" if credit else "DBIT"
@@ -531,6 +533,45 @@ def _incoming(c, day):
         "Amt": amount, "CdtDbtInd": "CRDT", "Sts": {"Cd": "BOOK"},
         "BookgDt": {"Dt": day}, "ValDt": {"Dt": datetime.date.fromisoformat(c["value_date"])},
         "AcctSvcrRef": "MB-RCV-%d" % c["id"],
+        "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
+        "NtryDtls": [{"TxDtls": [tx]}]}
+
+
+def _collected(c, day):
+    """A collection that settled (#131), as an ``Ntry``: a ``CRDT`` under
+    ``schema.COLLECTED_CREDIT``, an issued direct debit.
+
+    The mirror of a payment's debit: the references are the ``pain.008``'s own,
+    with the mandate the money was collected under, and the other party is the
+    ``Dbtr`` with its account and its bank. Booked and valued on ``day``.
+    """
+    amount = schema.Amount(c["amount"], c["currency"])
+    refs = {"MsgId": c["msg_id"], "EndToEndId": c["end_to_end_id"]}
+    if c["pmt_inf_id"]:
+        refs["PmtInfId"] = c["pmt_inf_id"]
+    if c["instruction_id"]:
+        refs["InstrId"] = c["instruction_id"]
+    if c["mandate_id"]:
+        refs["MndtId"] = c["mandate_id"]
+    tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": "CRDT"}
+    parties = {}
+    if c["debtor_name"]:
+        parties["Dbtr"] = {"Pty": {"Nm": c["debtor_name"][:140]}}
+    if c["debtor_iban"]:
+        parties["DbtrAcct"] = {"Id": (
+            {"IBAN": c["debtor_iban"]} if schema.iban_is_valid(c["debtor_iban"])
+            else {"Othr": {"Id": c["debtor_iban"]}})}
+    if parties:
+        tx["RltdPties"] = parties
+    if c["debtor_bic"]:
+        tx["RltdAgts"] = {"DbtrAgt": {"FinInstnId": {"BICFI": c["debtor_bic"]}}}
+    if c["remittance"]:
+        tx["RmtInf"] = {"Ustrd": list(c["remittance"])}
+    domain, family, sub = schema.COLLECTED_CREDIT
+    return {
+        "Amt": amount, "CdtDbtInd": "CRDT", "Sts": {"Cd": "BOOK"},
+        "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
+        "AcctSvcrRef": "MB-COL-%d" % c["id"],
         "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
         "NtryDtls": [{"TxDtls": [tx]}]}
 
