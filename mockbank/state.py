@@ -164,12 +164,12 @@ class State:
             # creditor side, decided and recorded by `direct_debit`.
             decision = direct_debit.decide(payment_file, findings, conn, self.clock, now,
                                            self.config.allow_duplicates)
-            file_id = direct_debit.record(conn, decision)
+            file_id = direct_debit.record(conn, decision, now)
         else:
             accounts.resolve(conn, payment_file)
             decision = accounts.decide(payment_file, findings, conn, self.clock, now,
                                        self.config.allow_duplicates)
-            file_id = accounts.book(conn, decision)
+            file_id = accounts.book(conn, decision, now)
             # A NACHA account's rejections also come back as returns, next
             # business day (#54); scheduled now, released on the clock like any
             # return.

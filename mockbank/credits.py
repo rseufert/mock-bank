@@ -207,7 +207,7 @@ def listing(conn) -> List[Dict[str, Any]]:
     return [_row(r) for r in db.rows(conn, "SELECT * FROM credit ORDER BY id DESC")]
 
 
-def book_due(conn, today: datetime.date, clock) -> List[Dict[str, Any]]:
+def book_due(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]:
     """Book every credit whose day has come: the balance goes up. Returns them.
 
     Not into an account closed while the credit waited: a closed account gets
@@ -222,7 +222,11 @@ def book_due(conn, today: datetime.date, clock) -> List[Dict[str, Any]]:
                         " AND credit.booking_date <= ? ORDER BY credit.id",
                   (today.isoformat(),))
     later = clock.next_business_day(today).isoformat()
-    now = db.now()
+    # The bank clock's moment, as a payment's `booked_at` is (#147): a credit
+    # books because the bank clock reached its `booking_date`. A credit's
+    # `received_at` was already bank time - `create` is handed `state.now()` -
+    # so the two stamps on one credit now agree about which clock they are on.
+    stamped = db.stamp(now)
     booked = []
     for row in due:
         closed = row.pop("closed")
@@ -231,8 +235,9 @@ def book_due(conn, today: datetime.date, clock) -> List[Dict[str, Any]]:
             continue
         conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",
                      (row["amount"], row["account_id"]))
-        conn.execute("UPDATE credit SET booked_at = ? WHERE id = ?", (now, row["id"]))
-        row["booked_at"] = now
+        conn.execute("UPDATE credit SET booked_at = ? WHERE id = ?",
+                     (stamped, row["id"]))
+        row["booked_at"] = stamped
         booked.append(row)
     return [_row(r) for r in booked]
 

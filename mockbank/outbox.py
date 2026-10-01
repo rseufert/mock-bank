@@ -147,7 +147,7 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     ``camt.054`` credit (``_release_returns``). The clock is required rather
     than optional: a caller that left it out would book payments whose
     returns then silently never happened."""
-    booked = accounts.book_due(conn, today, commit=False)
+    booked = accounts.book_due(conn, today, now, commit=False)
     accounts.schedule_returns(conn, booked, clock)
     _release_returns(conn, now, today)
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
@@ -181,7 +181,7 @@ def _release_credits(conn, now, today, clock):
     account and booking day, the same granularity as the debits (#91)."""
     stamp = db.stamp(now)
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
-    for row in credits.book_due(conn, today, clock):
+    for row in credits.book_due(conn, today, clock, now):
         by_day.setdefault((row["account_id"], row["booking_date"]), []).append(
             dict(row, incoming=True))
     for (account_id, day), rows in sorted(by_day.items()):
@@ -198,7 +198,7 @@ def _release_returns(conn, now, today):
     """Credit back what is due to come back, and tell the client twice: a
     ``pacs.004`` per account, day and original file, and a ``camt.054`` credit
     per account and day - the same granularity as the debits."""
-    returned = accounts.book_returns(conn, today)
+    returned = accounts.book_returns(conn, today, now)
     stamp = db.stamp(now)
     by_file: Dict[tuple, List[Dict[str, Any]]] = {}
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
@@ -207,7 +207,7 @@ def _release_returns(conn, now, today):
         by_day.setdefault((row["account_id"], row["return_due"]), []).append(row)
     # A NACHA account's rejected payments come back too, as return entries,
     # though nothing is credited: they were never debited (#54).
-    for row in accounts.rejected_returns_due(conn, today):
+    for row in accounts.rejected_returns_due(conn, today, now):
         by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
     for (account_id, day, file_id), rows in sorted(by_file.items()):
         account = accounts.require(conn, account_id)
