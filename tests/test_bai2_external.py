@@ -487,8 +487,13 @@ class HowARecordEnds(unittest.TestCase):
 
     A `/` is not a delimiter to split on and a newline is not one either. A line
     starts a record when it begins with a declared code and a separator, and
-    otherwise continues the record above; within a line, a `/` ends a record when
-    a declared code and a separator follow it.
+    otherwise continues the record above.
+
+    One rule covers the `/`, since #150: **a `/` ends a record only when a
+    declared code and a separator follow it - on this line or on the next
+    non-blank one - or when nothing follows at all.** Before #150 that held inside
+    a line but not across a line break, where a trailing `/` always ended the
+    record and was dropped even though the next line continued it.
     """
 
     def test_a_slash_inside_a_field_is_not_a_terminator(self):
@@ -507,6 +512,31 @@ class HowARecordEnds(unittest.TestCase):
         self.assertEqual(len(got), 2, got)
         self.assertTrue(got[0].endswith("FIRST"), got[0])
         self.assertTrue(got[1].endswith("SECOND"), got[1])
+
+    def test_a_slash_at_the_end_of_a_wrapped_line_is_content(self):
+        """#150: the file meant `AB/GS/RP0001` and a character went missing.
+
+        `_ended` took a trailing `/` off every line as a terminator, before the
+        reader knew whether the next line continued this record. Measured at the
+        tags: v0.5.0 read `AB\nGS/RP0001` and 0.6 with #142 read `ABGS/RP0001`,
+        so the slash was lost either way; v0.4.0 refused the file, because a
+        wrapped line was not a thing it read at all.
+        """
+        wrapped = "16,495,125000,Z,AB/\nGS/RP0001,MSG-1,Globex/\n"
+        [(_, record)] = bai2._records(wrapped)
+        self.assertEqual(record, "16,495,125000,Z,AB/GS/RP0001,MSG-1,Globex")
+        # And the field it lands in is one value, not two.
+        self.assertIn("AB/GS/RP0001", record.split(","))
+
+    def test_a_slash_that_really_ends_a_record_is_still_a_terminator(self):
+        # The other side of the rule, so #150 is a rule and not a direction: a
+        # code follows on the next line, so each `/` ends its own record and comes
+        # off. Reverting the fix to "keep every trailing slash" fails here.
+        two = ("16,142,2500,Z,,,FIRST/\n"
+               "16,142,500,Z,,,SECOND/\n")
+        got = [piece for _, piece in bai2._records(two)]
+        self.assertEqual(got, ["16,142,2500,Z,,,FIRST",
+                               "16,142,500,Z,,,SECOND"])
 
     def test_a_slash_before_two_digits_that_are_not_a_code_is_content(self):
         """The near miss, and it has to carry a comma to be one.
