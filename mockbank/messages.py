@@ -255,6 +255,10 @@ class CollectionFile:
     def collections(self) -> List[Collection]:
         return [c for batch in self.batches for c in batch.collections]
 
+    # What the file asks the bank to do, by the name the decision and the
+    # pain.002 know a file's transactions by, whichever way the money moves.
+    payments = collections
+
     def to_json(self):
         """The mock's reading of the file; amounts in minor units."""
         return {"message": self.message, "msg_id": self.msg_id,
@@ -421,9 +425,12 @@ def write_pain002(decision, msg_id, created_at, source="") -> bytes:
                 "PmtInfSts": ("ACCP" if accepted == len(mine)
                               else "RJCT" if not accepted else "PART"),
                 "TxInfAndSts": transactions})
+    # The bank is the agent of whoever sent the file: the debtor's for a
+    # pain.001, the creditor's for a pain.008.
+    side = "CdtrAgt" if isinstance(payment_file, CollectionFile) else "DbtrAgt"
     return schema.serialize(PAIN002, {"CstmrPmtStsRpt": {
         "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at,
-                   "DbtrAgt": {"FinInstnId": {"BICFI": BANK_BIC}}},
+                   side: {"FinInstnId": {"BICFI": BANK_BIC}}},
         "OrgnlGrpInfAndSts": group,
         "OrgnlPmtInfAndSts": batches}})
 

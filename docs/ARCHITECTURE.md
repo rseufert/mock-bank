@@ -115,9 +115,10 @@ writes it (#64).
 ## What is deliberately absent
 
 No transport that needs cryptography (EBICS, SWIFT), no signed or encrypted
-files, no screening, no ledger beyond balances, no direct debits, and no credit
+files, no screening, no ledger beyond balances, and no credit
 to a creditor the bank holds - the only credit it books is a return, which puts
-money back on the account it left. Each is refused by name rather than ignored:
+money back on the account it left. A direct debit (`pain.008`) is decided and
+recorded, and not yet booked (#131). Each is refused by name rather than ignored:
 an encrypted body, an unknown message type and a payment from an account the
 bank does not hold all produce an answer that says what *is* supported. The
 README's out-of-scope table is the authority.

@@ -203,9 +203,11 @@ def _collection_meaning(collection_file, today):
     """What a ``pain.008`` says beyond its structure (#131): the counts and
     sums, a duplicate ``EndToEndId``, a collection date already past and an
     amount in a currency the creditor account is not in - the checks a
-    ``pain.001`` gets, turned round to the creditor's side. Whether the
-    mandate data is complete enough to collect on is a booking question, and
-    waits for booking."""
+    ``pain.001`` gets, turned round to the creditor's side - and the mandate:
+    a collection that names none, or no date it was signed, is ``MD02``. The
+    XSD leaves both optional and a debtor's bank will not collect without
+    them, so the mock requires the two fields and polices nothing else about
+    a mandate."""
     out = []
     header = collection_file.header
     everything = collection_file.collections
@@ -231,6 +233,15 @@ def _collection_meaning(collection_file, today):
                     "error", collection.node.path_of("InstdAmt"), "AM03",
                     "the amount is in %s but the creditor account %s is in %s"
                     % (collection.currency, batch.creditor_account or "", account_ccy)))
+            missing = [name for name, value in (("MndtId", collection.mandate_id),
+                                                ("DtOfSgntr", collection.mandate_signed))
+                       if not value]
+            if missing:
+                out.append(Finding(
+                    "error", collection.path, "MD02",
+                    "the collection states no %s under DrctDbtTx/MndtRltdInf; a "
+                    "direct debit is collected under a mandate and its date of "
+                    "signature" % " and no ".join(missing)))
             e2e = collection.end_to_end_id
             if e2e is not None:
                 if e2e in seen:

@@ -65,7 +65,7 @@ def queue_status(conn, decision, file_id, now, delay_ms=0,
     # report itself covers every batch.
     debtor = next((d.account for d in decision.payments if d.account), None)
     if debtor is None and decision.payment_file is not None:
-        debtor = next((held for held in (accounts.by_iban(conn, b.debtor_account or "")
+        debtor = next((held for held in (accounts.by_iban(conn, _sender(b))
                                          for b in decision.payment_file.batches) if held),
                       None)
     # That account's format decides what the status is: a pain.002, or for a
@@ -95,10 +95,18 @@ def _silent(conn, decision) -> bool:
     """Whether a debtor the bank could read is ``silent``, which sends nothing."""
     batches = decision.payment_file.batches if decision.payment_file else []
     for batch in batches:
-        held = accounts.by_iban(conn, batch.debtor_account or "")
+        held = accounts.by_iban(conn, _sender(batch))
         if held and held["behaviour"] == "silent":
             return True
     return False
+
+
+def _sender(batch) -> str:
+    """The account a batch was sent for: a payment batch's debtor account, a
+    collection batch's creditor account (#131)."""
+    if isinstance(batch, messages.CollectionBatch):
+        return batch.creditor_account or ""
+    return batch.debtor_account or ""
 
 
 def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
