@@ -9,7 +9,9 @@ into an account the bank holds does not credit that account, and a collection
 from one does not debit it.
 
 This module decides, records and books: on its settlement date an accepted
-collection credits the creditor account, and ``outbox`` reports it.
+collection credits the creditor account, and ``outbox`` reports it. The
+debtor's bank can then say no (``refuse``): before settlement that rejects the
+collection, and after it the money goes back.
 """
 from __future__ import annotations
 
@@ -17,14 +19,16 @@ import datetime
 import json
 from typing import Any, Dict, List
 
-from . import accounts, db, schema
-from .accounts import ACCEPTED, REJECTED
+from . import accounts, db, messages, schema
+from .accounts import ACCEPTED, REJECTED, RETURNED
 
 # A behaviour describes the account it is set on. A collection reads the
 # account it collects *from*, when the bank holds it, for these three - the
 # mirror of `accounts.CREDITOR_SIDE`, which a payment reads from the account it
 # pays into. Its own list, because the two are not the same set.
 DEBTOR_SIDE_OF_A_COLLECTION = ("closed-account", "insufficient-funds", "return-later")
+# The first two are read when the file is decided (`_reason`); `return-later`
+# when the collection settles (`_schedule_return`).
 
 # ...and every other behaviour says nothing about an account as the debtor of
 # a collection. Named with the reason, so that none is ignored by omission and
@@ -215,7 +219,145 @@ def book_due(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]:
         conn.execute("UPDATE collection SET booked_at = ? WHERE id = ?",
                      (stamped, row["id"]))
         booked.append(_entry(dict(row, booked_at=stamped)))
+        _schedule_return(conn, clock, row)
     return booked
+
+
+def _schedule_return(conn, clock, row) -> None:
+    """A just-settled collection from a debtor account this bank holds with
+    ``return-later`` goes back ``days`` business days on, with its reason: the
+    mirror of ``accounts.schedule_returns``, read from the other party. A NACHA
+    account's ``R`` code is said in ISO 20022, since the answer is a pacs.004."""
+    debtor = accounts.by_iban(conn, row["debtor_iban"] or "")
+    if debtor is None or debtor["behaviour"] != "return-later":
+        return
+    wanted = dict(accounts.RETURN_LATER, **debtor["parameters"])
+    if wanted["end_to_end_id"] and wanted["end_to_end_id"] != row["end_to_end_id"]:
+        return
+    reason = messages.iso_return_reason(
+        accounts.return_reason(debtor["parameters"], debtor["format"]))
+    if reason not in schema.CODE_SETS["ExternalReturnReason1Code"]:
+        reason = "MS03"
+    due = clock.business_days_after(
+        datetime.date.fromisoformat(row["settlement_date"]), wanted["days"])
+    conn.execute("UPDATE collection SET return_due = ?, return_reason = ? WHERE id = ?",
+                 (due.isoformat(), reason, row["id"]))
+
+
+class Refused(ValueError):
+    """A refusal the bank would not take, and the status that says why."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
+    """The debtor's bank says no to a collection, with ``reason``. Raises
+    ``Refused``; returns the collection and, before settlement, True.
+
+    **Before settlement** the collection is rejected with the reason and never
+    books; the caller queues a further ``pain.002`` for it. **After**, it is a
+    return: the money goes back on the first day the bank can book it - today
+    before the cutoff on a business day - and ``book_returns`` debits the
+    creditor account then.
+
+    Only for a debtor at another bank. One this bank holds decides by its own
+    state and behaviour (Rick, on #131), so there is an account to set that on.
+    """
+    reasons = sorted(set(schema.CODE_SETS["ExternalReturnReason1Code"])
+                     & set(schema.CODE_SETS["ExternalStatusReason1Code"]))
+    if not isinstance(body, dict) or set(body) - {"reason"} or body.get("reason") not in reasons:
+        raise Refused(400, 'the body names the reason, as in {"reason": "MD01"}: one '
+                           "of %s" % ", ".join(reasons))
+    found = db.rows(conn, "SELECT collection.*, file.msg_id, file.message FROM collection"
+                          " JOIN file ON file.id = collection.file_id"
+                          " WHERE end_to_end_id = ? ORDER BY collection.id DESC",
+                    (end_to_end_id,))
+    if not found:
+        raise Refused(404, "no collection with EndToEndId %r" % end_to_end_id)
+    row = found[0]
+    if row["status"] != ACCEPTED or row["return_due"]:
+        raise Refused(409, "collection %s is %s, so there is nothing left to refuse"
+                           % (end_to_end_id, "already on its way back" if row["return_due"]
+                              and row["status"] == ACCEPTED else row["status"]))
+    if accounts.by_iban(conn, row["debtor_iban"] or ""):
+        raise Refused(409, "the debtor account %s is one this bank holds, so its own "
+                           "state and behaviour decide the collection; this is for a "
+                           "debtor at another bank" % row["debtor_iban"])
+    if row["booked_at"] is None:
+        text = "refused by the debtor's bank before settlement"
+        conn.execute("UPDATE collection SET status = ?, reason = ?, reason_text = ?,"
+                     " settlement_date = NULL WHERE id = ?",
+                     (REJECTED, body["reason"], text, row["id"]))
+        conn.commit()
+        return dict(row, status=REJECTED, reason=body["reason"], reason_text=text), True
+    account = accounts.require(conn, row["account_id"])
+    if (account["balance"] - accounts.pending_debits(conn, account["id"])
+            - returns_due(conn, account["id"]) - row["amount"] < -accounts.MAX_BALANCE):
+        raise Refused(409, "returning %s would overdraw account %s past the 18 digits "
+                           "a statement can write" % (end_to_end_id, account["id"]))
+    due = clock.settlement_date(now).isoformat()
+    conn.execute("UPDATE collection SET return_due = ?, return_reason = ? WHERE id = ?",
+                 (due, body["reason"], row["id"]))
+    conn.commit()
+    return dict(row, return_due=due, return_reason=body["reason"]), False
+
+
+def returns_due(conn, account_id: str) -> int:
+    """What is on its way back out of an account: collections to be returned."""
+    return int(db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM collection"
+                            " WHERE account_id = ? AND return_due IS NOT NULL"
+                            " AND returned_at IS NULL", (account_id,))["total"])
+
+
+def book_returns(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]:
+    """Debit every collection whose return day has come, and mark it returned.
+    Returns them, oldest first, as the writers take a returned collection.
+
+    Not out of an account closed meanwhile, for ``book_due`` 's reason: the
+    return day moves on a business day each time it comes due.
+    """
+    due = db.rows(conn, "SELECT collection.*, file.msg_id, file.message,"
+                        " account.closed AS closed FROM collection"
+                        " JOIN file ON file.id = collection.file_id"
+                        " JOIN account ON account.id = collection.account_id"
+                        " WHERE return_due IS NOT NULL AND return_due <= ?"
+                        " AND returned_at IS NULL ORDER BY collection.id",
+                  (today.isoformat(),))
+    later, stamped, returned = clock.next_business_day(today).isoformat(), db.stamp(now), []
+    for row in due:
+        if row.pop("closed"):
+            conn.execute("UPDATE collection SET return_due = ? WHERE id = ?",
+                         (later, row["id"]))
+            continue
+        conn.execute("UPDATE account SET balance = balance - ? WHERE id = ?",
+                     (row["amount"], row["account_id"]))
+        conn.execute("UPDATE collection SET status = ?, returned_at = ? WHERE id = ?",
+                     (RETURNED, stamped, row["id"]))
+        returned.append(_return(dict(row, status=RETURNED, returned_at=stamped)))
+    return returned
+
+
+def _return(row) -> Dict[str, Any]:
+    """A returned collection as the writers take it: a debit, collected, returned."""
+    return dict(row, remittance=json.loads(row["remittance"] or "[]"),
+                collected=True, returned=True)
+
+
+def returned_on(conn, account_id: str, day: str) -> List[Dict[str, Any]]:
+    return [_return(r) for r in db.rows(
+        conn, "SELECT collection.*, file.msg_id FROM collection"
+              " JOIN file ON file.id = collection.file_id"
+              " WHERE account_id = ? AND returned_at IS NOT NULL"
+              " AND return_due = ? ORDER BY collection.id", (account_id, day))]
+
+
+def returned_after(conn, account_id: str, day: str) -> int:
+    """What went back after ``day``: undone to reach that day's closing balance."""
+    return int(db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM collection"
+                            " WHERE account_id = ? AND returned_at IS NOT NULL"
+                            " AND return_due > ?", (account_id, day))["total"])
 
 
 def _entry(row) -> Dict[str, Any]:
@@ -254,6 +396,6 @@ def listing(conn, end_to_end_id=None) -> List[Dict[str, Any]]:
 def counts(conn) -> Dict[str, int]:
     """What ``/_mock/state`` reports about collections."""
     out = {status: db.count(conn, "collection", "status = '%s'" % status)
-           for status in (ACCEPTED, REJECTED)}
+           for status in (ACCEPTED, REJECTED, RETURNED)}
     out["booked"] = db.count(conn, "collection", "booked_at IS NOT NULL")
     return out

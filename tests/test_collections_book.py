@@ -92,7 +92,7 @@ class SettlingOnTheClock(BookingCase):
                           booked["settlement_date"]),
                          (waiting["received_at"], TUESDAY.isoformat(), MONDAY.isoformat()))
         self.assertEqual(self.get("/_mock/state").json()["collections"],
-                         {"accepted": 1, "rejected": 0, "booked": 1})
+                         {"accepted": 1, "rejected": 0, "returned": 0, "booked": 1})
 
     def test_advancing_twice_books_it_once(self):
         before = self.balance("ACME")

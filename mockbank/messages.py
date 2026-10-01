@@ -435,6 +435,25 @@ def write_pain002(decision, msg_id, created_at, source="") -> bytes:
         "OrgnlPmtInfAndSts": batches}})
 
 
+def write_pain002_refusal(collection, msg_id, created_at) -> bytes:
+    """A further status report for one collection the debtor's bank refused
+    before it settled (#131): the original file and batch named, and the one
+    transaction ``RJCT`` with the reason. No group or batch status: the file's
+    own report gave those, and one refusal does not restate them.
+    """
+    tx = {"OrgnlEndToEndId": collection["end_to_end_id"], "TxSts": "RJCT",
+          "StsRsnInf": [_reason(collection["reason"], collection["reason_text"])]}
+    if collection["instruction_id"]:
+        tx["OrgnlInstrId"] = collection["instruction_id"]
+    return schema.serialize(PAIN002, {"CstmrPmtStsRpt": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at,
+                   "CdtrAgt": {"FinInstnId": {"BICFI": BANK_BIC}}},
+        "OrgnlGrpInfAndSts": {"OrgnlMsgId": collection["msg_id"],
+                              "OrgnlMsgNmId": collection["message"]},
+        "OrgnlPmtInfAndSts": [{"OrgnlPmtInfId": collection["pmt_inf_id"],
+                               "TxInfAndSts": [tx]}]}})
+
+
 # A NACHA account's returns carry NACHA's R codes (#54), but its statement and
 # notifications are still ISO 20022 until BAI2, and RtrInf there takes an ISO
 # code: the same reason, in the other vocabulary.
@@ -544,7 +563,13 @@ def _collected(c, day):
     The mirror of a payment's debit: the references are the ``pain.008``'s own,
     with the mandate the money was collected under, and the other party is the
     ``Dbtr`` with its account and its bank. Booked and valued on ``day``.
+
+    With ``returned`` set it is that collection going back: a ``DBIT`` under
+    ``schema.RETURNED_COLLECTION``, with ``RtrInf`` giving the reason and the
+    code the credit was booked under - the mirror of a payment coming back.
     """
+    returned = bool(c.get("returned"))
+    side = "DBIT" if returned else "CRDT"
     amount = schema.Amount(c["amount"], c["currency"])
     refs = {"MsgId": c["msg_id"], "EndToEndId": c["end_to_end_id"]}
     if c["pmt_inf_id"]:
@@ -553,7 +578,7 @@ def _collected(c, day):
         refs["InstrId"] = c["instruction_id"]
     if c["mandate_id"]:
         refs["MndtId"] = c["mandate_id"]
-    tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": "CRDT"}
+    tx = {"Refs": refs, "Amt": amount, "CdtDbtInd": side}
     parties = {}
     if c["debtor_name"]:
         parties["Dbtr"] = {"Pty": {"Nm": c["debtor_name"][:140]}}
@@ -567,11 +592,17 @@ def _collected(c, day):
         tx["RltdAgts"] = {"DbtrAgt": {"FinInstnId": {"BICFI": c["debtor_bic"]}}}
     if c["remittance"]:
         tx["RmtInf"] = {"Ustrd": list(c["remittance"])}
-    domain, family, sub = schema.COLLECTED_CREDIT
+    if returned:
+        original = schema.COLLECTED_CREDIT
+        tx["RtrInf"] = {
+            "OrgnlBkTxCd": {"Domn": {"Cd": original[0], "Fmly": {
+                "Cd": original[1], "SubFmlyCd": original[2]}}},
+            "Rsn": {"Cd": c["return_reason"]}}
+    domain, family, sub = schema.RETURNED_COLLECTION if returned else schema.COLLECTED_CREDIT
     return {
-        "Amt": amount, "CdtDbtInd": "CRDT", "Sts": {"Cd": "BOOK"},
+        "Amt": amount, "CdtDbtInd": side, "Sts": {"Cd": "BOOK"},
         "BookgDt": {"Dt": day}, "ValDt": {"Dt": day},
-        "AcctSvcrRef": "MB-COL-%d" % c["id"],
+        "AcctSvcrRef": ("MB-CRT-%d" if returned else "MB-COL-%d") % c["id"],
         "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
         "NtryDtls": [{"TxDtls": [tx]}]}
 
@@ -726,6 +757,21 @@ def write_pacs004(account, payments, day, msg_id, created_at) -> bytes:
               "RtrRsnInf": [{"Rsn": {"Cd": p["return_reason"]}}]}
         if p["instruction_id"]:
             tx["OrgnlInstrId"] = p["instruction_id"]
+        if p.get("collected"):
+            # A collection going back (#131): the account holder was the
+            # creditor, and the debtor is the other party.
+            tx["RtrId"] = "MB-CRT-%d" % p["id"]
+            original = {"Amt": {"InstdAmt": amount}, "Cdtr": party,
+                        "CdtrAcct": {"Id": {"IBAN": account["iban"]}}}
+            if p["debtor_name"]:
+                original["Dbtr"] = {"Pty": {"Nm": p["debtor_name"][:140]}}
+            if p["debtor_iban"]:
+                original["DbtrAcct"] = {"Id": (
+                    {"IBAN": p["debtor_iban"]} if schema.iban_is_valid(p["debtor_iban"])
+                    else {"Othr": {"Id": p["debtor_iban"]}})}
+            tx["OrgnlTxRef"] = original
+            transactions.append(tx)
+            continue
         original = {"Amt": {"InstdAmt": amount}, "Dbtr": party,
                     "DbtrAcct": {"Id": {"IBAN": account["iban"]}}}
         if p["creditor_name"]:

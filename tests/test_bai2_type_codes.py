@@ -119,6 +119,15 @@ class EachCodeIsTheOneABankWrites(unittest.TestCase):
         [written] = texts(FOUR, "165")
         self.assertTrue(written.startswith("ACH Debit Collection,"), written)
 
+    def test_a_collection_that_went_back_is_557(self):
+        # The table is the evidence, as for 257, its twin on the credit side:
+        # the sample's only 557 is a credit *received* going back, not a debit
+        # collected. No sample shows a collection returned.
+        self.assertEqual(bai2.RETURNED_COLLECTION, "557")
+        self.assertEqual(table()["557"], ("DB", "Detail", "Individual ACH Return Item"))
+        [written] = texts(FOUR, "557")
+        self.assertTrue(written.startswith("ACH Credit Receipt Return,"), written)
+
     def test_none_is_left_a_placeholder(self):
         self.assertEqual(bai2.PLACEHOLDER_CODES, ())
 
@@ -127,7 +136,8 @@ class EachCodeIsTheOneABankWrites(unittest.TestCase):
         # examples/payment_run.py knows: the change must not move one across.
         codes = table()
         for code, kind in ((bai2.DEBIT, "DB"), (bai2.RETURNED_CREDIT, "CR"),
-                           (bai2.RECEIVED_CREDIT, "CR"), (bai2.COLLECTED_CREDIT, "CR")):
+                           (bai2.RECEIVED_CREDIT, "CR"), (bai2.COLLECTED_CREDIT, "CR"),
+                           (bai2.RETURNED_COLLECTION, "DB")):
             with self.subTest(code=code):
                 self.assertEqual(codes[code][0], kind)
                 self.assertEqual("CR" if 100 <= int(code) <= 399 else "DB", kind)

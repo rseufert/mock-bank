@@ -914,7 +914,8 @@ def payment_counts(conn):
 DUE_DATES = (("payment", "settlement_date", "booked_at", "settled"),
              ("payment", "return_due", "returned_at", "came back"),
              ("credit", "booking_date", "booked_at", "arrived"),
-             ("collection", "settlement_date", "booked_at", "was collected"))
+             ("collection", "settlement_date", "booked_at", "was collected"),
+             ("collection", "return_due", "returned_at", "went back"))
 
 
 def booked_on(conn, day: str) -> List[str]:
