@@ -132,7 +132,7 @@ jobs:
               && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
             sleep 0.25
           done
-          cd examples && python -m unittest -v test_pay_invoices
+          python -m unittest -v examples.test_pay_invoices
       - name: Run the procure_to_pay example against all three mocks from PyPI
         run: |
           set -euo pipefail
@@ -159,7 +159,7 @@ jobs:
               && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
             sleep 0.25
           done
-          cd examples && python -m unittest -v test_procure_to_pay
+          python -m unittest -v examples.test_procure_to_pay
       - name: Run the payment_run example against mock-sap from PyPI
         run: |
           set -euo pipefail
@@ -176,10 +176,10 @@ jobs:
               && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
             sleep 0.25
           done
-          cd examples && python -m unittest -v test_payment_run
+          python -m unittest -v examples.test_payment_run
           # The same tests with the run paying by ACH: the 0.3 milestone's
           # definition of done (#55).
-          PAYMENT_RUN_FORMAT=nacha python -m unittest -v test_payment_run
+          PAYMENT_RUN_FORMAT=nacha python -m unittest -v examples.test_payment_run
       - name: The tour again, against a mock trading through a folder
         run: |
           set -eu
@@ -273,6 +273,25 @@ jobs:
         with:
           name: distributions
           path: dist/*
+      - name: The worked examples are importable from the installed wheel
+        run: |
+          set -eu
+          # #169: mock-films plays this choreography across three mocks and had no
+          # way to import it after `pip install mock-bank`. From /tmp, so the
+          # repository's own `examples/` cannot answer instead of the wheel, and
+          # with nothing but mock-bank installed, because the examples reach
+          # mock-sap and mock-edi over HTTP and must not import them.
+          cd /tmp
+          python - <<'PY'
+          from mockbank.examples import (bank_messages, client, invoice_check,
+                                         payment_run, procure_to_pay, statement)
+          import sys
+          assert procure_to_pay.ProcureToPay
+          assert payment_run.PaymentRun
+          leaked = [n for n in sys.modules if "mock_sap" in n or "mock_edi" in n]
+          assert not leaked, leaked
+          print("mockbank.examples imports from the wheel:", procure_to_pay.__file__)
+          PY
 
   docker:
     name: container image

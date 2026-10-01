@@ -52,9 +52,9 @@ import urllib.parse
 import urllib.request
 from decimal import Decimal
 
-from invoice_check import PO_SERVICE, Sap
-from payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, odata
-from procure_to_pay import DurableInvoiceCheck, ProcureToPay, odata_string
+from .invoice_check import PO_SERVICE, Sap
+from .payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, odata
+from .procure_to_pay import DurableInvoiceCheck, ProcureToPay, odata_string
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 EDI = os.environ.get("EDI_URL", "http://127.0.0.1:8080")

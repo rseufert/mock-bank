@@ -43,4 +43,11 @@ Changelog = "https://github.com/rseufert/mock-bank/blob/main/CHANGELOG.md"
 mock-bank = "mockbank.__main__:main"
 
 [tool.setuptools]
-packages = ["mockbank", "mockbank.routes"]
+# `mockbank.examples` is `examples/` mapped onto an import path, not a copy and
+# not a move (#169): mock-films plays this choreography and could not reach it
+# after `pip install mock-bank`, because `examples/` shipped in the sdist and in
+# no importable place. The files stay where every README link points at them.
+packages = ["mockbank", "mockbank.routes", "mockbank.examples"]
+
+[tool.setuptools.package-dir]
+"mockbank.examples" = "examples"
