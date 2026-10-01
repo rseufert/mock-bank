@@ -193,9 +193,16 @@ MAX_BALANCE = 10 ** 18 - 1
 def still_to_arrive(conn, account_id: str) -> int:
     """What will be credited to an account without anyone asking again, in minor
     units: payments due back under ``return-later``, and money arriving (#91)
-    that has not booked yet. A balance is only safe if it has room for these."""
+    that has not booked yet. A balance is only safe if it has room for these.
+
+    A payment that was never debited will never be credited back, however its
+    return is answered, so it reserves nothing. A NACHA account's rejections are
+    given a return day too (#54, option (a)), and counting those reserved room
+    for money that was not coming (#144).
+    """
     returns = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
                            " WHERE account_id = ? AND return_due IS NOT NULL"
+                           " AND booked_at IS NOT NULL"
                            " AND returned_at IS NULL", (account_id,))["total"]
     credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM credit"
                            " WHERE account_id = ? AND booked_at IS NULL",
