@@ -32,7 +32,7 @@ over what it released; #8 builds the rest of the mailbox on it.
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import accounts, bai2, credits, db, direct_debit, messages, nacha
 
@@ -65,28 +65,12 @@ def queue_status(conn, decision, file_id, now, delay_ms=0,
         return []
     if file_id is None and _silent(conn, decision):
         return []
-    # A file with batches from several debtor accounts gets one status, and
-    # it is attributed to the first debtor account the bank holds; the
-    # report itself covers every batch.
-    debtor = next((d.account for d in decision.payments if d.account), None)
-    if debtor is None and decision.payment_file is not None:
-        debtor = next((held for held in (accounts.by_iban(conn, _sender(b))
-                                         for b in decision.payment_file.batches) if held),
-                      None)
-    # That account's format decides what the status is: a pain.002, or for a
-    # NACHA account the plain acknowledgement (#53).
-    if debtor is not None and debtor.get("format") == "nacha":
-        kind, prefix = nacha.ACK, "MB-ACK-"
-    else:
-        kind, prefix = messages.PAIN002.name, "MB-P002-"
+    debtor, kind, prefix = _status_shape(conn, decision)
     if file_id is not None:
         msg_id = "%s%06d" % (prefix, file_id)
     else:
         msg_id = "%sN%06d" % (prefix, db.next_value(conn, "pain002-unread"))
-    if kind == nacha.ACK:
-        body = nacha.acknowledgement(decision, msg_id, now, source)
-    else:
-        body = messages.write_pain002(decision, msg_id, now, source).decode("utf-8")
+    body = _status_body(decision, kind, msg_id, now, source)
     due = now + datetime.timedelta(milliseconds=delay_ms)
     account = debtor["id"] if debtor else None
     cursor = conn.execute(
@@ -94,6 +78,59 @@ def queue_status(conn, decision, file_id, now, delay_ms=0,
         (kind, account, file_id, db.stamp(due), body))
     return [{"id": cursor.lastrowid, "key": "m%d" % cursor.lastrowid, "type": kind,
              "account": account, "due_at": db.stamp(due)}]
+
+
+def _status_shape(conn, decision):
+    """Which account a file's status is attributed to, and what kind it is.
+
+    A file with batches from several debtor accounts gets one status, attributed
+    to the first debtor account the bank holds; the report itself covers every
+    batch. That account's format decides the kind: a `pain.002`, or for a NACHA
+    account the plain acknowledgement (#53).
+    """
+    debtor = next((d.account for d in decision.payments if d.account), None)
+    if debtor is None and decision.payment_file is not None:
+        debtor = next((held for held in (accounts.by_iban(conn, _sender(b))
+                                         for b in decision.payment_file.batches) if held),
+                      None)
+    if debtor is not None and debtor.get("format") == "nacha":
+        return debtor, nacha.ACK, "MB-ACK-"
+    return debtor, messages.PAIN002.name, "MB-P002-"
+
+
+def _status_body(decision, kind, msg_id, now, source) -> str:
+    """The status report itself, as it goes into the queue."""
+    if kind == nacha.ACK:
+        return nacha.acknowledgement(decision, msg_id, now, source)
+    return messages.write_pain002(decision, msg_id, now, source).decode("utf-8")
+
+
+# The `msg_id` a trial write uses. It never reaches the queue, and it is the
+# bank's own value rather than the file's, so it cannot be the thing that fails.
+PROBE_MSG_ID = "MB-P002-CHECK"
+
+
+def unanswerable(conn, decision, now, source="") -> Optional[str]:
+    """Why the bank could not write a status report for this file, or None.
+
+    Asked at the door, before anything is booked, because a value the bank cannot
+    echo makes the answer unwritable and there is nothing useful to do with the
+    file afterwards: #166's cases d and e are a 36-character `MsgId` and an
+    18-digit amount, each of which the `pain.002` has to carry back and cannot.
+    The same shape as `credits.create` - write it once, now, the way the real
+    write will, and refuse the input if the writer refuses.
+
+    Written with a probe `msg_id` and thrown away; `queue_status` writes the real
+    one through the same two functions, so the trial cannot drift from it.
+    """
+    if not decision.reported:
+        return None
+    _debtor, kind, _prefix = _status_shape(conn, decision)
+    try:
+        _status_body(decision, kind, PROBE_MSG_ID, now, source)
+    except ValueError as error:
+        return str(error)
+    return None
 
 
 def _silent(conn, decision) -> bool:
