@@ -22,8 +22,8 @@ FRIDAY, MONDAY = datetime.date(2026, 10, 2), datetime.date(2026, 10, 5)
 def debit_file(entries, company=ACME_NUMBER, sec="PPD", effective=FRIDAY, service=225,
                modifier="A"):
     """A NACHA file of one batch. Each entry is a dict: `id`, `cents`, and
-    optionally `code` (27), `account`, `routing`, `name` and `type`, the two
-    characters of discretionary data."""
+    optionally `code` (27), `account`, `routing`, `name`, `type` - the two
+    characters of discretionary data - and `note`, an addenda's text."""
     lines, entry_hash, totals = [], 0, {"credit": 0, "debit": 0}
     for number, entry in enumerate(entries, start=1):
         code, routing = entry.get("code", "27"), entry.get("routing", THEIRS)
@@ -35,8 +35,14 @@ def debit_file(entries, company=ACME_NUMBER, sec="PPD", effective=FRIDAY, servic
             "DFI account number": entry.get("account", "12345678"), "amount": entry["cents"],
             "individual identification number": entry["id"],
             "individual name": entry.get("name", "Receiver " + entry["id"]),
-            "discretionary data": entry.get("type", ""), "addenda record indicator": 0,
+            "discretionary data": entry.get("type", ""),
+            "addenda record indicator": 1 if entry.get("note") else 0,
             "trace number": "12104288%07d" % number}))
+        if entry.get("note"):
+            lines.append(nacha.line(nacha.RECORDS["7"], **{
+                "record type code": 7, "addenda type code": 5,
+                "payment related information": entry["note"],
+                "addenda sequence number": 1, "entry detail sequence number": number}))
     control = {"entry/addenda count": len(lines), "entry hash": entry_hash % 10 ** 10,
                "total debit entry dollar amount": totals["debit"],
                "total credit entry dollar amount": totals["credit"]}
@@ -265,6 +271,17 @@ class BookingIt(CollectingCase):
                        "<InstrId>121042880000001</InstrId>"):
             self.assertIn(wanted, note["body"])
         self.assertNotIn("<MndtId>", note["body"])
+
+    def test_an_addenda_is_the_collections_remittance_line(self):
+        self.request("PATCH", "/_mock/accounts/ACME", body={"currency": "USD"})
+        body = debit_file([{"id": "INV-1", "cents": 1250, "note": "DUES OCTOBER 2026"}])
+        resp = self.post("/_mock/validate", body=body, headers={"Accept": "application/json"})
+        self.assertEqual((resp.status, resp.json()["findings"]), (200, []))
+        self.post("/payments", body=body)
+        self.assertEqual(self.collection("INV-1")["remittance"], ["DUES OCTOBER 2026"])
+        self.post("/_mock/advance?to=" + FRIDAY.isoformat())
+        [note] = self.get("/_mock/mailbox?type=camt.054").json()
+        self.assertIn("<Ustrd>DUES OCTOBER 2026</Ustrd>", note["body"])
 
     def test_it_waits_in_the_queue_under_the_key_it_arrives_with(self):
         self.request("PATCH", "/_mock/accounts/ACME", body={"currency": "USD"})
