@@ -108,6 +108,7 @@ sends them.
 | Message | Direction | When the mock sends it | What it carries |
 | --- | --- | --- | --- |
 | `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors |
+| `pain.008` | In | You send it | Direct debits: the creditor account, and collections from debtors under their mandates. **Read and validated, not yet booked** (#131): `POST /_mock/validate` reads it, and `POST /payments` refuses it by name until collections are booked |
 | `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
@@ -116,7 +117,8 @@ sends them.
 | NACHA in, returns out (`R01`, `R02`, `R03`), BAI2 statements out | Both | As above, in US formats | The same choreography for ACH, for an account whose `format` is `nacha`: a plain acknowledgement where an ISO 20022 account gets a `pain.002`, a NACHA return file where it gets a `pacs.004`, and a BAI2 statement where it gets a `camt.053` |
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
-accepted as well and read into the same model. The mock writes
+accepted as well and read into the same model; `pain.008.001.08`, from the
+same 2019 set, is read and validated. The mock writes
 `pain.002.001.10`, `camt.054.001.08`, `camt.053.001.08`, `camt.052.001.08` and
 `pacs.004.001.09`, the versions that go with `pain.001.001.09` and that most banks accept today. That is a choice, not
 the only right answer; so are the others the standard leaves open, and the
@@ -544,7 +546,7 @@ like mock-edi's so the two feel the same.
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole. What is still due on a day that becomes one moves to the next business day; today is refused once something has booked on it |
 | Clock | `POST /_mock/advance` | `?days=N` (calendar days) or `?to=YYYY-MM-DD`; answers with the business days crossed, and releases whatever came due |
-| Validate only | `POST /_mock/validate` | A `pain.001` or a NACHA file. Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
+| Validate only | `POST /_mock/validate` | A `pain.001`, a `pain.008` or a NACHA file. Findings in prose, one line each; `200` when clean, `422` when not; nothing stored. `Accept: application/json` adds the mock's reading of the file |
 | Folder in and out | `--drop-dir`, `--pickup-dir`, `GET /_mock/drop`, `POST /_mock/drop/scan` | Most bank connections are still SFTP folders, so the bank reads one directory and writes another |
 
 `GET /_mock/mailbox?raw` returns the message bodies one after another, each
@@ -972,7 +974,7 @@ than half-supporting it.
 | --- | --- |
 | EBICS, SWIFT FIN and SWIFTNet transport | Both need certificates and cryptography, which breaks zero dependencies; the same call mock-edi made on S/MIME. HTTP and folders cover testing. |
 | Signed or encrypted files | Same reason; an encrypted file is refused with a message saying so. |
-| Direct debits (`pain.008`) | Collections are a second choreography; they can follow once credit transfers are solid. |
+| Direct debits (`pain.008`) | **In progress in 0.6** (#131): a `pain.008` is read and validated today, and booking collections is the next step. Until it lands, the pipeline refuses one by name. |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
 
@@ -985,6 +987,7 @@ than half-supporting it.
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Done.** `procure_to_pay`'s ten tests pass in CI against mock-sap and mock-edi from PyPI |
 | 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source; an intraday `camt.052` on request | **Done.** What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
+| 0.6 | Direct debits: `pain.008.001.08` read, validated and booked as collections, a debtor the bank holds deciding by its own state and behaviour, and the debtor's bank refusing or returning one; a wrapped BAI2 line joined without its line break (#142) | In progress. Each step leaves the mock working; the README says what is booked at each |
 
 ## Contributing
 

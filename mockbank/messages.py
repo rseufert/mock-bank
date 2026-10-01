@@ -28,6 +28,8 @@ from xml.etree import ElementTree as ET
 from . import schema
 
 READABLE = [name for name, m in schema.MESSAGES.items() if m.direction == "in"]
+# Of those, what asks the bank to collect rather than to pay (#131).
+COLLECTIONS = [name for name in READABLE if name.startswith("pain.008.")]
 
 
 class Payment:
@@ -146,6 +148,125 @@ class PaymentFile:
         return "PaymentFile(%s, %s, %d batches)" % (self.message, self.msg_id, len(self.batches))
 
 
+class Collection:
+    """One direct debit: ``DrctDbtTxInf``, collected from its debtor under a
+    mandate. The mirror of a ``Payment``: the debtor is the other party."""
+
+    def __init__(self, node):
+        self.node = node
+        ids = node.get("PmtId", {})
+        self.end_to_end_id = _text(ids.get("EndToEndId"))
+        self.instruction_id = _text(ids.get("InstrId"))
+        amount = node.get("InstdAmt")
+        self.amount = amount.minor if isinstance(amount, schema.Amount) else None
+        self.currency = amount.ccy if isinstance(amount, schema.Amount) else None
+        self.sequence_type = _text(node.get("PmtTpInf", {}).get("SeqTp"))
+        direct_debit = node.get("DrctDbtTx", {})
+        mandate = direct_debit.get("MndtRltdInf", {})
+        self.mandate_id = _text(mandate.get("MndtId"))
+        self.mandate_signed = _text(mandate.get("DtOfSgntr"))
+        self.creditor_scheme_id = _scheme_id(direct_debit.get("CdtrSchmeId"))
+        self.debtor_name = _text(node.get("Dbtr", {}).get("Nm"))
+        self.debtor_account = _account_id(node.get("DbtrAcct"))
+        self.debtor_bic = _bic(node.get("DbtrAgt"))
+        remittance = node.get("RmtInf", {})
+        self.remittance = [_text(line) for line in remittance.get("Ustrd", [])]
+
+    @property
+    def path(self):
+        return self.node.path
+
+    def to_json(self):
+        return {"end_to_end_id": self.end_to_end_id, "instruction_id": self.instruction_id,
+                "amount": self.amount, "currency": self.currency,
+                "sequence_type": self.sequence_type, "mandate_id": self.mandate_id,
+                "mandate_signed": self.mandate_signed,
+                "creditor_scheme_id": self.creditor_scheme_id,
+                "debtor_name": self.debtor_name, "debtor_account": self.debtor_account,
+                "debtor_bic": self.debtor_bic, "remittance": self.remittance}
+
+    def __repr__(self):
+        return "Collection(%s, %s %s)" % (self.end_to_end_id, self.amount, self.currency)
+
+
+class CollectionBatch:
+    """One ``PmtInf`` of a ``pain.008``: one creditor account, one collection date.
+
+    A transaction's own sequence type and creditor scheme id win over the
+    batch's, which is where most files put them.
+    """
+
+    def __init__(self, node):
+        self.node = node
+        self.pmt_inf_id = _text(node.get("PmtInfId"))
+        self.requested_collection_date = _requested_date(node.get("ReqdColltnDt"))
+        self.creditor_name = _text(node.get("Cdtr", {}).get("Nm"))
+        self.creditor_account = _account_id(node.get("CdtrAcct"))
+        self.creditor_account_currency = _text(node.get("CdtrAcct", {}).get("Ccy"))
+        self.creditor_bic = _bic(node.get("CdtrAgt"))
+        self.nb_of_txs = _count(node.get("NbOfTxs"))
+        self.ctrl_sum = _decimal(node.get("CtrlSum"))
+        sequence = _text(node.get("PmtTpInf", {}).get("SeqTp"))
+        scheme = _scheme_id(node.get("CdtrSchmeId"))
+        self.collections: List[Collection] = []
+        for tx in node.get("DrctDbtTxInf", []):
+            collection = Collection(tx)
+            collection.sequence_type = collection.sequence_type or sequence
+            collection.creditor_scheme_id = collection.creditor_scheme_id or scheme
+            self.collections.append(collection)
+
+    @property
+    def path(self):
+        return self.node.path
+
+    def to_json(self):
+        when = self.requested_collection_date
+        return {"pmt_inf_id": self.pmt_inf_id,
+                "requested_collection_date": when.isoformat() if when else None,
+                "creditor_name": self.creditor_name,
+                "creditor_account": self.creditor_account,
+                "creditor_account_currency": self.creditor_account_currency,
+                "creditor_bic": self.creditor_bic,
+                "collections": [c.to_json() for c in self.collections]}
+
+    def __repr__(self):
+        return "CollectionBatch(%s, %d collections)" % (self.pmt_inf_id,
+                                                         len(self.collections))
+
+
+class CollectionFile:
+    """A ``pain.008``: its group header and its batches (#131)."""
+
+    def __init__(self, message, document):
+        self.message = message.name
+        body = document.get("CstmrDrctDbtInitn", {})
+        header = body.get("GrpHdr", {})
+        self.node = body
+        self.header = header
+        self.msg_id = _text(header.get("MsgId"))
+        self.creation_time = _text(header.get("CreDtTm"))
+        self.initiating_party = _text(header.get("InitgPty", {}).get("Nm"))
+        self.nb_of_txs = _count(header.get("NbOfTxs"))
+        self.ctrl_sum = _decimal(header.get("CtrlSum"))
+        self.batches: List[CollectionBatch] = [CollectionBatch(b)
+                                               for b in body.get("PmtInf", [])]
+
+    @property
+    def collections(self) -> List[Collection]:
+        return [c for batch in self.batches for c in batch.collections]
+
+    def to_json(self):
+        """The mock's reading of the file; amounts in minor units."""
+        return {"message": self.message, "msg_id": self.msg_id,
+                "creation_time": self.creation_time,
+                "initiating_party": self.initiating_party,
+                "batches": [b.to_json() for b in self.batches]}
+
+    def __repr__(self):
+        return "CollectionFile(%s, %s, %d batches)" % (self.message, self.msg_id,
+                                                       len(self.batches))
+
+
 def read_pain001(data: bytes) -> PaymentFile:
     """The file as a PaymentFile. Raises ValueError for something that is
     not a pain.001 the mock reads; ``validate`` says why in a finding."""
@@ -156,10 +277,13 @@ def read_pain001(data: bytes) -> PaymentFile:
     return from_tree(root)
 
 
-def from_tree(root) -> PaymentFile:
+def from_tree(root):
+    """A ``PaymentFile`` for a ``pain.001``, a ``CollectionFile`` for a ``pain.008``."""
     message = schema.identify(root)
     if message is None or message.name not in READABLE:
         raise ValueError("not a message the mock reads (%s)" % ", ".join(READABLE))
+    if message.name in COLLECTIONS:
+        return CollectionFile(message, schema.read(message, root))
     return PaymentFile(message, schema.read(message, root))
 
 
@@ -178,6 +302,17 @@ def _account_id(account) -> Optional[str]:
 
 def _bic(agent) -> Optional[str]:
     return _text((agent or {}).get("FinInstnId", {}).get("BICFI"))
+
+
+def _scheme_id(party) -> Optional[str]:
+    """A creditor scheme identifier: ``CdtrSchmeId/Id/PrvtId/Othr/Id`` in a
+    SEPA file, where the rulebook puts it, or the same under ``OrgId``."""
+    ident = (party or {}).get("Id", {})
+    for kind in ("PrvtId", "OrgId"):
+        for other in ident.get(kind, {}).get("Othr", []):
+            if isinstance(other.get("Id"), str):
+                return other["Id"]
+    return None
 
 
 def _clearing_id(agent) -> Optional[str]:

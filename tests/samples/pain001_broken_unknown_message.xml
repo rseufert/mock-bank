@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- A clean pain.008.001.08: one batch of four euro payments from ACME.
+<!-- A clean pain.007.001.09 (a reversal, which the mock does not read): one batch of four euro payments from ACME.
      Every IBAN and BIC is syntactically valid and belongs to no real bank. -->
-<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.008.001.08">
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.007.001.09">
   <CstmrCdtTrfInitn>
     <GrpHdr>
       <MsgId>ACME-20261001-0001</MsgId>

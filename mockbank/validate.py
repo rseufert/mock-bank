@@ -68,7 +68,7 @@ def validate(data, content_type=None, today=None):
 
 
 def inspect(data, content_type=None, today=None):
-    """``(PaymentFile or None, [Finding])``; never raises."""
+    """``(PaymentFile, CollectionFile or None, [Finding])``; never raises."""
     try:
         return _inspect(data, content_type, today or datetime.date.today())
     except Exception as exc:  # the promise is findings, never a traceback
@@ -86,8 +86,12 @@ def render(finding) -> str:
     return "%s %s at %s: %s" % (finding.level, finding.code or "-", finding.path, finding.text)
 
 
-def _refusal(text):
+def refusal(text):
+    """A finding that refuses the whole file, in words."""
     return Finding("error", FILE, schema.STRUCTURAL, text)
+
+
+_refusal = refusal
 
 
 def _inspect(data, content_type, today):
@@ -145,7 +149,10 @@ def _inspect(data, content_type, today):
     findings += [Finding("error", path, "AC01", "%s fails its check digits" % iban.strip())
                  for path, iban in ibans if path not in malformed and not schema.iban_is_valid(iban)]
     payment_file = messages.from_tree(root)
-    findings += _meaning(payment_file, today)
+    if isinstance(payment_file, messages.CollectionFile):
+        findings += _collection_meaning(payment_file, today)
+    else:
+        findings += _meaning(payment_file, today)
     return payment_file, findings
 
 
@@ -192,12 +199,55 @@ def _meaning(payment_file, today):
     return out
 
 
-def _count_and_sum(node, what, declared_count, declared_sum, payments):
+def _collection_meaning(collection_file, today):
+    """What a ``pain.008`` says beyond its structure (#131): the counts and
+    sums, a duplicate ``EndToEndId``, a collection date already past and an
+    amount in a currency the creditor account is not in - the checks a
+    ``pain.001`` gets, turned round to the creditor's side. Whether the
+    mandate data is complete enough to collect on is a booking question, and
+    waits for booking."""
+    out = []
+    header = collection_file.header
+    everything = collection_file.collections
+    if isinstance(header, schema.Node):
+        out += _count_and_sum(header, "the file", collection_file.nb_of_txs,
+                              collection_file.ctrl_sum, everything, "collection")
+    seen = {}
+    for batch in collection_file.batches:
+        node = batch.node
+        if batch.collections:
+            out += _count_and_sum(node, "batch %s" % batch.pmt_inf_id, batch.nb_of_txs,
+                                  batch.ctrl_sum, batch.collections, "collection")
+        when = batch.requested_collection_date
+        if when is not None and when < today:
+            out.append(Finding(
+                "warning", node.path_of("ReqdColltnDt"), "DT01",
+                "the requested collection date %s is in the past; the bank collects "
+                "on the next business day instead" % when.isoformat()))
+        account_ccy = batch.creditor_account_currency
+        for collection in batch.collections:
+            if account_ccy and collection.currency and collection.currency != account_ccy:
+                out.append(Finding(
+                    "error", collection.node.path_of("InstdAmt"), "AM03",
+                    "the amount is in %s but the creditor account %s is in %s"
+                    % (collection.currency, batch.creditor_account or "", account_ccy)))
+            e2e = collection.end_to_end_id
+            if e2e is not None:
+                if e2e in seen:
+                    out.append(Finding(
+                        "error", collection.node["PmtId"].path_of("EndToEndId"), "AM05",
+                        "EndToEndId %s already appears at %s" % (e2e, seen[e2e])))
+                else:
+                    seen[e2e] = collection.path
+    return out
+
+
+def _count_and_sum(node, what, declared_count, declared_sum, payments, noun="payment"):
     out = []
     if declared_count is not None and declared_count != len(payments):
         out.append(Finding("error", node.path_of("NbOfTxs"), "AM18",
-                           "NbOfTxs says %d but %s holds %d payment%s"
-                           % (declared_count, what, len(payments),
+                           "NbOfTxs says %d but %s holds %d %s%s"
+                           % (declared_count, what, len(payments), noun,
                               "" if len(payments) == 1 else "s")))
     amounts = [(p.amount, p.currency) for p in payments]
     if declared_sum is not None and all(a is not None for a, _ in amounts):
