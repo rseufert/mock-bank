@@ -219,6 +219,49 @@ class ARealBanksFile(unittest.TestCase):
                          "ACME      LTD       ")
         # Outside the record: the terminator's trailing whitespace still goes.
         self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,DONE/   \n"), "DONE")
+        # And the end of the file continues nothing, so an unterminated last
+        # record's trailing whitespace is padding around it, not content. With
+        # no terminator and no line after it, this is the one case where the
+        # lookahead has nothing to look at.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,TAIL   \n"), "TAIL")
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,TAIL   "), "TAIL")
+
+    def test_padding_every_line_changes_only_the_two_wrapped_records(self):
+        """Trailing whitespace is content only where a wrap joins to it.
+
+        The space before a wrap has to survive, because the join inserts nothing.
+        Everywhere else trailing whitespace is padding *around* a record and must
+        come off, as it did before #142 - a `49,+125000,2   ` that ends its record
+        states 2, not `2   `. A first draft of this kept it on every line with no
+        terminator, which read 17 of `sample4`'s 31 records differently once its
+        lines were padded; v0.5.0 read none differently. moov draws the line in
+        the same place, trimming at its `fullLine` label and leaving the buffer
+        alone on the continuation path.
+
+        So: pad every line of all five files and the fields must not move, except
+        in the one record per file that is actually wrapped, where the padding now
+        falls inside the field by design.
+        """
+        wrapped_at = {"bai2-sample3.txt": 18, "bai2-sample5.txt": 62}
+        for name in SAMPLES:
+            with self.subTest(sample=name):
+                raw = sample(name)
+                padded = "".join(line.rstrip("\r\n") + "   " + "\n"
+                                 for line in raw.splitlines(True))
+                before = list(bai2._fold(raw))
+                after = list(bai2._fold(padded))
+                self.assertEqual(len(before), len(after))
+                moved = [b.line for b, a in zip(before, after)
+                         if list(b.values) != list(a.values)]
+                self.assertEqual(
+                    moved, [wrapped_at[name]] if name in wrapped_at else [],
+                    "%s: padding moved fields in records that are not wrapped" % name)
+                # Both readers, on both texts: a rule only one of them follows is
+                # the defect this file exists to catch.
+                self.assertEqual(payment_run.bai2_records(raw),
+                                 [[r.code] + list(r.values) for r in before])
+                self.assertEqual(payment_run.bai2_records(padded),
+                                 [[r.code] + list(r.values) for r in after])
 
     def test_sample3_adds_up_account_by_account(self):
         # Packed records and a wrapped one: if either were read wrong, a

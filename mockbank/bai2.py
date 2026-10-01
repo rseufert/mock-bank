@@ -903,6 +903,22 @@ SPLITS_A_RECORD = re.compile(r"(/[ \t]*(?:%s))%s"
                              % (_CODES, re.escape(SEPARATOR)))
 
 
+def _continues(lines: List[str], number: int) -> bool:
+    """Whether the line after `lines[number - 1]` continues its record.
+
+    The next line that is not blank, since a blank line is skipped rather than
+    treated as a break. A line continues the one above when it does not begin
+    with a declared code and a separator - the same test `_records` applies, so
+    the two cannot disagree about where a record ends. The end of the file
+    continues nothing.
+    """
+    for later in lines[number:]:
+        if not later.rstrip():
+            continue
+        return not STARTS_RECORD.match(later.lstrip())
+    return False
+
+
 def _records(text: str):
     """(line number, the record's text) for each record, in order.
 
@@ -910,18 +926,26 @@ def _records(text: str):
     somebody looking for the problem should open.
     """
     out = []
-    for number, raw_line in enumerate(text.splitlines(), start=1):
-        # Trailing whitespace *after* a terminator is outside the record and
-        # comes off. With no terminator the line may be continued, and then its
-        # trailing spaces are the last field's own padding: stripping them ran
-        # `PAYMENT FOR ` straight into `INVOICE 12`, and a fixed-width `ACME    `
-        # into the text that followed. Before #142 the line break kept those
-        # apart; now nothing else does. moov trims only a copy, for the code
-        # test, and appends to its buffer untouched.
+    lines = text.splitlines()
+    for number, raw_line in enumerate(lines, start=1):
         trimmed = raw_line.rstrip()
         if not trimmed:
             continue
-        line = trimmed if trimmed.endswith(TERMINATOR) else raw_line
+        # Trailing whitespace is the last field's own padding **only** when the
+        # next line continues this record. Then it has to survive, because the
+        # join inserts nothing: stripping it ran `PAYMENT FOR ` straight into
+        # `INVOICE 12`, and a fixed-width `ACME      ` into the text below, where
+        # before #142 the line break held them apart. Anywhere else it is padding
+        # around a record and comes off, as it always has - a `49,+125000,2   `
+        # that ends its record states 2, not `2   `.
+        #
+        # moov draws the line in the same place: at its `fullLine` label, where
+        # the next line starts a record, it does
+        # `bytes.TrimRight(b.currentLine.Bytes(), " \t")`, and on the
+        # continuation path it leaves the buffer alone.
+        line = trimmed
+        if not trimmed.endswith(TERMINATOR) and _continues(lines, number):
+            line = raw_line
         if not STARTS_RECORD.match(line.lstrip()):
             if not out:
                 raise Unreadable(

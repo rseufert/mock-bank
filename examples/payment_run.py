@@ -714,6 +714,16 @@ BAI2_STARTS = re.compile(r"^(?:%s)," % "|".join(BAI2_CODES))
 BAI2_NEXT = re.compile(r"/[ \t]*(?=(?:%s),)" % "|".join(BAI2_CODES))
 
 
+def _bai2_continues(lines: List[str], index: int) -> bool:
+    """Whether the line after `lines[index]` continues its record: the next line
+    that is not blank, and only if it does not start with a record code."""
+    for later in lines[index + 1:]:
+        if not later.rstrip():
+            continue
+        return not BAI2_STARTS.match(later.lstrip())
+    return False
+
+
 def bai2_records(text: str) -> List[List[str]]:
     """The records of a BAI2 file as lists of fields, continuations folded in.
 
@@ -721,14 +731,18 @@ def bai2_records(text: str) -> List[List[str]]:
     next; an `88` continues the field stream of the record before it.
     """
     raw: List[str] = []
-    for raw_line in text.splitlines():
-        # Whitespace after a terminator is outside the record; with no
-        # terminator the line may be continued and its trailing spaces are the
-        # last field's padding, which the break used to keep apart (#142).
+    lines = text.splitlines()
+    for index, raw_line in enumerate(lines):
         trimmed = raw_line.rstrip()
         if not trimmed:
             continue
-        line = trimmed if trimmed.endswith("/") else raw_line
+        # Trailing whitespace survives only when the next line continues this
+        # record, because the join inserts nothing and a wrapped field's padding
+        # is its content (#142). Everywhere else it is padding around a record
+        # and comes off, as it did before. moov trims in exactly the same place.
+        line = trimmed
+        if not trimmed.endswith("/") and _bai2_continues(lines, index):
+            line = raw_line
         if not BAI2_STARTS.match(line.lstrip()):
             if not raw:
                 raise ValueError("a BAI2 file starts with a record code, not %r"
