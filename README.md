@@ -489,9 +489,11 @@ three are deliberate:
   day's bookings.
 - **Nothing retries it.** The value it could not carry will not fix itself, so a
   retry would add a row for every advance for ever. A statement given up on is
-  recorded as issued with no message, which is why
-  `GET /_mock/accounts/<id>/statements` shows it with `"message_id": null` — that
-  is how you tell a statement the bank sent from one it could not.
+  recorded as issued with no message, so `GET /_mock/accounts/<id>/statements`
+  shows it with `"message_id": null`. **That null means only "no message to
+  fetch", not "the bank could not write it"**: `--retention-days` nulls it too
+  when a `camt.053` that *was* sent and collected ages out. `GET /_mock/unsent` is
+  what says the bank could not write one, by type, account and day.
 - **A reset forgets it**, because a reset is a new bank. On `--db` it survives a
   restart, because the row that caused it does.
 

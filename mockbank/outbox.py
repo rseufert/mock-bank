@@ -704,6 +704,17 @@ def ended_business_days(clock, before, after) -> List[datetime.date]:
     return days
 
 
+def statement_kind(account) -> str:
+    """Which statement this account gets: a `camt.053`, or BAI2 for a NACHA one.
+
+    Asked before the statement is written as well as while writing it, because a
+    statement the bank could not write has to be recorded as the kind it would
+    have been (#166). Recording `camt.053.001.08` for a NACHA account named a
+    message the bank never meant to send it.
+    """
+    return bai2.STATEMENT if account.get("format") == "nacha" else messages.CAMT053.name
+
+
 def _statement_body(account, day, number, opening, closing, shown, now, clock):
     """(message type, body) for one account's statement, in its own format.
 
@@ -717,7 +728,7 @@ def _statement_body(account, day, number, opening, closing, shown, now, clock):
     keep the balances true - which is the point of the behaviour, and would stop
     being true if either writer recomputed a total from the entries it was given.
     """
-    if account.get("format") == "nacha":
+    if statement_kind(account) == bai2.STATEMENT:
         # The receiver is left to default to the account id. An earlier version
         # passed the account's name, which is a display string where BAI2 wants
         # an identification - and the 02's originator and ultimate receiver are
@@ -817,6 +828,10 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
             # it left off rather than restarting at 1 and colliding with the
             # statements it has already been sent.
             number = db.next_value(conn, "camt.053:" + account["id"])
+            # Decided before the write, so a statement that cannot be written is
+            # recorded as the kind it would have been: BAI2 for a NACHA account,
+            # which is never sent a `camt.053` (#166, Bender's second read).
+            kind = statement_kind(account)
             try:
                 kind, text = _statement_body(account, day, number, opening, closing,
                                             shown, now, clock)
@@ -825,8 +840,8 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
                 # account's still can, and so can the rest of the day's release
                 # (#166 part 2). The statement is recorded as issued with no
                 # message, so the day is done and nothing retries it.
-                record_unsent(conn, messages.CAMT053.name, account["id"], error,
-                              now, day=day.isoformat())
+                record_unsent(conn, kind, account["id"], error, now,
+                              day=day.isoformat())
                 conn.execute(
                     "INSERT INTO statement (account, day, number, opening, closing,"
                     " entries, message_id) VALUES (?,?,?,?,?,?,NULL)",

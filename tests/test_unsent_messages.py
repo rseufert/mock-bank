@@ -35,7 +35,7 @@ from support import FileDatabaseCase                                 # noqa: E40
 import datetime                                                       # noqa: E402
 from decimal import Decimal                                          # noqa: E402
 
-from mockbank import messages, schema                                # noqa: E402
+from mockbank import bai2, messages, nacha, schema                   # noqa: E402
 
 PAIN001 = schema.MESSAGES["pain.001.001.09"]
 # A valid IBAN whose check digits agree, for an account the seed does not hold.
@@ -44,7 +44,7 @@ ACME, GLOBEX = "NL41MOCK0000000001", "NL14MOCK0000000002"
 WHEN = datetime.date(2026, 10, 1)
 
 
-def pain001(msg_id, debtor, payments):
+def pain001(msg_id, debtor, payments, ccy="EUR"):
     """A pain.001 from `debtor` paying [(EndToEndId, minor units, creditor IBAN)]."""
     total = str(Decimal(sum(p[1] for p in payments)).scaleb(-2))
     return schema.serialize(PAIN001, {"CstmrCdtTrfInitn": {
@@ -58,7 +58,7 @@ def pain001(msg_id, debtor, payments):
                     "DbtrAcct": {"Id": {"IBAN": debtor}},
                     "DbtrAgt": {"FinInstnId": {"BICFI": "MOCKNL2A"}},
                     "CdtTrfTxInf": [{"PmtId": {"EndToEndId": e2e},
-                                     "Amt": {"InstdAmt": schema.Amount(minor, "EUR")},
+                                     "Amt": {"InstdAmt": schema.Amount(minor, ccy)},
                                      "Cdtr": {"Nm": "Creditor %s" % e2e},
                                      "CdtrAcct": {"Id": {"IBAN": creditor}}}
                                     for e2e, minor, creditor in payments]}]}})
@@ -270,6 +270,144 @@ class AnAccountNoMessageCanName(FileDatabaseCase):
         self.restart()
         self.assertEqual(self.counted(), 1)
         self.assertIn("Nm", self.unsent()[0]["problem"])
+
+
+class AReturnReasonTheReturnFileCannotCarry(FileDatabaseCase):
+    """A NACHA account whose stored return reason will not fit the return file.
+
+    Asked for on Bender's second read, because the tests so far reached `_written`
+    only through a `camt.054` and a `pacs.004`: making `_written` catch nothing
+    left the whole suite passing, so seven call sites could be undone unnoticed.
+    This is the `nacha.return` path, which no other test walks.
+
+    The account's name is fine here, so nothing else fails: the only unwritable
+    thing is the reason, which the addenda carries in three characters. The reason
+    is set on the row because part 1 refuses an unfittable one at the door - which
+    is the point, since a `--db` from before that guard is exactly how one gets in.
+    """
+
+    config_kwargs = {"clock": "2026-10-01T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.patch("/_mock/accounts/ACME", body={
+            "format": "nacha", "currency": "USD", "behaviour": "return-later",
+            "parameters": {"days": 1}}).status, 200)
+        self.post("/payments", body=pain001("R-1", ACME, [("R-A", 4000, GLOBEX)],
+                                            ccy="USD"))
+        self.post("/_mock/advance?days=0")
+        booked = self.get("/_mock/payments/R-A").json()
+        self.assertEqual(booked["status"], "accepted", booked)
+        self.assertEqual(booked["return_reason"], "R02", booked)
+        # Four characters where the addenda holds three: a reason an older mock
+        # could store and this one would refuse.
+        self.stop()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE payment SET return_reason = 'MD01' WHERE end_to_end_id = 'R-A'")
+        conn.commit()
+        conn.close()
+        self.start()
+
+    def unsent(self):
+        return self.get("/_mock/unsent").json()
+
+    def test_the_return_happens_and_only_the_return_file_is_lost(self):
+        for _ in range(3):
+            self.assertEqual(self.post("/_mock/advance?days=1").status, 200)
+            self.assertEqual(self.get("/_mock/mailbox").status, 200)
+        # The money came back, which is the half that must survive.
+        came_back = self.get("/_mock/payments/R-A").json()
+        self.assertEqual(came_back["status"], "returned", came_back)
+        self.assertIsNotNone(came_back["returned_at"])
+        # Exactly one return file could not be written, and it names the day and
+        # the file it was for.
+        rows = [row for row in self.unsent() if row["type"] == nacha.RETURN]
+        self.assertEqual(len(rows), 1, self.unsent())
+        self.assertEqual(rows[0]["account"], "ACME")
+        self.assertTrue(rows[0]["day"], rows[0])
+        self.assertIsNotNone(rows[0]["file_id"], rows[0])
+        self.assertIn("return reason code", rows[0]["problem"])
+
+    def test_a_second_advance_adds_none(self):
+        for _ in range(3):
+            self.post("/_mock/advance?days=1")
+        before = [row for row in self.unsent() if row["type"] == nacha.RETURN]
+        self.assertEqual(len(before), 1, self.unsent())
+        self.post("/_mock/advance?days=1")
+        self.post("/_mock/advance?days=1")
+        after = [row for row in self.unsent() if row["type"] == nacha.RETURN]
+        self.assertEqual(len(after), 1,
+                         "the return file was given up on again: %s" % after)
+
+    def test_the_statement_for_that_account_is_the_bai2_kind(self):
+        """Bender's other finding, on the account that shows it.
+
+        A NACHA account is never sent a `camt.053`, so a statement it could not
+        write must not be recorded as one. Here the statements *can* be written -
+        the name is fine - so this asserts the other side: nothing claims a
+        `camt.053` for this account at all.
+        """
+        for _ in range(3):
+            self.post("/_mock/advance?days=1")
+        claimed = {row["type"] for row in self.unsent() if row["account"] == "ACME"}
+        self.assertNotIn(messages.CAMT053.name, claimed, self.unsent())
+
+
+class AStatementTheBankNeverMeantToSend(FileDatabaseCase):
+    """A NACHA account's unwritable statement is BAI2, not a `camt.053`.
+
+    Bender's second read: `issue_statements` recorded `camt.053.001.08` whatever
+    the account's format, so the one record of what the bank owed named a message
+    it never meant to send this account. The kind is decided from the format
+    before the write now.
+
+    The repro is Bender's: a returned payment on a NACHA account whose reason is
+    missing. A credit with no return reason is neither a return nor money
+    arriving, so the BAI2 writer will not write it.
+    """
+
+    config_kwargs = {"clock": "2026-10-01T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.patch("/_mock/accounts/ACME", body={
+            "format": "nacha", "currency": "USD", "behaviour": "return-later",
+            "parameters": {"days": 1}}).status, 200)
+        self.post("/payments", body=pain001("S-1", ACME, [("S-A", 4000, GLOBEX)],
+                                            ccy="USD"))
+        self.post("/_mock/advance?days=0")
+        # The reason gone from the row before the return books, which is a state
+        # part 1 refuses to be given and a `--db` can still hold.
+        self.stop()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE payment SET return_reason = NULL WHERE end_to_end_id = 'S-A'")
+        conn.commit()
+        conn.close()
+        self.start()
+        for _ in range(4):
+            self.assertEqual(self.post("/_mock/advance?days=1").status, 200)
+
+    def unsent(self):
+        return self.get("/_mock/unsent").json()
+
+    def test_the_unsent_statement_is_recorded_as_bai2(self):
+        statements = [row for row in self.unsent()
+                      if row["type"] == bai2.STATEMENT and row["account"] == "ACME"]
+        self.assertEqual(len(statements), 1, self.unsent())
+        self.assertEqual(statements[0]["day"], "2026-10-02", statements[0])
+        self.assertIn("no return reason", statements[0]["problem"])
+
+    def test_nothing_claims_a_camt053_for_a_nacha_account(self):
+        # The assertion that fails without the fix: this row said
+        # `camt.053.001.08` for an account that is never sent one.
+        self.assertEqual(
+            [row for row in self.unsent() if row["type"] == messages.CAMT053.name],
+            [], self.unsent())
+
+    def test_the_return_still_happened(self):
+        came_back = self.get("/_mock/payments/S-A").json()
+        self.assertEqual(came_back["status"], "returned", came_back)
+        self.assertIsNotNone(came_back["returned_at"])
 
 
 class WhenNothingIsUnsent(FileDatabaseCase):
