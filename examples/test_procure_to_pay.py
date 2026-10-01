@@ -32,6 +32,12 @@ bank's clock is then advanced to that date, because a payment run pays what is
 due and the bank decides what day it is. Hard-coding a date here would be
 asserting the arithmetic of whichever day the suite ran.
 
+**The settlement date is read too.** That due date falls on whichever day of the
+week is thirty days from the day the tests run, weekends included, and the bank
+settles a weekend's run on Monday. So after paying, the bank's clock is advanced
+to the day after the settlement date the bank itself gives for each payment,
+which is the first day the statement carrying it exists (#151).
+
 **Every order needs its own interchange control number.** mock-edi refuses a
 replayed interchange with a `TA1` rather than fulfilling it twice, so a test
 placing two orders passes two numbers. `self.control_number` counts them.
@@ -189,9 +195,26 @@ class PurchaseCase(unittest.TestCase):
         self.advance_bank_to(due)
         run_on = max(due, self.bank_today())
         run = runner.pay(run_on, identification)
-        self.advance_bank_to(self.bank_today() + datetime.timedelta(days=1))
+        self.advance_bank_to(self.day_after_settlement(run))
         runner.reconcile(run)
         return run
+
+    def day_after_settlement(self, run):
+        """The day after the bank settles this run: the first day its statement
+        exists.
+
+        Asked of the bank rather than taken as tomorrow. The due date comes from
+        the supplier's invoice, dated on the real day the tests run, so it lands
+        on every day of the week in turn; and a run made on a Saturday settles on
+        Monday, whose statement is not out on Sunday. Advancing one day passed on
+        every date that put the run on a weekday and failed on the rest (#151).
+        """
+        settled = [control(BANK, "GET", "/_mock/payments/%s"
+                           % urllib.parse.quote(item.reference, safe=""))["settlement_date"]
+                   for item in run.items if item.status == "accepted"]
+        last = max([datetime.date.fromisoformat(day) for day in settled]
+                   + [self.bank_today()])
+        return last + datetime.timedelta(days=1)
 
 
 class TestOnePurchase(PurchaseCase):
