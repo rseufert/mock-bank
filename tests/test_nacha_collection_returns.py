@@ -170,6 +170,14 @@ class RejectedWhenItArrived(ReturningCase):
         self.assertEqual(entries, [("26", "OVER", 5000, GLOBEX_NUMBER, "R01",
                                     "121042880000001", OURS[:8])])
         self.assertEqual(self.balance("ACME"), before + 300, "a rejection debits nothing")
+        # ...and no statement counts it: Thursday's was written after the return
+        # entry went out, and still closes where it opened.
+        thursday, friday = [bai2.statements(m["body"])[0]
+                            for m in self.get("/_mock/mailbox?type=bai2").json()]
+        self.assertEqual((thursday.opening, thursday.closing, thursday.entries),
+                         (before, before, []))
+        self.assertEqual((friday.opening, friday.closing, [e.reference for e in friday.entries]),
+                         (before, before + 300, ["FINE"]))
 
     def test_an_iso20022_accounts_rejection_is_in_its_pain002_and_nowhere_else(self):
         self.request("PATCH", "/_mock/accounts/ACME", body={"format": "iso20022"})
