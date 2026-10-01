@@ -106,7 +106,9 @@ class TheReleaseNotes(unittest.TestCase):
 class ReleaseToolCase(unittest.TestCase):
     """A throwaway repository on `main`, clean, with 0.2.0 dated and no tag."""
 
-    tools = ("release.py", "check_release.py")
+    # `release.py` imports `check_changelog` for `FRAGMENT_NAME` (#167), and the
+    # tool runs as a subprocess in this tree, so the sibling has to be here too.
+    tools = ("release.py", "check_release.py", "check_changelog.py")
 
     def setUp(self):
         self.tree = tempfile.mkdtemp()
@@ -355,6 +357,19 @@ class ReleaseRefusesBeforeItDoesAnything(ReleaseToolCase):
         code, out = self.release("0.2.0", "--dry-run")
         self.assertEqual(code, 1)
         self.assertRefused(out, "99.added.md", "waiting")
+
+    def test_a_step_named_fragment_is_still_waiting(self):
+        # `check_changelog.py` has allowed `<issue>.<kind>.<step>.md` since #57,
+        # and `--assemble` takes them, so a release assembled the normal way
+        # loses nothing. This guard is for the abnormal one, and it carried its
+        # own older copy of the pattern, so a step-named fragment was invisible
+        # to it (#167). `changelog.d/` held two of them when that was filed.
+        self.write("changelog.d/131.added.read.md", "**A step.** Never assembled.\n")
+        self.commit_all("a step-named entry that missed the release")
+        self.git("push", "-q", "origin", "main")
+        code, out = self.release("0.2.0", "--dry-run")
+        self.assertEqual(code, 1, out)
+        self.assertRefused(out, "131.added.read.md", "waiting")
 
     def test_a_refusal_writes_no_tag(self):
         # The point of refusing before acting: nothing is half done afterwards.

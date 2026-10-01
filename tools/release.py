@@ -44,6 +44,13 @@ import subprocess
 import sys
 import tempfile
 
+# What a fragment is called is `check_changelog.py`'s to say: it has allowed
+# `<issue>.<kind>.<step>.md` since #57, and this guard used to carry its own
+# older copy of the pattern and so could not see a step-named fragment waiting
+# (#167). Importing works because running `tools/release.py` puts `tools/` on
+# `sys.path` ahead of everything.
+from check_changelog import FRAGMENT_NAME                            # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHANGELOG = "CHANGELOG.md"
 PYPROJECT = "pyproject.toml"
@@ -182,7 +189,7 @@ def check_tree_is_releasable(version: str):
             "`## [%s] - YYYY-MM-DD`." % (CHANGELOG, version, version))
 
     waiting = sorted(name for name in os.listdir(os.path.join(ROOT, FRAGMENTS))
-                     if re.match(r"^\d+\.[a-z]+\.md$", name)) \
+                     if FRAGMENT_NAME.match(name)) \
         if os.path.isdir(os.path.join(ROOT, FRAGMENTS)) else []
     if waiting:
         raise Refused(
