@@ -237,7 +237,12 @@ SCHEMA = [
         -- releasing and writing, which a set seeded at startup would not.
         written_at   TEXT,
         -- the XML, UTF-8
-        body         TEXT NOT NULL
+        body         TEXT NOT NULL,
+        -- what pairs it with its entry in GET /_mock/queue before it was
+        -- written (#155): type, account, the day it books under and what it
+        -- reports. NULL for a message that was a row from the start, and for
+        -- every row from before version 10; those answer to `m<id>`.
+        key          TEXT
     )
     """,
     # A camt.053 the bank issued: one per account per business day, never
@@ -305,7 +310,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class DatabaseError(Exception):

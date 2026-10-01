@@ -49,7 +49,8 @@ class AMessageWrittenAndHeldBack(QueueCase):
         answer = self.pay("M1", datetime.date(2026, 10, 1))
         [status] = self.queue("?type=pain.002")
         self.assertEqual(status, {
-            "id": answer["queued"][0]["id"], "type": "pain.002.001.10", "account": "ACME",
+            "id": answer["queued"][0]["id"], "key": "m%d" % answer["queued"][0]["id"],
+            "type": "pain.002.001.10", "account": "ACME",
             "fileId": self.file_of("M1"), "msgId": "M1", "dueAt": "2026-10-01T09:01:00Z",
             "written": True,
             "reports": "a file's status"})
@@ -59,7 +60,8 @@ class AMessageWrittenAndHeldBack(QueueCase):
                       self.get("/_mock/mailbox/%d" % status["id"]).body.decode("utf-8"))
         self.post("/_mock/advance?days=1")
         self.assertEqual(self.queue("?type=pain.002"), [])
-        self.assertEqual([m["id"] for m in self.mailbox("pain.002")], [status["id"]])
+        self.assertEqual([(m["id"], m["key"]) for m in self.mailbox("pain.002")],
+                         [(status["id"], status["key"])])
 
     def test_reading_it_twice_changes_nothing(self):
         self.pay("M1", datetime.date(2026, 10, 6))
@@ -91,7 +93,8 @@ class AMessageTheBankWillWrite(QueueCase):
     def test_the_camt054_for_a_payment_not_yet_settled(self):
         self.pay("M1", datetime.date(2026, 10, 6))
         self.assertEqual(self.queue(), [
-            {"id": None, "type": "camt.054.001.08", "account": "ACME", "fileId": None,
+            {"id": None, "key": "camt.054.001.08/ACME/2026-10-06/payments-settling",
+             "type": "camt.054.001.08", "account": "ACME", "fileId": None,
              "msgId": None, "dueAt": "2026-10-06T00:00:00Z", "written": False,
              "reports": "payments settling"}])
         self.assertEqual(self.mailbox("camt.054"), [])
@@ -166,3 +169,76 @@ class AMessageTheBankWillWrite(QueueCase):
         self.assertEqual(len(self.queue("?type=camt")), 1)
         self.assertEqual(self.queue("?type=pain.002"), [])
         self.assertEqual(self.queue("?type=CAMT"), [], "a prefix, and case matters")
+
+
+class TheKeyThatPairsAnEntryWithItsMessage(QueueCase):
+    """mock-films pairs "was waiting" with "arrived" by key, and a message the
+    bank has not written has no id to pair on (#155)."""
+
+    def keys(self, kind):
+        return [m["key"] for m in self.mailbox(kind)]
+
+    def test_the_message_arrives_under_the_key_its_entry_had(self):
+        answer = self.pay("M1", datetime.date(2026, 10, 6))
+        [entry] = self.queue()
+        self.assertIsNone(entry["id"])
+        # The answer to the file names it too, for a caller that kept it.
+        self.assertEqual([q["key"] for q in answer["queued"]],
+                         ["m%d" % answer["queued"][0]["id"], entry["key"]])
+        # Past the day, so the message's own dueAt is not the day in the key.
+        self.post("/_mock/advance?to=2026-10-08")
+        [message] = self.mailbox("camt.054")
+        self.assertEqual(message["key"], entry["key"])
+        self.assertEqual(message["dueAt"][:10], "2026-10-08")
+
+    def test_two_messages_of_one_type_for_one_account_on_one_day(self):
+        # A debit notification and a return's credit: both camt.054, both for
+        # ACME, both on Monday. Each arrives under its own entry's key.
+        self.request("PATCH", "/_mock/accounts/ACME",
+                     body={"behaviour": "return-later", "parameters": {"days": 2}})
+        self.pay("M1", datetime.date(2026, 10, 1))
+        self.pay("M2", datetime.date(2026, 10, 5))
+        self.get("/_mock/mailbox")                       # today's, collected
+        waiting = {e["reports"]: e["key"] for e in self.queue("?type=camt.054")}
+        self.assertEqual(waiting, {
+            "payments returned": "camt.054.001.08/ACME/2026-10-05/payments-returned",
+            "payments settling": "camt.054.001.08/ACME/2026-10-05/payments-settling"})
+        [pacs] = self.queue("?type=pacs.004")
+        self.assertEqual(pacs["key"], "pacs.004.001.09/ACME/2026-10-05/payments-returned"
+                                      "/file-%d" % self.file_of("M1"))
+        self.post("/_mock/advance?to=2026-10-05")
+        self.assertEqual(sorted(self.keys("camt.054")), sorted(waiting.values()))
+        self.assertEqual(self.keys("pacs.004"), [pacs["key"]])
+        # Which is which is in the message: the return's credit is the CRDT.
+        by_key = {m["key"]: m["body"] for m in self.mailbox("camt.054")}
+        self.assertIn("<CdtDbtInd>CRDT</CdtDbtInd>", by_key[waiting["payments returned"]])
+        self.assertIn("<CdtDbtInd>DBIT</CdtDbtInd>", by_key[waiting["payments settling"]])
+
+    def test_a_second_notification_for_a_day_has_a_key_of_its_own(self):
+        # A file posted on its settlement day books at once, after that day's
+        # notification went out: a second camt.054 for the same day, never in
+        # the queue. One key, one message.
+        self.pay("M1", datetime.date(2026, 10, 6))
+        self.post("/_mock/advance?to=2026-10-06")
+        self.pay("M2", datetime.date(2026, 10, 6))
+        self.assertEqual(self.keys("camt.054"), [
+            "camt.054.001.08/ACME/2026-10-06/payments-settling",
+            "camt.054.001.08/ACME/2026-10-06/payments-settling#2"])
+        self.assertEqual(self.queue(), [])
+
+    def test_money_arriving_and_a_nacha_return_file_keep_their_keys_too(self):
+        self.request("POST", "/_mock/credits", body={
+            "account": "GLOBEX", "amount": 700, "value_date": "2026-10-05"})
+        self.request("PATCH", "/_mock/accounts/ACME", body={"format": "nacha", "currency": "USD"})
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples",
+                               "nacha_four_payments_to_the_seed.ach"), "rb") as handle:
+            self.post("/payments", body=handle.read())
+        self.get("/_mock/mailbox")
+        waiting = [e["key"] for e in self.queue()]
+        self.assertEqual([k.split("/")[:2] + k.split("/")[3:4] for k in waiting],
+                         [["nacha.return", "ACME", "payments-returned"],
+                          ["camt.054.001.08", "GLOBEX", "money-arriving"]])
+        self.post("/_mock/advance?to=2026-10-05")
+        arrived = [m["key"] for m in self.get("/_mock/mailbox?leave").json()]
+        for key in waiting:
+            self.assertIn(key, arrived)
