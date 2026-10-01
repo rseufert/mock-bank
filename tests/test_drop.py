@@ -32,8 +32,14 @@ class DropCase(MockServerCase):
         # Settle time of zero: these tests write a whole file and then scan, so
         # waiting 250ms per file would only make the suite slower. The settle
         # time has a test of its own below, where it is the point.
+        #
+        # The clock is pinned to the day before the sample file's execution
+        # date. These tests count what a scan releases, and on the real clock
+        # that changed on 2026-10-01: the payments settled at once and a
+        # camt.054 landed beside the pain.002 (#148).
         cls.config_kwargs = dict(cls.config_kwargs, drop_dir=cls.drop,
-                                 pickup_dir=cls.pickup, drop_settle_ms=0)
+                                 pickup_dir=cls.pickup, drop_settle_ms=0,
+                                 clock="2026-09-30T09:00")
         super().setUpClass()
 
     @classmethod
