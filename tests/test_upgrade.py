@@ -19,6 +19,7 @@ from mockbank import db                                    # noqa: E402
 from mockbank.server import Config, make_server            # noqa: E402
 
 from support import FileDatabaseCase                        # noqa: E402
+from test_collections_read import pain008                   # noqa: E402
 
 OLD_SCHEMA = os.path.join(HERE, "fixtures", "schema-v0.sql")
 SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
@@ -28,6 +29,7 @@ SCHEMA_V4 = os.path.join(HERE, "fixtures", "schema-v4.sql")
 SCHEMA_V5 = os.path.join(HERE, "fixtures", "schema-v5.sql")
 SCHEMA_V6 = os.path.join(HERE, "fixtures", "schema-v6.sql")
 SCHEMA_V7 = os.path.join(HERE, "fixtures", "schema-v7.sql")
+SCHEMA_V8 = os.path.join(HERE, "fixtures", "schema-v8.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -351,6 +353,50 @@ class FromVersionSeven(FileDatabaseCase):
         self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 1500)
 
 
+class FromVersionEight(FileDatabaseCase):
+    """A file from 0.4 or 0.5, before a direct debit could be collected (#131):
+    it gains the collection table, keeps the credit it held, and takes a
+    `pain.008`."""
+
+    start_on_setup = False
+    config_kwargs = {"clock": "2026-01-02T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V8, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME', 'NL41MOCK0000000001', 'MOCKNL2A', 'EUR', 1000,"
+            " 'accept')")
+        conn.execute(
+            "INSERT INTO credit (account_id, amount, currency, value_date, booking_date,"
+            " received_at, booked_at) VALUES ('ACME', 500, 'EUR', '2025-12-30',"
+            " '2025-12-30', '2025-12-30T09:00:00Z', '2025-12-30T09:00:00Z')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_collection_table_and_keeps_its_credit(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertNotIn("collection", {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")})
+        finally:
+            conn.close()
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 1000)
+        self.assertEqual([c["amount"] for c in self.get("/_mock/credits").json()], [500])
+        self.assertEqual(self.get("/_mock/collections").json(), [])
+        answer = self.post("/payments", body=pain008([("C1", 1000)]))
+        self.assertEqual((answer.status, answer.json()["status"]), (202, "ACCP"),
+                         answer.body)
+        [kept] = self.get("/_mock/collections").json()
+        self.assertEqual((kept["end_to_end_id"], kept["status"], kept["mandate_id"]),
+                         ("C1", "accepted", "M-C1"))
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -385,7 +431,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (8, "1b90e58ef46609e0")
+    FINGERPRINT = (9, "764429804626309d")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

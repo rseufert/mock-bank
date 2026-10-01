@@ -108,7 +108,7 @@ sends them.
 | Message | Direction | When the mock sends it | What it carries |
 | --- | --- | --- | --- |
 | `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors |
-| `pain.008` | In | You send it | Direct debits: the creditor account, and collections from debtors under their mandates. **Read and validated, not yet booked** (#131): `POST /_mock/validate` reads it, and `POST /payments` refuses it by name until collections are booked |
+| `pain.008` | In | You send it | Direct debits: the creditor account, and collections from debtors under their mandates. **Decided, not yet booked** (#131): `POST /payments` and the drop folder decide each collection and answer with a `pain.002`, and `GET /_mock/collections` shows what was decided. The credit itself is the next step, so no balance moves yet |
 | `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
@@ -118,7 +118,7 @@ sends them.
 
 Versions: `pain.001.001.09` is read, and the older `pain.001.001.03` is
 accepted as well and read into the same model; `pain.008.001.08`, from the
-same 2019 set, is read and validated. The mock writes
+same 2019 set, is read, validated and decided. The mock writes
 `pain.002.001.10`, `camt.054.001.08`, `camt.053.001.08`, `camt.052.001.08` and
 `pacs.004.001.09`, the versions that go with `pain.001.001.09` and that most banks accept today. That is a choice, not
 the only right answer; so are the others the standard leaves open, and the
@@ -433,6 +433,30 @@ reason codes are the ISO 20022 external codes a real bank uses.
 | `silent` | Sends no `pain.002` at all | none |
 | `statement-gap` | Leaves one settled entry off the `camt.053` | none, which is the point |
 
+**For a direct debit** ([#131](https://github.com/rseufert/mock-bank/issues/131))
+the account holder is the creditor: a `pain.008` asks the bank to collect from
+debtors under their mandates. A behaviour still describes the account it is set
+on, so the table reads from the other side:
+
+| Behaviour | On the account the file collects **for** | On an account it collects **from**, if the bank holds it |
+| --- | --- | --- |
+| `closed-account`, or a closed account | Every collection is rejected, `AC04` | That collection is rejected, `AC04` |
+| `insufficient-funds` | Nothing: a collection adds to this balance | That collection is rejected `AM04` if it is more than the debtor has available: its balance, less its own payments accepted and not yet booked, less what this file has already taken from it |
+| `return-later` | Nothing | Accepted. Returning it after its `days` is the step after booking |
+| `reject-file` | The file is rejected, `RJCT` `FF01` | Nothing: a debtor sends no file |
+| `silent` | Decided, and no `pain.002` is sent | Nothing |
+| `accept`, `duplicate-file`, `statement-gap`, `bad-bank-id` | Nothing more | Nothing |
+
+A debtor's balance is **read and never changed**: the mock books only the
+account holder's side, so two files are each held to the same balance. A debtor
+at another bank is accepted, because nothing about it can be known. A creditor
+account the bank does not hold is `AC03`, and a collection that states no
+mandate or no date of signature is `MD02`. An accepted collection is to settle
+on its requested collection date, rolled to a business day, and never before the
+business day after the bank can start on the file. **It is decided and recorded,
+and not booked yet**: no balance moves and no `camt.054` is sent until the next
+step of #131.
+
 ### The accounts it starts with
 
 Four, the same four every time, one per failure you are likely to want. The
@@ -492,7 +516,8 @@ a bank can check at acceptance, so a payment to it settles.
 
 An accepted payment debits its account on its settlement date, not on
 receipt. The mock books the **debit side only**: a payment into an
-account it holds does not credit that account, so every balance change has a
+account it holds does not credit that account, and a collection from one does
+not debit it, so every balance change has a
 statement entry to explain it. That is a choice, and it is stated here. The
 credits it books are a return, which puts the money back where it came from,
 and money arriving from somebody else through `POST /_mock/credits` (#91). Each
@@ -545,6 +570,7 @@ like mock-edi's so the two feel the same.
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
 | Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
 | Money arriving | `POST /_mock/credits`, `GET /_mock/credits` | Make a credit arrive in an account from a payer you describe: it books on its value date and shows on the `camt.054` and `camt.053` as a received transfer. The listing is every credit, newest first |
+| Collections | `GET /_mock/collections`, `GET /_mock/collections/<EndToEndId>` | Every direct debit the bank decided on from a `pain.008`, newest first, with its mandate, its debtor, the decision and its settlement date; or the newest with one `EndToEndId`, `?all` for every one |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
@@ -942,6 +968,7 @@ stderr at startup if you do not. `-q` does not silence that warning.
 mockbank/accounts.py           the account behaviours, and what a valid account is
 mockbank/clock.py              bank time: the cutoff, business days, holidays, and advancing
 mockbank/credits.py            money arriving: a credit the test describes, booked on its value date (#91)
+mockbank/direct_debit.py       direct debits: what the bank decides about a pain.008, and the collections it records (#131)
 mockbank/drop.py               the second door: a directory watched, and one written
 mockbank/db.py                 the schema, the upgrade, and the seeded accounts
 mockbank/handler.py            the request handler: authentication, the body, the request log, and the lookup in the route table
@@ -954,6 +981,7 @@ mockbank/routes/control.py     health, state, reset, behaviours, the dictionary 
 mockbank/routes/accounts.py    the accounts and their statements
 mockbank/routes/clock.py       advancing bank time, and the holidays
 mockbank/routes/credits.py     POST and GET /_mock/credits
+mockbank/routes/collections.py GET /_mock/collections
 mockbank/routes/payments.py    POST /payments, and /_mock/payments
 mockbank/routes/mailbox.py     the mailbox, what is queued, and the request log
 mockbank/routes/validate.py    POST /_mock/validate
@@ -980,7 +1008,7 @@ than half-supporting it.
 | --- | --- |
 | EBICS, SWIFT FIN and SWIFTNet transport | Both need certificates and cryptography, which breaks zero dependencies; the same call mock-edi made on S/MIME. HTTP and folders cover testing. |
 | Signed or encrypted files | Same reason; an encrypted file is refused with a message saying so. |
-| Direct debits (`pain.008`) | **In progress in 0.6** (#131): a `pain.008` is read and validated today, and booking collections is the next step. Until it lands, the pipeline refuses one by name. |
+| Direct debits (`pain.008`) | **In progress in 0.6** (#131): a `pain.008` is read, validated and decided today, with a `pain.002` for the file. Booking the credit is the next step, and until it lands no balance moves. |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
 

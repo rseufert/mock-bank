@@ -242,7 +242,8 @@ def files_to_check():
 def written_by_the_mock():
     """(label, XML) for every message a running mock writes for the sample:
     its status report, a DUPL rejection and the refusal of a file with no
-    MsgId (OrgnlMsgId NOTPROVIDED), money arriving from somebody else, the
+    MsgId (OrgnlMsgId NOTPROVIDED), the status report for a file of
+    collections, money arriving from somebody else, the
     debit notification, the
     return a return-later account brings (a pacs.004 and a camt.054 credit),
     the statements for the days an advance crosses, the return's among
@@ -269,6 +270,12 @@ def written_by_the_mock():
         call("POST", "/payments", sample)
         call("POST", "/payments", sample)                 # DUPL: a rejection
         call("POST", "/payments", b"not a payment file")  # NOTPROVIDED
+        # a file of collections (#131): its pain.002 names the bank as the
+        # creditor's agent, and rejects each collection for an account the
+        # bank does not hold
+        with open(os.path.join(SAMPLES, "external",
+                               "pain.008.001.08-direct-debit.xml"), "rb") as handle:
+            call("POST", "/payments", handle.read())
         # money arriving (#91): a received transfer with the payer, a note the
         # bank re-cuts and a structured reference, on the next camt.054/053
         call("POST", "/_mock/credits", json.dumps({

@@ -173,6 +173,47 @@ SCHEMA = [
         booked_at       TEXT
     )
     """,
+    # One direct debit the account holder asked the bank to collect (#131): the
+    # mirror of `payment`, with the held account on the creditor side. A
+    # rejected one is kept, because the pain.002 reports it. An accepted one
+    # credits its creditor account on `settlement_date`. The return columns are
+    # for a collection the debtor's bank sends back after it settled.
+    """
+    CREATE TABLE IF NOT EXISTS collection (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id            INTEGER NOT NULL REFERENCES file (id),
+        pmt_inf_id         TEXT,
+        end_to_end_id      TEXT,
+        instruction_id     TEXT,
+        -- the held creditor account's id, NULL when the bank does not hold it
+        account_id         TEXT,
+        creditor_iban      TEXT,
+        amount             INTEGER,
+        currency           TEXT,
+        debtor_name        TEXT,
+        debtor_iban        TEXT,
+        debtor_bic         TEXT,
+        -- the mandate the collection is made under, as the file states it; the
+        -- mock keeps no mandate register and polices none
+        mandate_id         TEXT,
+        mandate_signed     TEXT,
+        sequence_type      TEXT,
+        creditor_scheme_id TEXT,
+        -- the remittance lines, a JSON list
+        remittance         TEXT NOT NULL DEFAULT '[]',
+        -- accepted or rejected, and for rejected the ISO 20022 reason code
+        status             TEXT NOT NULL,
+        reason             TEXT,
+        reason_text        TEXT,
+        -- the day the file asked for, and the day the bank collects on
+        collection_date    TEXT,
+        settlement_date    TEXT,
+        booked_at          TEXT,
+        return_due         TEXT,
+        return_reason      TEXT,
+        returned_at        TEXT
+    )
+    """,
     # What the bank sends back, queued for when it is due. The writers (#7)
     # put rows here; the mailbox (#8) reads the released ones and marks them
     # taken. Timestamps are `stamp()`s, UTC with a trailing Z, so they compare
@@ -256,13 +297,15 @@ INDEXES = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_statement_day ON statement (account, day)",
     # What is waiting to book, as the clock asks on every advance.
     "CREATE INDEX IF NOT EXISTS ix_credit_due ON credit (booked_at, booking_date)",
+    # A tester looking a collection up by the id their client matches on.
+    "CREATE INDEX IF NOT EXISTS ix_collection_end_to_end_id ON collection (end_to_end_id)",
 ]
 
 # The schema's version, kept in the file as `PRAGMA user_version`. Bump it
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class DatabaseError(Exception):
