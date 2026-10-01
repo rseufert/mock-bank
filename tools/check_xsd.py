@@ -243,8 +243,8 @@ def written_by_the_mock():
     """(label, XML) for every message a running mock writes for the sample:
     its status report, a DUPL rejection and the refusal of a file with no
     MsgId (OrgnlMsgId NOTPROVIDED), the status report for a file of
-    collections and the credits two of them settle as, money arriving from
-    somebody else, the
+    collections, the refusal of one before it settles, the credit the other
+    settles as and its return, money arriving from somebody else, the
     debit notification, the
     return a return-later account brings (a pacs.004 and a camt.054 credit),
     the statements for the days an advance crosses, the return's among
@@ -283,6 +283,9 @@ def written_by_the_mock():
         call("POST", "/payments", collecting.replace(
             b"DE89370400440532013000", b"NL41MOCK0000000001").replace(
             b"DD-20260116-0001", b"DD-20260116-0002"))
+        # the debtor's bank refuses one before it settles: a further pain.002
+        refusal = json.dumps({"reason": "MD01"}).encode("utf-8")
+        call("POST", "/_mock/collections/E2E-DD-0001/refuse", refusal)
         # money arriving (#91): a received transfer with the payer, a note the
         # bank re-cuts and a structured reference, on the next camt.054/053
         call("POST", "/_mock/credits", json.dumps({
@@ -295,6 +298,9 @@ def written_by_the_mock():
         call("POST", "/_mock/accounts/ACME/report")
         call("POST", "/_mock/accounts/GLOBEX/report")
         call("POST", "/_mock/advance?to=2026-10-06")
+        # ...and sends the other back after it settled: a pacs.004 naming the
+        # pain.008, and a debit on the camt.054 and the camt.052 below
+        call("POST", "/_mock/collections/E2E-DD-0002/refuse", refusal)
         call("POST", "/_mock/accounts/ACME/report")
         messages = json.loads(call("GET", "/_mock/mailbox").decode("utf-8"))
     finally:

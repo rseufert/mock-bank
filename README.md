@@ -108,7 +108,7 @@ sends them.
 | Message | Direction | When the mock sends it | What it carries |
 | --- | --- | --- | --- |
 | `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors |
-| `pain.008` | In | You send it | Direct debits: the creditor account, and collections from debtors under their mandates. `POST /payments` and the drop folder decide each collection and answer with a `pain.002`; an accepted one credits the creditor account on its settlement date, with a `camt.054` and an entry on the day's statement (#131). The debtor's bank refusing or returning one is the next step |
+| `pain.008` | In | You send it | Direct debits: the creditor account, and collections from debtors under their mandates. `POST /payments` and the drop folder decide each collection and answer with a `pain.002`; an accepted one credits the creditor account on its settlement date, with a `camt.054` and an entry on the day's statement, and the debtor's bank can refuse it before settlement or send it back after (#131) |
 | `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
@@ -141,7 +141,10 @@ mock says which it made:
   and `spec/examples/camt053/mixed_examples_08.xml` in
   [MeinGrundeinkommen/konfipay](https://github.com/MeinGrundeinkommen/konfipay)
   @ `c337e64`, each a `CRDT`. The mock writes `ESDD` whatever the file's local
-  instrument; a B2B collection would be `BBDD` at a real bank.
+  instrument; a B2B collection would be `BBDD` at a real bank. A collection
+  going back is a `DBIT` under `PMNT`/`IDDT`/`UPDD` (reversal due to a returned
+  or unpaid direct debit), which the same two files write for it; its `RtrInf`
+  carries the reason and the code the credit was booked under.
 - **Coverage.** The dictionary declares the elements the mock reads and
   writes and those a real bank's file commonly carries, not every optional
   element of the XSD. An element the standard allows but the dictionary does
@@ -299,9 +302,11 @@ real files do not, so signing is this mock's choice rather than the format's
 requirement. They also settled the transaction type codes on the `16` records
 (#127): `447` for a payment sent (ACH Disbursement Funding Debit, which is what
 a bank writes for an ACH credit payment), `257` for one coming back (Individual
-ACH Return Item), `142` for money arriving (ACH Credit Received) and `165` for a
+ACH Return Item), `142` for money arriving (ACH Credit Received), `165` for a
 collection that settled (Preauthorized ACH Credit, which the same bank's export
-writes for the proceeds of an `ACH Debit Collection`). Before 0.5
+writes for the proceeds of an `ACH Debit Collection`) and `557` for one that
+went back (Individual ACH Return Item on the debit side; the code table is the
+evidence, since no export here shows a collection returned). Before 0.5
 these were `495`, `165` and `195`, which a real bank writes for an outgoing wire,
 the proceeds of a debit collection and an incoming wire. A reader that takes a
 movement's direction from the code's range, 100 to 399 a credit and 400 to 699 a
@@ -457,7 +462,7 @@ on, so the table reads from the other side:
 | --- | --- | --- |
 | `closed-account`, or a closed account | Every collection is rejected, `AC04` | That collection is rejected, `AC04` |
 | `insufficient-funds` | Nothing: a collection adds to this balance | That collection is rejected `AM04` if it is more than the debtor has available: its balance, less its own payments accepted and not yet booked, less what this file has already taken from it |
-| `return-later` | Nothing | Accepted and settled. Returning it after its `days` is the next step of #131 |
+| `return-later` | Nothing | Accepted and settled, then sent back `days` business days later with `reason`; only the collection `end_to_end_id` names, if it names one |
 | `reject-file` | The file is rejected, `RJCT` `FF01` | Nothing: a debtor sends no file |
 | `silent` | Decided, and no `pain.002` is sent | Nothing |
 | `accept`, `duplicate-file`, `statement-gap`, `bad-bank-id` | Nothing more | Nothing |
@@ -489,8 +494,33 @@ What already covers money arriving covers this:
   account books it on a day that has a statement.
 
 `GET /_mock/collections` shows `booked_at` and the file's `received_at`, both on
-the bank clock. The debtor's bank refusing or returning a collection is the next
-step of #131.
+the bank clock.
+
+**The debtor's bank can say no.** For a debtor at another bank,
+`POST /_mock/collections/<EndToEndId>/refuse` with `{"reason": "MD01"}` is that
+bank's answer, and what it does depends on when it arrives:
+
+- **Before the collection settles** it is rejected with the reason. The bank
+  sends a further `pain.002` naming the original file and batch with that one
+  transaction `RJCT`, and nothing books.
+- **After it settled** the money goes back: the creditor account is debited on
+  the first day the bank can book it - today, on a business day before the
+  cutoff - and the bank sends a `pacs.004` naming the `pain.008` and a
+  `camt.054` debit, one of each as for a payment's return. The statement for
+  that day carries the debit. Until then both are listed in `GET /_mock/queue`.
+
+The reason is an ISO 20022 return reason the status report can also carry:
+`AC04`, `AM04`, `MD01` (no mandate), `MD06` (the debtor asked for it back),
+`MS02` and the others the error lists. With the same `EndToEndId` in several
+files, the newest is the one refused. A collection already rejected, already on
+its way back or already returned is `409`, and so is a return that would
+overdraw the account past what a statement can write.
+
+**A debtor this bank holds is not refused by hand**: that is `409`, because its
+own state and behaviour decide. `return-later` on that account sends a settled
+collection back by itself, through the same `pacs.004` and debit. Either way
+only the account holder's side books, and a return is not debited from an
+account closed meanwhile until it reopens.
 
 ### The accounts it starts with
 
@@ -637,11 +667,12 @@ like mock-edi's so the two feel the same.
 | Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright |
 | Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) |
 | Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body and its `key`; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
-| What it is going to send | `GET /_mock/queue` | What the bank has not released yet, soonest first, each with `dueAt`: a message already written and held back (a status report under `--status-delay-ms`, with its `id`), and the ones it will write when something books, with no `id` yet - the `camt.054` for payments not yet settled, for money arriving and for collections not yet settled, and the `pacs.004` or NACHA return file and the credit a return brings. `reports` says which. **Every entry has a `key`, and the message arrives in the mailbox under the same `key`**, so "was waiting" pairs with "arrived" without matching on type and time: `camt.054.001.08/ACME/2026-10-06/payments-settling` for one the bank will write (type, account, the day it books under, what it reports, and the file where there is one message per file), `m<id>` for one already written. Treat it as opaque. A second message of one kind for one day - a file posted on its own settlement day, after that day's notification went out - ends `#2`, so a key names one message. `?type=` filters on a prefix, as the mailbox does. Reading it releases nothing and takes nothing. A statement is not listed: one is written for every open account when the clock is advanced past the end of a business day |
+| What it is going to send | `GET /_mock/queue` | What the bank has not released yet, soonest first, each with `dueAt`: a message already written and held back (a status report under `--status-delay-ms`, with its `id`), and the ones it will write when something books, with no `id` yet - the `camt.054` for payments not yet settled, for money arriving and for collections not yet settled or on their way back, and the `pacs.004` or NACHA return file and the credit a return brings. `reports` says which. **Every entry has a `key`, and the message arrives in the mailbox under the same `key`**, so "was waiting" pairs with "arrived" without matching on type and time: `camt.054.001.08/ACME/2026-10-06/payments-settling` for one the bank will write (type, account, the day it books under, what it reports, and the file where there is one message per file), `m<id>` for one already written. Treat it as opaque. A second message of one kind for one day - a file posted on its own settlement day, after that day's notification went out - ends `#2`, so a key names one message. `?type=` filters on a prefix, as the mailbox does. Reading it releases nothing and takes nothing. A statement is not listed: one is written for every open account when the clock is advanced past the end of a business day |
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
 | Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
 | Money arriving | `POST /_mock/credits`, `GET /_mock/credits` | Make a credit arrive in an account from a payer you describe: it books on its value date and shows on the `camt.054` and `camt.053` as a received transfer. The listing is every credit, newest first |
-| Collections | `GET /_mock/collections`, `GET /_mock/collections/<EndToEndId>` | Every direct debit the bank decided on from a `pain.008`, newest first, with its mandate, its debtor, the decision, its settlement date, when its file was received and when it booked; or the newest with one `EndToEndId`, `?all` for every one |
+| Collections | `GET /_mock/collections`, `GET /_mock/collections/<EndToEndId>` | Every direct debit the bank decided on from a `pain.008`, newest first, with its mandate, its debtor, the decision, its settlement date, when its file was received, when it booked and when it went back; or the newest with one `EndToEndId`, `?all` for every one |
+| The debtor's bank says no | `POST /_mock/collections/<EndToEndId>/refuse` | With `{"reason": "MD01"}`. Before settlement the collection is rejected and a further `pain.002` says so; after, the money goes back with a `pacs.004` and a `camt.054` debit. For a debtor at another bank: one this bank holds decides by its own behaviour |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
@@ -1052,7 +1083,7 @@ mockbank/routes/control.py     health, state, reset, behaviours, the dictionary 
 mockbank/routes/accounts.py    the accounts and their statements
 mockbank/routes/clock.py       advancing bank time, and the holidays
 mockbank/routes/credits.py     POST and GET /_mock/credits
-mockbank/routes/collections.py GET /_mock/collections
+mockbank/routes/collections.py GET /_mock/collections, and the debtor's bank refusing one
 mockbank/routes/payments.py    POST /payments, and /_mock/payments
 mockbank/routes/mailbox.py     the mailbox, what is queued, and the request log
 mockbank/routes/validate.py    POST /_mock/validate
@@ -1079,7 +1110,7 @@ than half-supporting it.
 | --- | --- |
 | EBICS, SWIFT FIN and SWIFTNet transport | Both need certificates and cryptography, which breaks zero dependencies; the same call mock-edi made on S/MIME. HTTP and folders cover testing. |
 | Signed or encrypted files | Same reason; an encrypted file is refused with a message saying so. |
-| Direct debits (`pain.008`) | **In progress in 0.6** (#131): a `pain.008` is read, validated, decided and booked today, with a `pain.002` for the file and a credit on the settlement date. The debtor's bank refusing or returning a collection is the next step, and until it lands a settled collection stays settled. |
+| Direct debits beyond `pain.008.001.08` | 0.6 collects with `pain.008.001.08` (#131). Not there: a NACHA file's debit entries as collections, which the reader still reports as a finding; `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
 
@@ -1092,7 +1123,7 @@ than half-supporting it.
 | 0.3 | US formats: NACHA files in, NACHA returns (`R01`, `R02`, `R03`), BAI2 statements out | **Done.** The same `payment_run` tests pass in NACHA mode, in CI against mock-sap from PyPI |
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Done.** `procure_to_pay`'s ten tests pass in CI against mock-sap and mock-edi from PyPI |
 | 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source; an intraday `camt.052` on request | **Done.** What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
-| 0.6 | Direct debits: `pain.008.001.08` read, validated and booked as collections, a debtor the bank holds deciding by its own state and behaviour, and the debtor's bank refusing or returning one; a wrapped BAI2 line joined without its line break (#142) | In progress. Each step leaves the mock working; the README says what is booked at each |
+| 0.6 | Direct debits: `pain.008.001.08` read, validated and booked as collections, a debtor the bank holds deciding by its own state and behaviour, and the debtor's bank refusing or returning one; a wrapped BAI2 line joined without its line break (#142) | In progress |
 
 ## Contributing
 

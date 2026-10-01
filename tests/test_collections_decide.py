@@ -76,7 +76,7 @@ class AFileOfCollectionsIsDecided(CollectingCase):
         # Decided, not booked: that is the next step's, and the README says so.
         self.assertEqual(self.balance("ACME"), before)
         self.assertEqual(self.get("/_mock/state").json()["collections"],
-                         {"accepted": 2, "rejected": 0, "booked": 0})
+                         {"accepted": 2, "rejected": 0, "returned": 0, "booked": 0})
 
     def test_the_pain002_reports_the_file_as_the_creditors_bank(self):
         self.collect([("C1", 1000), ("C2", 2500)], debtors={"C2": INITECH})

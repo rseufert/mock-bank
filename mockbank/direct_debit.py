@@ -19,7 +19,7 @@ import datetime
 import json
 from typing import Any, Dict, List
 
-from . import accounts, db, schema
+from . import accounts, db, messages, schema
 from .accounts import ACCEPTED, REJECTED, RETURNED
 
 # A behaviour describes the account it is set on. A collection reads the
@@ -27,6 +27,8 @@ from .accounts import ACCEPTED, REJECTED, RETURNED
 # mirror of `accounts.CREDITOR_SIDE`, which a payment reads from the account it
 # pays into. Its own list, because the two are not the same set.
 DEBTOR_SIDE_OF_A_COLLECTION = ("closed-account", "insufficient-funds", "return-later")
+# The first two are read when the file is decided (`_reason`); `return-later`
+# when the collection settles (`_schedule_return`).
 
 # ...and every other behaviour says nothing about an account as the debtor of
 # a collection. Named with the reason, so that none is ignored by omission and
@@ -217,7 +219,29 @@ def book_due(conn, today: datetime.date, clock, now) -> List[Dict[str, Any]]:
         conn.execute("UPDATE collection SET booked_at = ? WHERE id = ?",
                      (stamped, row["id"]))
         booked.append(_entry(dict(row, booked_at=stamped)))
+        _schedule_return(conn, clock, row)
     return booked
+
+
+def _schedule_return(conn, clock, row) -> None:
+    """A just-settled collection from a debtor account this bank holds with
+    ``return-later`` goes back ``days`` business days on, with its reason: the
+    mirror of ``accounts.schedule_returns``, read from the other party. A NACHA
+    account's ``R`` code is said in ISO 20022, since the answer is a pacs.004."""
+    debtor = accounts.by_iban(conn, row["debtor_iban"] or "")
+    if debtor is None or debtor["behaviour"] != "return-later":
+        return
+    wanted = dict(accounts.RETURN_LATER, **debtor["parameters"])
+    if wanted["end_to_end_id"] and wanted["end_to_end_id"] != row["end_to_end_id"]:
+        return
+    reason = messages.iso_return_reason(
+        accounts.return_reason(debtor["parameters"], debtor["format"]))
+    if reason not in schema.CODE_SETS["ExternalReturnReason1Code"]:
+        reason = "MS03"
+    due = clock.business_days_after(
+        datetime.date.fromisoformat(row["settlement_date"]), wanted["days"])
+    conn.execute("UPDATE collection SET return_due = ?, return_reason = ? WHERE id = ?",
+                 (due.isoformat(), reason, row["id"]))
 
 
 class Refused(ValueError):
