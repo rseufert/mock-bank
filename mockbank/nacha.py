@@ -37,9 +37,18 @@ model                       NACHA
 ``Payment.remittance``      each addenda's payment related information
 ==========================  ==============================================
 
-Amounts are cents, in USD. Only credit entries are read as payments; a debit,
-a prenote or a return is a finding, because the mock is a bank that sends
-money, not one that collects it.
+Amounts are cents, in USD. A credit entry is a payment. A **debit entry is a
+collection** (#176): the company is the creditor and the receiver the debtor,
+read into the model a ``pain.008`` reads into (``Collection``,
+``CollectionBatch``, ``CollectionFile`` below). A file is one or the other,
+never both, because the pipeline takes a file of payments or a file of
+collections. A prenote, a zero-dollar entry or a loan debit is a finding.
+
+A NACHA file carries no mandate: the receiver's authorization is held by the
+originator, outside the file. So a collection read from one has no mandate id
+and no date of signature, and is not held to ``MD02``. The one thing the file
+does say is whether a ``WEB`` or ``TEL`` debit is recurring or single (the
+payment type code), which is its sequence type.
 
 Findings, not exceptions, as in ``validate``: a line that is not 94
 characters, a routing number that fails its check digit, an entry hash, a
@@ -138,6 +147,26 @@ RETURN_ADDENDA = ("return addenda", _fields(
 # general ledger and loan credits. Everything else is a debit, a prenote or a
 # return, which this bank does not originate.
 CREDITS = {"22", "32", "42", "52"}
+
+# ...and those that take it from the receiver: a collection (#176). Checking,
+# savings and general ledger. Not 55, the loan debit: moov-io/ach marks it for
+# reversals only, and Nicolet National Bank's specification names 27 and 37.
+DEBITS = {"27", "37", "47"}
+
+# What the mock does not read, by the code's second digit, and why - so that a
+# prenote does not read as a malformed debit.
+NOT_READ = {
+    "3": "a prenote of a credit: a zero-amount test entry, and no money would move",
+    "8": "a prenote of a debit: a zero-amount test entry, and no money would move",
+    "4": "a zero-dollar entry carrying remittance data, and no money would move",
+    "9": "a zero-dollar entry carrying remittance data, and no money would move",
+    "5": "a loan debit, which NACHA allows for reversals only",
+}
+
+# WEB and TEL entries carry a payment type code where the others carry
+# discretionary data: R is recurring, anything else single (moov-io/ach,
+# `SetPaymentType`). The nearest thing in the file to a mandate's sequence type.
+PAYMENT_TYPE_CLASSES = ("WEB", "TEL")
 
 # Each credit's automated return, which is what a return file carries (#54):
 # a returned checking credit is 21, a savings one 31, and so on.
@@ -269,6 +298,69 @@ class Return:
                 "original_receiving_dfi": self.original_receiving_dfi}
 
 
+class Collection(messages.Collection):
+    """A debit entry: money the company collects from the receiver (#176)."""
+
+    def __init__(self, entry: Record, addenda: List[Record], entry_class: str = ""):
+        self.node = None
+        # What a return of this collection has to echo.
+        self.transaction_code = entry.text("transaction code")
+        self.entry_class = entry_class
+        self._path = entry.path
+        self.end_to_end_id = entry.text("individual identification number") or NOT_PROVIDED
+        self.instruction_id = entry.text("trace number")
+        self.amount = entry.number_of("amount")
+        self.currency = "USD"
+        self.debtor_name = entry.text("individual name")
+        self.debtor_account = entry.text("DFI account number")
+        self.debtor_bic = None
+        self.debtor_clearing_id = (entry.text("receiving DFI identification")
+                                   + entry.text("check digit"))
+        # No mandate in the file: see the module.
+        self.mandate_id = self.mandate_signed = self.creditor_scheme_id = None
+        self.sequence_type = None
+        if entry_class in PAYMENT_TYPE_CLASSES:
+            recurring = entry.text("discretionary data").strip().upper() == "R"
+            self.sequence_type = "RCUR" if recurring else "OOFF"
+        self.remittance = [a.text("payment related information") for a in addenda]
+
+    @property
+    def path(self):
+        return self._path
+
+
+class CollectionBatch(messages.CollectionBatch):
+    def __init__(self, header: Record, collections: List[Collection]):
+        self.node = None
+        self.returns: List[Return] = []
+        self._path = header.path
+        company = header.text("company identification")
+        number = header.number_of("batch number")
+        self.pmt_inf_id = "%s-%s" % (company, number if number is not None
+                                     else header.text("batch number"))
+        self.requested_collection_date = _date(header.text("effective entry date"))
+        self.creditor_name = header.text("company name")
+        self.creditor_account = company
+        self.creditor_account_currency = "USD"
+        self.creditor_bic = None
+        self.collections = collections
+        self.nb_of_txs = len(collections)
+        self.ctrl_sum = _dollars(c.amount for c in collections)
+
+    # What `_as_a_pain001_would` reads a batch by, whichever way the money moves.
+    payments = property(lambda self: self.collections)
+    requested_execution_date = property(lambda self: self.requested_collection_date)
+
+    @property
+    def path(self):
+        return self._path
+
+
+class CollectionFile(messages.CollectionFile):
+    def __init__(self, header: Record, batches: List[CollectionBatch]):
+        PaymentFile.__init__(self, header, batches)
+
+
 class Batch(messages.Batch):
     def __init__(self, header: Record, payments: List[Payment],
                  returns: Optional[List[Return]] = None):
@@ -326,7 +418,9 @@ def _dollars(amounts) -> Decimal:
 # -- reading -----------------------------------------------------------------
 
 def inspect(data: bytes, today: Optional[datetime.date] = None):
-    """``(PaymentFile or None, [Finding])`` for a NACHA file; never raises.
+    """``(PaymentFile, CollectionFile or None, [Finding])`` for a NACHA file;
+    never raises. A file whose entries are debits is a ``CollectionFile``
+    (#176), whatever its service class says: the entry's own code decides.
 
     ``today`` is the bank's, for the one warning that needs it: an effective
     entry date in the past (``DT01``), executed on the next business day as a
@@ -404,7 +498,23 @@ def inspect(data: bytes, today: Optional[datetime.date] = None):
                              totals["credit"], "AM10", "its credit entries sum to %d cents")
         findings += _compare(control, "total debit entry dollar amount",
                              totals["debit"], "AM10", "its debit entries sum to %d cents")
-    payment_file = PaymentFile(header, batches)
+    collections = [c for b in batches for c in b.collecting.collections]
+    payments = [p for b in batches for p in b.payments]
+    if collections and payments:
+        # A real ODFI takes a batch of both (service class 200). The pipeline
+        # takes a file of payments or a file of collections, as a pain.001 and
+        # a pain.008 are two files, so this one is refused and says why.
+        findings.append(_finding(
+            collections[0].path + "/transaction code (columns 2-3)", "FF01",
+            "the file holds %d credit entr%s and %d debit entr%s; the mock takes a "
+            "file of payments or a file of collections, not both. Send the debits "
+            "in a file of their own"
+            % (len(payments), "y" if len(payments) == 1 else "ies",
+               len(collections), "y" if len(collections) == 1 else "ies")))
+    if collections and not payments:
+        payment_file = CollectionFile(header, [b.collecting for b in batches])
+    else:
+        payment_file = PaymentFile(header, batches)
     findings += _as_a_pain001_would(payment_file, today)
     return payment_file, findings
 
@@ -445,7 +555,7 @@ def _batch(records, index, findings):
     header = records[index]
     index += 1
     entry_class = header.text("standard entry class code")
-    payments, returns, entry_hash, count = [], [], 0, 0
+    payments, collections, returns, entry_hash, count = [], [], [], 0, 0
     totals = {"credit": 0, "debit": 0}
     control = None
     while index < len(records):
@@ -472,6 +582,8 @@ def _batch(records, index, findings):
             totals[side(code)] += record.number_of("amount") or 0
             if code in CREDITS:
                 payments.append(Payment(record, addenda, entry_class))
+            elif code in DEBITS:
+                collections.append(Collection(record, addenda, entry_class))
             elif code in RETURNS:
                 why = [a for a in addenda if a.label == RETURN_ADDENDA[0]]
                 if why:
@@ -484,8 +596,10 @@ def _batch(records, index, findings):
             else:
                 findings.append(_finding(
                     record.field_path("transaction code"), "FF01",
-                    "transaction code %s is not a credit; the mock reads credit "
-                    "entries (%s)" % (code, ", ".join(sorted(CREDITS)))))
+                    "transaction code %s is %s; the mock reads credit entries (%s) "
+                    "as payments and debit entries (%s) as collections"
+                    % (code, NOT_READ.get(code[1:2], "not one NACHA defines for an entry"),
+                       ", ".join(sorted(CREDITS)), ", ".join(sorted(DEBITS)))))
             continue
         if record.type == "8":
             control = record
@@ -510,7 +624,10 @@ def _batch(records, index, findings):
         findings += _compare(control, "total debit entry dollar amount",
                              totals["debit"], "AM10",
                              "the batch's debit entries sum to %d cents")
-    return Batch(header, payments, returns), index, (entry_hash, totals, count)
+    batch = Batch(header, payments, returns)
+    # Kept beside the payments until `inspect` knows which the file is of.
+    batch.collecting = CollectionBatch(header, collections)
+    return batch, index, (entry_hash, totals, count)
 
 
 def _compare(record: Record, name: str, actual: int, code: str, why: str) -> List[Finding]:

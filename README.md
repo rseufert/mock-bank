@@ -218,8 +218,51 @@ has no ISO 20022 equivalent, the mock makes these choices:
 - **The file's identity**, where a `pain.001` has a `MsgId`, is the immediate
   origin with the creation date, time and file ID modifier. Those are the
   fields a bank tells two files apart by.
-- **Only credit entries are payments.** A debit, a prenote or a return entry
-  is an `FF01` finding, because this bank sends money and does not collect it.
+- **A credit entry is a payment and a debit entry is a collection**
+  ([#176](https://github.com/rseufert/mock-bank/issues/176)): transaction codes
+  `22`, `32`, `42` and `52` on one side, `27`, `37` and `47` on the other. The
+  entry's own code decides, whatever service class the batch states.
+- **A file is of payments or of collections, not both.** A real originating
+  bank takes a batch that mixes them (service class `200`); the mock's pipeline
+  takes one kind of file, as a `pain.001` and a `pain.008` are two files. A
+  mixed file is an `FF01` finding that counts both sides and says to send the
+  debits in a file of their own.
+- **What moves no money is not read.** A prenote (`23`, `28` and their savings
+  and ledger twins), a zero-dollar entry and a loan debit (`55`, which NACHA
+  allows for reversals only) are each an `FF01` finding that says which it is.
+
+**A NACHA file of debit entries is a file of collections**, decided, recorded
+and booked as a `pain.008` is (the table under **For a direct debit** below says what the bank decides):
+
+- the **creditor account** is the company identification, as the debtor account
+  of a credit file is, and has to be an account the bank holds;
+- the **debtor** is the receiver: the DFI account number and individual name,
+  at the receiving bank's routing number. One at this bank's routing number
+  whose account number the bank holds is a held debtor, and decides the
+  collection by its own state and behaviour;
+- the **requested collection date** is the effective entry date;
+- **there is no mandate.** A NACHA file carries none: the receiver's
+  authorization is held by the originator, outside the file. So a collection
+  from one has no mandate id and no date of signature and is not held to
+  `MD02`. The one thing the file does say is whether a `WEB` or `TEL` debit is
+  recurring or single (its payment type code, `R` or `S`), which is recorded as
+  the sequence type `RCUR` or `OOFF`. Any SEC code may carry a debit; the mock
+  records it and polices none.
+
+Sources, both outside the project: Nicolet National Bank's NACHA file format
+specification (<https://www.nicoletbank.com/nacha-file-format-specifications>,
+read 2026-10-01) for the service class codes, the debit transaction codes and
+the absence of any authorization field; and
+[moov-io/ach](https://github.com/moov-io/ach) @ `7ee7ad0` for the ledger debit,
+the prenotes and the payment type code. `tests/samples/external/nacha-gl-debit.ach`
+is a debit file from the second.
+
+**What a NACHA collection is answered with** is the account's format, not the
+file's: a NACHA-format account gets the plain acknowledgement and a BAI2
+statement line `165` when the collection settles; an ISO 20022 account in
+dollars gets a `pain.002` and a `camt.054`. A collection coming back in NACHA
+terms - a return file with an `R` code - is the next step of #176; until it
+lands, refusing or returning one is answered as for a `pain.008`.
 
 **Both doors take a NACHA file**, `POST /payments` and the drop directory, and
 it is decided by the same engine as a `pain.001`; the JSON answer's `format`
@@ -1135,7 +1178,7 @@ than half-supporting it.
 | --- | --- |
 | EBICS, SWIFT FIN and SWIFTNet transport | Both need certificates and cryptography, which breaks zero dependencies; the same call mock-edi made on S/MIME. HTTP and folders cover testing. |
 | Signed or encrypted files | Same reason; an encrypted file is refused with a message saying so. |
-| Direct debits beyond `pain.008.001.08` | 0.6 collects with `pain.008.001.08` (#131). **A NACHA file's debit entries as collections are the next step, also in 0.6** ([#176](https://github.com/rseufert/mock-bank/issues/176)); until it lands the reader reports a debit entry as a finding. Out on purpose: `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
+| Direct debits beyond `pain.008.001.08` and NACHA | 0.6 collects with `pain.008.001.08` (#131) and with a NACHA file's debit entries ([#176](https://github.com/rseufert/mock-bank/issues/176)); a NACHA collection coming back as a return file is that issue's next step. Out on purpose: `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
 

@@ -177,15 +177,19 @@ def record(conn, decision, received_at):
             "INSERT INTO collection (file_id, pmt_inf_id, end_to_end_id, instruction_id,"
             " account_id, creditor_iban, amount, currency, debtor_name, debtor_iban,"
             " debtor_bic, mandate_id, mandate_signed, sequence_type, creditor_scheme_id,"
-            " remittance, status, reason, reason_text, collection_date, settlement_date)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " remittance, status, reason, reason_text, collection_date, settlement_date,"
+            " entry_class, transaction_code, debtor_clearing_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (file_id, d.batch.pmt_inf_id, c.end_to_end_id, c.instruction_id,
              d.account["id"] if d.account else None, d.batch.creditor_account,
              c.amount, c.currency, c.debtor_name, c.debtor_account, c.debtor_bic,
              c.mandate_id, c.mandate_signed, c.sequence_type, c.creditor_scheme_id,
              json.dumps(c.remittance), d.outcome, d.reason, d.reason_text,
              when.isoformat() if when else None,
-             d.settlement_date.isoformat() if d.settlement_date else None))
+             d.settlement_date.isoformat() if d.settlement_date else None,
+             # What a NACHA debit entry carries and a pain.008 does not (#176).
+             getattr(c, "entry_class", None), getattr(c, "transaction_code", None),
+             getattr(c, "debtor_clearing_id", None)))
     conn.commit()
     return file_id
 

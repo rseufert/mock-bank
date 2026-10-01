@@ -161,7 +161,9 @@ class State:
         collecting = isinstance(payment_file, messages.CollectionFile)
         if collecting:
             # A pain.008 (#131): the same pipeline with the account holder on the
-            # creditor side, decided and recorded by `direct_debit`.
+            # creditor side, decided and recorded by `direct_debit`. A NACHA
+            # file of debit entries is one too (#176), naming accounts by number.
+            accounts.resolve(conn, payment_file)
             decision = direct_debit.decide(payment_file, findings, conn, self.clock, now,
                                            self.config.allow_duplicates)
             file_id = direct_debit.record(conn, decision, now)
