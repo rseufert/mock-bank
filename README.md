@@ -297,10 +297,6 @@ the nearest meaning, chosen here, and a real bank may say it differently. The
 `R` code in the return file is the one to rely on. The `R` codes are moov-io/ach's
 table (`addenda99.go` @ `7ee7ad0`); `tests/samples/external/nacha-return-WEB.ach`
 is a returned debit from outside, which the mock's reader has taken since #55.
-**The pairing of an `R` code with an ISO 20022 reason is the mock's own** and
-names no source: the `R` codes come from moov's table and the ISO codes from the
-published code set, but nothing standardises which stands for which, so these are
-this mock's reading of them and a real bank's may differ.
 
 **Both doors take a NACHA file**, `POST /payments` and the drop directory, and
 it is decided by the same engine as a `pain.001`; the JSON answer's `format`
