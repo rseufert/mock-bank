@@ -110,6 +110,15 @@ class EachCodeIsTheOneABankWrites(unittest.TestCase):
         written = texts(THREE, "142")
         self.assertTrue(any(t.endswith("PPD") for t in written), written)
 
+    def test_a_collection_that_settled_is_165(self):
+        # The code the bank writes for the proceeds of the account holder's own
+        # collection (#131). Until #127 the mock wrote it for a return, which
+        # is the other thing below.
+        self.assertEqual(bai2.COLLECTED_CREDIT, "165")
+        self.assertEqual(table()["165"], ("CR", "Detail", "Preauthorized ACH Credit"))
+        [written] = texts(FOUR, "165")
+        self.assertTrue(written.startswith("ACH Debit Collection,"), written)
+
     def test_none_is_left_a_placeholder(self):
         self.assertEqual(bai2.PLACEHOLDER_CODES, ())
 
@@ -118,7 +127,7 @@ class EachCodeIsTheOneABankWrites(unittest.TestCase):
         # examples/payment_run.py knows: the change must not move one across.
         codes = table()
         for code, kind in ((bai2.DEBIT, "DB"), (bai2.RETURNED_CREDIT, "CR"),
-                           (bai2.RECEIVED_CREDIT, "CR")):
+                           (bai2.RECEIVED_CREDIT, "CR"), (bai2.COLLECTED_CREDIT, "CR")):
             with self.subTest(code=code):
                 self.assertEqual(codes[code][0], kind)
                 self.assertEqual("CR" if 100 <= int(code) <= 399 else "DB", kind)

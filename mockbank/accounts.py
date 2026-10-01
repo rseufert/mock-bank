@@ -192,8 +192,9 @@ MAX_BALANCE = 10 ** 18 - 1
 
 def still_to_arrive(conn, account_id: str) -> int:
     """What will be credited to an account without anyone asking again, in minor
-    units: payments due back under ``return-later``, and money arriving (#91)
-    that has not booked yet. A balance is only safe if it has room for these.
+    units: payments due back under ``return-later``, money arriving (#91) that
+    has not booked yet, and collections accepted and not yet settled (#131). A
+    balance is only safe if it has room for these.
 
     A payment that was never debited will never be credited back, however its
     return is answered, so it reserves nothing. A NACHA account's rejections are
@@ -207,7 +208,10 @@ def still_to_arrive(conn, account_id: str) -> int:
     credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM credit"
                            " WHERE account_id = ? AND booked_at IS NULL",
                      (account_id,))["total"]
-    return int(returns) + int(credits)
+    collections = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM collection"
+                               " WHERE account_id = ? AND status = ? AND booked_at IS NULL",
+                         (account_id, ACCEPTED))["total"]
+    return int(returns) + int(credits) + int(collections)
 
 
 def _minor_units(value: Any) -> int:
@@ -905,11 +909,12 @@ def payment_counts(conn):
 
 # Every date the bank has fixed for something still to happen, and the row
 # that says it has happened: a payment's settlement, a return's (both kinds,
-# #14 and #54), and money arriving (#91). Payments and credits are moved by the
-# same rule, or the two would disagree about the same day.
+# #14 and #54), money arriving (#91) and a collection's settlement (#131). All
+# are moved by the same rule, or they would disagree about the same day.
 DUE_DATES = (("payment", "settlement_date", "booked_at", "settled"),
              ("payment", "return_due", "returned_at", "came back"),
-             ("credit", "booking_date", "booked_at", "arrived"))
+             ("credit", "booking_date", "booked_at", "arrived"),
+             ("collection", "settlement_date", "booked_at", "was collected"))
 
 
 def booked_on(conn, day: str) -> List[str]:
