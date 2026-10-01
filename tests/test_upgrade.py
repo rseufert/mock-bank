@@ -5,6 +5,7 @@ means they have to survive an upgrade too. The failure this guards against is
 the one that costs a morning: a mock that starts, binds its port, and then
 answers every request with `no such column: parameters`.
 """
+import datetime
 import hashlib
 import os
 import sqlite3
@@ -20,6 +21,7 @@ from mockbank.server import Config, make_server            # noqa: E402
 
 from support import FileDatabaseCase                        # noqa: E402
 from test_collections_read import pain008                   # noqa: E402
+from test_payments import UMBRELLA, pain001                 # noqa: E402
 
 OLD_SCHEMA = os.path.join(HERE, "fixtures", "schema-v0.sql")
 SCHEMA_V1 = os.path.join(HERE, "fixtures", "schema-v1.sql")
@@ -30,6 +32,7 @@ SCHEMA_V5 = os.path.join(HERE, "fixtures", "schema-v5.sql")
 SCHEMA_V6 = os.path.join(HERE, "fixtures", "schema-v6.sql")
 SCHEMA_V7 = os.path.join(HERE, "fixtures", "schema-v7.sql")
 SCHEMA_V8 = os.path.join(HERE, "fixtures", "schema-v8.sql")
+SCHEMA_V9 = os.path.join(HERE, "fixtures", "schema-v9.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -397,6 +400,45 @@ class FromVersionEight(FileDatabaseCase):
                          ("C1", "accepted", "M-C1"))
 
 
+class FromVersionNine(FileDatabaseCase):
+    """A file from before a message kept its key (#155): the message it holds
+    answers to `m<id>`, and the next one the bank writes has a key of its own."""
+
+    start_on_setup = False
+    config_kwargs = {"clock": "2026-10-01T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V9, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME', 'NL41MOCK0000000001', 'MOCKNL2A', 'EUR', 100000,"
+            " 'accept')")
+        conn.execute(
+            "INSERT INTO message (id, type, account, due_at, released_at, body)"
+            " VALUES (7, 'camt.054.001.08', 'ACME', '2026-09-30T09:00:00Z',"
+            " '2026-09-30T09:00:00Z', '<Document/>')")
+        conn.commit()
+        conn.close()
+
+    def test_an_old_message_answers_to_its_id_and_a_new_one_to_its_key(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        [old] = self.get("/_mock/mailbox?type=camt.054").json()
+        self.assertEqual((old["id"], old["key"]), (7, "m7"))
+        self.post("/payments", body=pain001("N-1", "NL41MOCK0000000001",
+                                            [("P1", 1000, UMBRELLA)],
+                                            when=datetime.date(2026, 10, 6)))
+        [coming] = self.get("/_mock/queue").json()
+        self.assertEqual(coming["key"],
+                         "camt.054.001.08/ACME/2026-10-06/payments-settling")
+        self.post("/_mock/advance?to=2026-10-06")
+        [new] = self.get("/_mock/mailbox?type=camt.054").json()
+        self.assertEqual(new["key"], coming["key"])
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -431,7 +473,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (9, "764429804626309d")
+    FINGERPRINT = (10, "5aed922072cbd3e1")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())
