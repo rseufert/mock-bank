@@ -42,6 +42,7 @@ PAIN001 = schema.MESSAGES["pain.001.001.09"]
 ACME, GLOBEX = "NL41MOCK0000000001", "NL14MOCK0000000002"
 UMBRELLA = "NL30MOCK0000000005"
 SPACED = "NL30 MOCK 0000 0000 05"       # the same account, as a sender may paste it
+SPARE_IBAN = "NL19MOCK0000000009"      # valid, and not one the seed holds
 PINNED = "2026-10-01T09:00"
 WHEN = datetime.date(2026, 10, 1)
 
@@ -142,6 +143,32 @@ class AnAccountNameTheMessagesCannotCarry(DoorCase):
         # Read before the walk: collecting the mailbox takes what is in it, so
         # `still_working` would empty it first.
         self.assertIn("<Nm>" + "x" * 140 + "</Nm>", self.mailbox_of("camt.054"))
+        self.still_working()
+
+    def test_creating_an_account_is_the_same_door(self):
+        """`POST /_mock/accounts`, which part 1 left open.
+
+        `create` falls back to the id when the name is empty, so `""` was already
+        safe - but a name of only spaces is truthy, so it survived the fallback and
+        every message for that account was then unwritable. Found while doing part
+        2: this made every later `POST /_mock/advance` a 500 with no payment
+        involved at all, because the end-of-day `camt.053` names the account.
+        """
+        made = self.post("/_mock/accounts",
+                         body={"id": "WS", "iban": SPARE_IBAN, "name": "   ",
+                               "bic": "MOCKNL2A"})
+        self.assertEqual(made.status, 400, made.body)
+        self.assertIn("Nm", made.json()["error"])
+        self.assertEqual(self.get("/_mock/accounts/WS").status, 404)
+        self.still_working()
+
+    def test_creating_one_with_no_name_still_takes_the_id(self):
+        # The fallback that made `""` safe is kept: this is not "every account must
+        # be named", it is "the name has to be writable".
+        made = self.post("/_mock/accounts",
+                         body={"id": "NONAME", "iban": SPARE_IBAN, "bic": "MOCKNL2A"})
+        self.assertEqual(made.status, 201, made.body)
+        self.assertEqual(made.json()["name"], "NONAME")
         self.still_working()
 
     def test_the_bank_still_answers_after_a_refused_name(self):
