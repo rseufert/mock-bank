@@ -40,7 +40,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 from xml.etree import ElementTree as ET
 
-from bank_messages import (  # noqa: F401 - call is used by the tests
+from .bank_messages import (  # noqa: F401 - call is used by the tests
     ACCEPTED, PAIN001, bank_documents, call, child_text, entries, tag)
 
 

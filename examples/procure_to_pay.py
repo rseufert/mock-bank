@@ -43,8 +43,8 @@ import datetime
 import urllib.parse
 from typing import Dict, List, Optional
 
-import invoice_check
-import payment_run
+from . import invoice_check
+from . import payment_run
 
 SUPPLIER_INVOICES = ("/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
                      "/A_SupplierInvoice")

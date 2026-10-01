@@ -14,7 +14,7 @@ import os
 import unittest
 import urllib.request
 
-from pay_invoices import PayInvoices, call
+from .pay_invoices import PayInvoices, call
 
 EDI = os.environ.get("EDI_URL", "http://127.0.0.1:8080")
 BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
