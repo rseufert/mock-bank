@@ -129,6 +129,72 @@ def upcoming(conn, file_id) -> List[Dict[str, Any]]:
              "due_on": r["settlement_date"]} for r in rows]
 
 
+def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
+    """What the bank is going to send and has not released, soonest first (#155).
+
+    Reads and changes nothing: nothing is released, nothing is taken. Two kinds
+    of entry, told apart by ``written``:
+
+    - a message already **written** and waiting for its time, which today is a
+      status report held back by ``--status-delay-ms``. It has an ``id``, and
+      ``GET /_mock/mailbox/<id>`` shows it;
+    - a message the bank **will write** when something books, which is most of
+      what a caller means by "about to send": the ``camt.054`` for payments
+      accepted and not yet settled, the one for money arriving, and what a
+      return brings - a ``pacs.004`` or a NACHA return file per original file,
+      and a ``camt.054`` credit where money comes back. These have no ``id``
+      yet, and are due at the start of their day in bank time, which is when
+      an advance to that day books them. ``reports`` says which of those it
+      is, because a debit notification and a return's credit for one account
+      on one day are two messages of one type.
+
+    A statement is not here. It is not owed for anything that has happened: one
+    is written for every open account each time the clock is advanced past the
+    end of a business day, so listing "the next one" would be listing the
+    calendar. ``kind`` is the mailbox's prefix filter.
+    """
+    out = [{"id": row["id"], "type": row["type"], "account": row["account"],
+            "fileId": row["file_id"], "msgId": row["msg_id"], "dueAt": row["due_at"],
+            "written": True, "reports": "a file's status"}
+           for row in db.rows(conn, "SELECT message.*, file.msg_id FROM message"
+                                    " LEFT JOIN file ON file.id = message.file_id"
+                                    " WHERE released_at IS NULL ORDER BY message.id")]
+    expected = set()
+    for row in db.rows(conn, "SELECT account_id, settlement_date FROM payment"
+                             " WHERE status = ? AND booked_at IS NULL"
+                             " AND account_id IS NOT NULL", (accounts.ACCEPTED,)):
+        expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
+                      None, "payments settling"))
+    for row in db.rows(conn, "SELECT credit.account_id, booking_date FROM credit"
+                             " JOIN account ON account.id = credit.account_id"
+                             " WHERE booked_at IS NULL AND account.closed = 0"):
+        expected.add((row["booking_date"], messages.CAMT054.name, row["account_id"],
+                      None, "money arriving"))
+    for row in db.rows(conn, "SELECT payment.*, account.format FROM payment"
+                             " JOIN account ON account.id = payment.account_id"
+                             " WHERE return_due IS NOT NULL AND returned_at IS NULL"
+                             " AND (payment.status = ? OR (payment.status = ?"
+                             " AND booked_at IS NOT NULL))",
+                       (accounts.REJECTED, accounts.ACCEPTED)):
+        answer = nacha.RETURN if row["format"] == "nacha" else messages.PACS004.name
+        expected.add((row["return_due"], answer, row["account_id"], row["file_id"],
+                      "payments returned"))
+        if row["status"] == accounts.ACCEPTED:
+            # Money comes back only for a payment that was debited (#144).
+            expected.add((row["return_due"], messages.CAMT054.name, row["account_id"],
+                          None, "payments returned"))
+    names = {row["id"]: row["msg_id"] for row in db.rows(conn, "SELECT id, msg_id FROM file")}
+    for day, kind_, account, file_id, reports in expected:
+        start = datetime.datetime.combine(datetime.date.fromisoformat(day),
+                                          datetime.time(0, 0), tzinfo=clock.zone)
+        out.append({"id": None, "type": kind_, "account": account, "fileId": file_id,
+                    "msgId": names.get(file_id), "dueAt": db.stamp(start),
+                    "written": False, "reports": reports})
+    out = [entry for entry in out if entry["type"].startswith(kind)]
+    return sorted(out, key=lambda e: (e["dueAt"], not e["written"], e["type"],
+                                      e["account"] or "", e["fileId"] or 0, e["reports"]))
+
+
 def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     """Book what has come due, write its ``camt.054``, and release every
     queued message whose time has come. Returns what was released.

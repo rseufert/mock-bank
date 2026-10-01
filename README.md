@@ -541,6 +541,7 @@ like mock-edi's so the two feel the same.
 | Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright |
 | Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) |
 | Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
+| What it is going to send | `GET /_mock/queue` | What the bank has not released yet, soonest first, each with `dueAt`: a message already written and held back (a status report under `--status-delay-ms`, with its `id`), and the ones it will write when something books, with no `id` yet - the `camt.054` for payments not yet settled and for money arriving, and the `pacs.004` or NACHA return file and the credit a return brings. `reports` says which. `?type=` filters on a prefix, as the mailbox does. Reading it releases nothing and takes nothing. A statement is not listed: one is written for every open account when the clock is advanced past the end of a business day |
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
 | Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
 | Money arriving | `POST /_mock/credits`, `GET /_mock/credits` | Make a credit arrive in an account from a payer you describe: it books on its value date and shows on the `camt.054` and `camt.053` as a received transfer. The listing is every credit, newest first |
@@ -954,7 +955,7 @@ mockbank/routes/accounts.py    the accounts and their statements
 mockbank/routes/clock.py       advancing bank time, and the holidays
 mockbank/routes/credits.py     POST and GET /_mock/credits
 mockbank/routes/payments.py    POST /payments, and /_mock/payments
-mockbank/routes/mailbox.py     the mailbox, and the request log
+mockbank/routes/mailbox.py     the mailbox, what is queued, and the request log
 mockbank/routes/validate.py    POST /_mock/validate
 mockbank/routes/transport.py   the folder transport's state, and a scan on demand
 mockbank/schema.py             the ISO 20022 dictionary: every message, element and code set, and the walker and builder derived from it
