@@ -67,7 +67,7 @@ from typing import Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
-from bank_messages import (ACCEPTED, NO_ANSWER, PAIN001, bank_documents, call, child_text,
+from .bank_messages import (ACCEPTED, NO_ANSWER, PAIN001, bank_documents, call, child_text,
                            entries, tag)
 
 ODATA = "/sap/opu/odata/sap"

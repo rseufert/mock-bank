@@ -50,9 +50,12 @@ ATTEMPTS = 3
 PAUSE = 0.5
 
 # local path -> (repository, path within it). The local name matches the
-# original's on purpose: `examples/` is what is on sys.path when the examples
-# run, so procure_to_pay.py imports `invoice_check` exactly as mock-sap's own
-# tests do, and a reader looking for the original knows where to look.
+# original's on purpose, so a reader looking for the original knows where to
+# look - and `invoice_check.py` has no imports of its own beyond the standard
+# library, which is why making the examples a package (#169) left this copy
+# byte-identical. `procure_to_pay.py` reaches it as `from . import invoice_check`
+# now rather than as a flat import; the copy is held to the source, not the way
+# it is imported.
 COPIES = {
     "examples/invoice_check.py": ("mock-sap", "examples/invoice_check.py"),
 }

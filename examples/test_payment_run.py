@@ -27,8 +27,8 @@ import urllib.parse
 import urllib.request
 from decimal import Decimal
 
-from bank_messages import call
-from payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
+from .bank_messages import call
+from .payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
                          SapSession, nacha_time_and_modifier, odata)
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
