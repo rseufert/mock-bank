@@ -133,6 +133,55 @@ def unanswerable(conn, decision, now, source="") -> Optional[str]:
     return None
 
 
+def record_unsent(conn, kind, account, problem, now, day=None, file_id=None) -> None:
+    """Remember a message the bank could not write, so the rest can go out.
+
+    The second fault of #166: one unwritable message used to raise out of the
+    release and make every later `POST /_mock/advance` and every mailbox read a
+    500, because the same message was retried on each one. A mock that stops
+    answering is worse than one that admits it owes you a message.
+
+    So the money still moves - a payment that booked has booked, a return that
+    came back has come back - and what is lost is the notification, recorded here
+    with the writer's own complaint. Nothing retries it: the value it could not
+    carry will not fix itself, and a retry would only add a row per advance for
+    ever.
+    """
+    conn.execute("INSERT INTO unsent (type, account, file_id, day, problem, at)"
+                 " VALUES (?,?,?,?,?,?)",
+                 (kind, account, file_id, day, str(problem), db.stamp(now)))
+
+
+def _written(conn, kind, account, write, now, day=None, file_id=None):
+    """The message body, or None after recording why it could not be written.
+
+    `write` is passed unevaluated so this can catch what it raises. Every caller
+    is inside a loop over accounts and days, and gives up on just this one: the
+    booking it reports has already happened and stays, and what is lost is the
+    notification (#166 part 2). Before this, one account's unwritable message
+    raised out of the whole release, so the other accounts' messages were never
+    written either and every later advance tried the same one again.
+    """
+    try:
+        body = write()
+    except ValueError as error:
+        record_unsent(conn, kind, account, error, now, day=day, file_id=file_id)
+        return None
+    return body.decode("utf-8") if isinstance(body, bytes) else body
+
+
+def unsent(conn) -> List[Dict[str, Any]]:
+    """Every message the bank could not write, oldest first."""
+    return [dict(row) for row in db.rows(
+        conn, "SELECT id, type, account, file_id, day, problem, at FROM unsent"
+              " ORDER BY id")]
+
+
+def unsent_count(conn) -> int:
+    """How many messages the bank owes and could not write."""
+    return db.one(conn, "SELECT COUNT(*) AS total FROM unsent")["total"]
+
+
 def _silent(conn, decision) -> bool:
     """Whether a debtor the bank could read is ``silent``, which sends nothing."""
     batches = decision.payment_file.batches if decision.payment_file else []
@@ -184,7 +233,12 @@ def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
                                   else row.get("creditor_iban") or "")
     sequence = db.next_value(conn, "nacha.return:" + account["id"])
     modifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[(sequence - 1) % 36]
-    body = nacha.return_file(accounts.ROUTING, account, rows, day, now, modifier)
+    body = _written(conn, nacha.RETURN, account["id"],
+                    lambda: nacha.return_file(accounts.ROUTING, account, rows, day,
+                                              now, modifier),
+                    now, day=day.isoformat(), file_id=file_id)
+    if body is None:
+        return
     conn.execute(
         "INSERT INTO message (type, account, file_id, due_at, body, key)"
         " VALUES (?,?,?,?,?,?)",
@@ -324,11 +378,15 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
                                    (row["file_id"],))["msg_id"]
         sequence = db.next_value(conn, "camt.054:" + account_id)
         msg_id = "MB-C054-%s-%d" % (account_id[:18], sequence)
-        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
-                                      msg_id, now)
+        body = _written(conn, messages.CAMT054.name, account_id,
+                        lambda: messages.write_camt054(
+                            account, rows, datetime.date.fromisoformat(day), msg_id, now),
+                        now, day=day)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+            (messages.CAMT054.name, account_id, stamp, body,
              _key(conn, messages.CAMT054.name, account_id, day, SETTLING)))
     _release_credits(conn, now, today, clock)
     _release_collections(conn, now, today, clock)
@@ -353,11 +411,16 @@ def _release_credits(conn, now, today, clock):
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
-        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
-                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        body = _written(conn, messages.CAMT054.name, account_id,
+                        lambda: messages.write_camt054(
+                            account, rows, datetime.date.fromisoformat(day),
+                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                        now, day=day)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+            (messages.CAMT054.name, account_id, stamp, body,
              _key(conn, messages.CAMT054.name, account_id, day, ARRIVING)))
 
 
@@ -371,11 +434,16 @@ def _release_collections(conn, now, today, clock):
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
-        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
-                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        body = _written(conn, messages.CAMT054.name, account_id,
+                        lambda: messages.write_camt054(
+                            account, rows, datetime.date.fromisoformat(day),
+                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                        now, day=day)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+            (messages.CAMT054.name, account_id, stamp, body,
              _key(conn, messages.CAMT054.name, account_id, day, COLLECTED)))
 
 
@@ -392,21 +460,31 @@ def _release_collection_returns(conn, now, today, clock):
     for (account_id, day, file_id), rows in sorted(by_file.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "pacs.004:" + account_id)
-        body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
-                                      "MB-P004-%s-%d" % (account_id[:18], sequence), now)
+        body = _written(conn, messages.PACS004.name, account_id,
+                        lambda: messages.write_pacs004(
+                            account, rows, datetime.date.fromisoformat(day),
+                            "MB-P004-%s-%d" % (account_id[:18], sequence), now),
+                        now, day=day, file_id=file_id)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, file_id, due_at, body, key)"
             " VALUES (?,?,?,?,?,?)",
-            (messages.PACS004.name, account_id, file_id, stamp, body.decode("utf-8"),
+            (messages.PACS004.name, account_id, file_id, stamp, body,
              _key(conn, messages.PACS004.name, account_id, day, COLLECTION_RETURNED, file_id)))
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
-        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
-                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        body = _written(conn, messages.CAMT054.name, account_id,
+                        lambda: messages.write_camt054(
+                            account, rows, datetime.date.fromisoformat(day),
+                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                        now, day=day)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+            (messages.CAMT054.name, account_id, stamp, body,
              _key(conn, messages.CAMT054.name, account_id, day, COLLECTION_RETURNED)))
 
 
@@ -447,22 +525,32 @@ def _release_returns(conn, now, today):
                                file_id, now)
             continue
         sequence = db.next_value(conn, "pacs.004:" + account_id)
-        body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
-                                      "MB-P004-%s-%d" % (account_id[:18], sequence), now)
+        body = _written(conn, messages.PACS004.name, account_id,
+                        lambda: messages.write_pacs004(
+                            account, rows, datetime.date.fromisoformat(day),
+                            "MB-P004-%s-%d" % (account_id[:18], sequence), now),
+                        now, day=day, file_id=file_id)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, file_id, due_at, body, key)"
             " VALUES (?,?,?,?,?,?)",
-            (messages.PACS004.name, account_id, file_id, stamp, body.decode("utf-8"),
+            (messages.PACS004.name, account_id, file_id, stamp, body,
              _key(conn, messages.PACS004.name, account_id, day, RETURNED, file_id)))
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
-        body = messages.write_camt054(account, [dict(r, credit=True) for r in rows],
-                                      datetime.date.fromisoformat(day),
-                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        body = _written(conn, messages.CAMT054.name, account_id,
+                        lambda: messages.write_camt054(
+                            account, [dict(r, credit=True) for r in rows],
+                            datetime.date.fromisoformat(day),
+                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                        now, day=day)
+        if body is None:
+            continue
         conn.execute(
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+            (messages.CAMT054.name, account_id, stamp, body,
              _key(conn, messages.CAMT054.name, account_id, day, RETURNED)))
     return returned
 
@@ -713,8 +801,25 @@ def issue_statements(conn, clock, days, now) -> List[Dict[str, Any]]:
             # it left off rather than restarting at 1 and colliding with the
             # statements it has already been sent.
             number = db.next_value(conn, "camt.053:" + account["id"])
-            kind, text = _statement_body(account, day, number, opening, closing,
-                                         shown, now, clock)
+            try:
+                kind, text = _statement_body(account, day, number, opening, closing,
+                                            shown, now, clock)
+            except ValueError as error:
+                # This account's statement cannot be written. Every other
+                # account's still can, and so can the rest of the day's release
+                # (#166 part 2). The statement is recorded as issued with no
+                # message, so the day is done and nothing retries it.
+                record_unsent(conn, messages.CAMT053.name, account["id"], error,
+                              now, day=day.isoformat())
+                conn.execute(
+                    "INSERT INTO statement (account, day, number, opening, closing,"
+                    " entries, message_id) VALUES (?,?,?,?,?,?,NULL)",
+                    (account["id"], day.isoformat(), number, opening, closing,
+                     len(shown)))
+                issued.append({"account": account["id"], "day": day.isoformat(),
+                               "number": number, "message_id": None,
+                               "unsent": str(error)})
+                continue
             cursor = conn.execute(
                 "INSERT INTO message (type, account, due_at, released_at, body)"
                 " VALUES (?,?,?,?,?)",

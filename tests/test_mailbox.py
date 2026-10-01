@@ -274,7 +274,7 @@ class TheRealPipelineAgreesWithTheMailbox(PipelineCase):
         self.post("/_mock/reset")
         self.assertEqual(self.get("/_mock/mailbox").json(), [])
         self.assertEqual(self.get("/_mock/state").json()["messages"],
-                         {"queued": 0, "waiting": 0, "taken": 0})
+                         {"queued": 0, "waiting": 0, "taken": 0, "unsent": 0})
 
 
 class TheRequestLog(PipelineCase):

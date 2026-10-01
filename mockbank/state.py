@@ -107,7 +107,11 @@ class State:
         the old one, which is what keeps its numbers (see ``db.next_value``).
         """
         with self.lock:
-            for table in ("statement", "counter", "message", "payment", "collection", "credit",
+            # `unsent` is in the list and before `file`, which it references: a
+            # reset is a new bank, so what the old one could not write is gone
+            # too (#166).
+            for table in ("statement", "counter", "message", "unsent", "payment",
+                          "collection", "credit",
                           "file",
                           "request_log", "holiday", "account"):
                 self.conn.execute("DELETE FROM %s" % table)
@@ -291,6 +295,12 @@ class State:
                     "waiting": db.count(self.conn, "message",
                                         "released_at IS NOT NULL AND taken_at IS NULL"),
                     "taken": db.count(self.conn, "message", "taken_at IS NOT NULL"),
+                    # Messages the bank owes and could not write (#166). Counted
+                    # here so a tester sees that something is missing without
+                    # having to know to look; `GET /_mock/unsent` says what and
+                    # why. Not a message anybody can collect, so it is not one of
+                    # the three above.
+                    "unsent": outbox.unsent_count(self.conn),
                 },
                 "retention": {
                     "keepRequests": self.config.keep_requests,

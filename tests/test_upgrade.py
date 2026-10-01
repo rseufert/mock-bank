@@ -34,6 +34,7 @@ SCHEMA_V7 = os.path.join(HERE, "fixtures", "schema-v7.sql")
 SCHEMA_V8 = os.path.join(HERE, "fixtures", "schema-v8.sql")
 SCHEMA_V9 = os.path.join(HERE, "fixtures", "schema-v9.sql")
 SCHEMA_V10 = os.path.join(HERE, "fixtures", "schema-v10.sql")
+SCHEMA_V11 = os.path.join(HERE, "fixtures", "schema-v11.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -145,7 +146,7 @@ class FromVersionTwo(FileDatabaseCase):
         self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
         self.assertEqual(self.get("/_mock/payments/E2E-OLD").json()["amount"], 500)
         self.assertEqual(self.get("/_mock/state").json()["messages"],
-                         {"queued": 0, "waiting": 0, "taken": 0})
+                         {"queued": 0, "waiting": 0, "taken": 0, "unsent": 0})
         self.assertEqual(self.get("/_mock/mailbox").json(), [])
 
 
@@ -479,6 +480,38 @@ class FromVersionTen(FileDatabaseCase):
         self.assertEqual((new["mandate_id"], new["entry_class"]), ("M-C1", None))
 
 
+class FromVersionEleven(FileDatabaseCase):
+    """A file from before the bank kept what it could not write (#166, part 2).
+
+    The table is created on the way up and starts empty - nothing is invented for
+    a message the old mock failed to write, because nothing recorded it. What the
+    upgraded mock must do is keep answering, and say nothing is unsent until
+    something is.
+    """
+
+    start_on_setup = False
+    config_kwargs = {"clock": "2026-01-02T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V11, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME', 'NL41MOCK0000000001', 'MOCKNL2A', 'EUR', 1000,"
+            " 'accept')")
+        conn.commit()
+        conn.close()
+
+    def test_it_gains_the_unsent_table_and_reports_nothing_unsent(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        self.assertEqual(self.get("/_mock/unsent").json(), [])
+        self.assertEqual(self.get("/_mock/state").json()["messages"]["unsent"], 0)
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 1000)
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -513,7 +546,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (11, "386a6a0a6ccaeff4")
+    FINGERPRINT = (12, "b27f801ab37a77c6")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

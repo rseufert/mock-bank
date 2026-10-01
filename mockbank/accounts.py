@@ -371,6 +371,17 @@ def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     columns["parameters"] = json.dumps({})
     columns.update(checked)
     columns["name"] = columns["name"] or identifier
+    # The same trial `update` does (#166 part 1), because `create` is the other
+    # door onto the same rows and did not do it: a name of only spaces is truthy,
+    # so it survived the fallback above and every message for the account was then
+    # unwritable. Found while doing part 2 - `POST /_mock/accounts` with
+    # `"name": "   "` made every later advance a 500, with no payment involved.
+    try:
+        messages.write_camt054(dict(columns, id=identifier), [], _PROBE_DAY,
+                               "MB-C054-CHECK", _PROBE_AT)
+    except ValueError as error:
+        raise Invalid("the bank could not write its own messages for this "
+                      "account: %s" % error) from None
 
     keys = ["id"] + sorted(columns)
     values = [identifier] + [columns[key] for key in sorted(columns)]
@@ -507,17 +518,24 @@ def reason_fits(reason: str, account_format: str) -> bool:
 
 
 def scheduled_returns(conn, identifier: str, account_format: str) -> List[Dict[str, Any]]:
-    """Returns waiting on this account that `account_format` could not write.
+    """Returns and collection returns waiting that `account_format` cannot write.
 
-    A return's reason is stored on the payment when it books, not read from the
+    A return's reason is stored on the row when it books, not read from the
     account when it goes out, so changing the format afterwards leaves the stored
     reason behind - and a `pacs.004` carrying a NACHA `R02`, or an ACH return
     carrying `AC04`, cannot be written at all (#166 case f). Only returns that
     have not gone back yet matter: one already returned has been written.
     """
-    waiting = db.rows(conn, "SELECT return_due, return_reason FROM payment"
-                            " WHERE account_id = ? AND return_due IS NOT NULL"
-                            " AND returned_at IS NULL", (identifier,))
+    waiting = []
+    # Both tables: a collection has carried a `return_reason` since #178, and
+    # #176 gives NACHA collections R codes, so a format switch can leave a
+    # collection's return unwritable exactly as it can a payment's. Looking at
+    # `payment` alone was the gap this closes.
+    for table in ("payment", "collection"):
+        waiting += db.rows(conn, "SELECT return_due, return_reason, '%s' AS kind FROM %s"
+                                 " WHERE account_id = ? AND return_due IS NOT NULL"
+                                 " AND returned_at IS NULL" % (table, table),
+                           (identifier,))
     return [row for row in waiting if row["return_reason"]
             and not reason_fits(row["return_reason"], account_format)]
 
