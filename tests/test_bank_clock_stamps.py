@@ -1,8 +1,8 @@
 """Which control-plane timestamps are bank time and which are real time (#147).
 
 A payment's ``booked_at`` recorded real time while the bank clock decided the
-booking, so after ``POST /_mock/advance?days=3`` a payment booked on the bank's
-Thursday carried the real Monday. Rick's option 1: a stamp that records a moment
+booking, so a payment the bank booked on its own Sunday carried the real date of
+the run. Rick's option 1: a stamp that records a moment
 **the bank clock decided** comes from the bank clock, as a message's
 ``releasedAt`` always has. A stamp that records when the *process* did something
 stays on the real clock.
@@ -108,6 +108,23 @@ class WhatTheBankClockDecided(ClockCase):
         self.post("/_mock/advance?days=0")
         self.assert_on_the_bank_clock(self.payment("N3")["booked_at"], "booked_at")
 
+    def test_a_payments_booked_at_is_when_it_booked_not_when_it_was_due(self):
+        # The pair `returned_at` already has, for `booked_at`: the clock steps
+        # over the due day in one jump, so the stamp is the day the booking
+        # actually happened and `settlement_date` keeps saying the day it was
+        # for. A reader who takes `booked_at[:10]` for the settlement date gets
+        # the Monday for a payment due on the Friday.
+        self.post("/payments", body=pain001("CL-4", ACME, [("N4", 1750, UMBRELLA)],
+                                            when=DUE))
+        self.advance_to(LATER)
+        booked = self.payment("N4")
+        self.assertEqual(booked["booked_at"][:10], LATER.isoformat(),
+                         "booked_at should be the day the bank booked it")
+        self.assertEqual(booked["settlement_date"], DUE.isoformat(),
+                         "settlement_date should stay the day it was due")
+        # Guard: says nothing unless the clock really stepped over the due day.
+        self.assertNotEqual(booked["booked_at"][:10], booked["settlement_date"])
+
     def test_a_credits_two_stamps_agree_about_which_clock_they_are_on(self):
         # `received_at` was already bank time and `booked_at` was not, so one
         # credit carried both clocks - and `received_at` could read later than
@@ -211,7 +228,7 @@ class AFilesReceivedAt(ClockCase):
     The row had no reader at all until #147: nothing served it, so the stamp
     could not be checked over HTTP and a client had no bank-clock receipt time
     for a file - the gap the report was actually about. It is served beside
-    ``msgId`` on a payment now, so these go through the control plane.
+    ``msg_id`` on a payment now, so these go through the control plane.
     """
 
     def test_a_file_is_received_on_the_bank_clock(self):

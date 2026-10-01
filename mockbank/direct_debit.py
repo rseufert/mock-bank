@@ -145,7 +145,7 @@ def record(conn, decision, received_at):
     ``received_at`` is the bank clock's moment of receipt, as it is for a file
     of payments: one stamp, one rule, from the shared ``accounts.record_file``
     (#147). ``GET /_mock/collections`` does not report it yet - #131's own step
-    serves it there, the way a payment reports it beside its ``msgId``.
+    serves it there, the way a payment reports it beside its ``msg_id``.
     """
     file_id = accounts.record_file(conn, decision, received_at)
     if file_id is None:

@@ -555,11 +555,11 @@ thinks it means when that date is today. `--clock YYYY-MM-DDTHH:MM` pins where i
 
 **Which timestamps are bank time and which are real time.** A stamp that records
 a moment the bank clock *decided* is on the bank clock; a stamp that records when
-this process did something is on the real one. So after
-`POST /_mock/advance?days=3`, a payment booked on the bank's Thursday says
-Thursday, and the request log still says when the call actually arrived. Ordering
-events from the control plane therefore works within either clock, and the two
-are not comparable.
+this process did something is on the real one. So a payment due on the bank's
+Friday that `POST /_mock/advance?days=3` books on the Sunday says Sunday, and the
+request log still says when the call actually arrived. Ordering events from the
+control plane therefore works within either clock, and the two are not
+comparable.
 
 | Bank clock | Real clock |
 | --- | --- |
@@ -568,10 +568,20 @@ are not comparable.
 | a payment's `returned_at`, both kinds | the pickup folder's own record of having written a file |
 | a credit's `received_at`, and a file's | |
 
-A payment's `booked_at` and a credit's were real time through 0.5.0, which is the
-one place the two clocks were mixed on purpose by nobody
-([#147](https://github.com/rseufert/mock-bank/issues/147)). A file's
-`received_at` is reported beside its `msgId` on each of its payments, at
+A payment's `booked_at` and a credit's were real time through 0.5.0, which a
+reader could see in three places: `booked_at` on a payment and on a credit, and
+`returned_at` ([#147](https://github.com/rseufert/mock-bank/issues/147)).
+
+Two things a bank-clock stamp is not. It is **the moment the bank processed the
+thing, not the date it settles on**: a payment due on the Friday that the clock
+only reaches on the Sunday has `booked_at` `2026-09-27T11:30:00Z` and
+`settlement_date` `2026-09-25`, and it is `settlement_date` a statement books it
+under. It is also **the bank's moment written in UTC**: under
+`--timezone Pacific/Auckland --clock 2026-09-24T00:30` a payment settling on the
+bank's 24th has `booked_at` `2026-09-23T12:30:00Z`, so the date part of a stamp is
+not the bank's own date outside UTC.
+
+A file's `received_at` is reported beside its `msg_id` on each of its payments, at
 `GET /_mock/payments` and `GET /_mock/payments/<EndToEndId>`: the moment the bank
 took the file in, which is the moment the cutoff was judged on. It was stored and
 served nowhere before, so the nearest thing a client had was the `pain.002`'s

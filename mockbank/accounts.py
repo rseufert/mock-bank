@@ -707,7 +707,7 @@ def record_file(conn, decision, received_at):
     ``decide`` judged the cutoff on (#147). It used to be stored as real time,
     so the decision was taken on one clock and the record kept the other, and a
     file taken in on the bank's Thursday carried the real Monday. It is reported
-    beside the file's ``msgId`` on each of its payments.
+    beside the file's ``msg_id`` on each of its payments.
     """
     if decision.msg_id is None:
         return None
