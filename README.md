@@ -467,6 +467,39 @@ settled at the door, before anything is written:
 | On a NACHA account, an `InstrId` longer than a return addenda's original entry trace number | that payment is rejected, `FF01`. A NACHA account's rejections come back as returns ([#54](https://github.com/rseufert/mock-bank/issues/54)), and at receipt the bank cannot know whether this one will |
 | Changing an account's `format` while a return is already scheduled on one of its payments | `400`, saying how many, with which reason, and the last day one is due. The reason is stored when the payment books, so the switch would leave a return nothing can write. It is allowed again once they have gone back |
 
+**And what happens when a message cannot be written anyway.** The doors above
+cannot be complete: a `--db` file carries rows an older mock wrote, before a guard
+existed. So the bank copes rather than stopping. The booking stands — a payment
+that booked has booked, a return that came back has come back — and the message it
+owed you is given up on, with the writer's own complaint kept:
+
+```bash
+curl -s http://127.0.0.1:8080/_mock/unsent
+[{"id": 1, "type": "camt.053.001.08", "account": "OLD", "file_id": null,
+  "day": "2026-10-01", "at": "2026-10-01T09:00:00Z",
+  "problem": "/Document/BkToCstmrStmt/Stmt[1]/Acct/Ownr/Nm: Nm is empty"}]
+```
+
+`GET /_mock/state` counts them under `messages.unsent`, so a tester sees that
+something is missing without having to know to look. Three things follow, and all
+three are deliberate:
+
+- **Every other message of that release is still written.** One account's
+  unwritable statement does not stop another account's, and does not stop the
+  day's bookings.
+- **Nothing retries it.** The value it could not carry will not fix itself, so a
+  retry would add a row for every advance for ever. A statement given up on is
+  recorded as issued with no message, so `GET /_mock/accounts/<id>/statements`
+  shows it with `"message_id": null`. **That null means only "no message to
+  fetch", not "the bank could not write it"**: `--retention-days` nulls it too
+  when a `camt.053` that *was* sent and collected ages out. `GET /_mock/unsent` is
+  what says the bank could not write one, by type, account and day.
+- **A reset forgets it**, because a reset is a new bank. On `--db` it survives a
+  restart, because the row that caused it does.
+
+`POST /_mock/accounts/<id>/report` is not part of this: it answers one request, so
+a report it cannot write fails that call and blocks nothing.
+
 A creditor or debtor account that is **not** an IBAN is none of these: it is
 valid input, and the bank writes it back the way it came — in `Id/IBAN` when it
 strictly is an IBAN, and in `Id/Othr/Id` when it is not. `NL30 MOCK 0000 0000 05`
@@ -765,6 +798,7 @@ like mock-edi's so the two feel the same.
 | Dictionary | `GET /_mock/dictionary`, `GET /_mock/dictionary/<message>` | Every message the mock reads or writes, its element tree, the code sets and the choices made, as JSON; as mock-edi serves its X12 and EDIFACT sets |
 | Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright |
 | Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) |
+| What it could not send | `GET /_mock/unsent` | The messages the bank owes and could not write, oldest first, each with the writer's own complaint and the day it was for (#166). Counted in `/_mock/state` under `messages.unsent`; nothing retries them, and a reset forgets them |
 | Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body and its `key`; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
 | What it is going to send | `GET /_mock/queue` | What the bank has not released yet, soonest first, each with `dueAt`: a message already written and held back (a status report under `--status-delay-ms`, with its `id`), and the ones it will write when something books, with no `id` yet - the `camt.054` for payments not yet settled, for money arriving and for collections not yet settled or on their way back, and the `pacs.004` or NACHA return file and the credit a return brings. `reports` says which. **Every entry has a `key`, and the message arrives in the mailbox under the same `key`**, so "was waiting" pairs with "arrived" without matching on type and time: `camt.054.001.08/ACME/2026-10-06/payments-settling` for one the bank will write (type, account, the day it books under, what it reports, and the file where there is one message per file), `m<id>` for one already written. Treat it as opaque. A second message of one kind for one day - a file posted on its own settlement day, after that day's notification went out - ends `#2`, so a key names one message. `?type=` filters on a prefix, as the mailbox does. Reading it releases nothing and takes nothing. A statement is not listed: one is written for every open account when the clock is advanced past the end of a business day |
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |

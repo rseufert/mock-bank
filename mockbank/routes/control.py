@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 from typing import List
 
-from .. import __version__, db, routes, schema
+from .. import __version__, db, outbox, routes, schema
 from ..accounts import BEHAVIOURS
 from . import route
 
@@ -43,6 +43,20 @@ def health(h) -> None:
 @route("GET", "/_mock/state")
 def state(h) -> None:
     h.json(200, h.state.snapshot())
+
+
+@route("GET", "/_mock/unsent",
+       note=("the messages the bank owes and could not write, oldest first, "
+             "each with the writer's own complaint"))
+def unsent(h) -> None:
+    """What the bank could not write, and why (#166).
+
+    A message that cannot be written is not retried: the value it could not carry
+    will not fix itself, and retrying would add a row per advance for ever. So
+    this is the record of it, and the only one - the money moved, the
+    notification did not.
+    """
+    h.json(200, outbox.unsent(h.state.conn))
 
 
 @route("POST", "/_mock/reset",

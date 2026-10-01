@@ -266,6 +266,28 @@ SCHEMA = [
         message_id  INTEGER REFERENCES message (id)
     )
     """,
+    # A message the bank meant to send and could not write (#166, part 2). It is
+    # a separate table rather than a `message` row with no body: a `message` is
+    # something a client can collect, and this is the opposite - the bank saying
+    # what it owed you and could not produce. Keeping them apart means the
+    # mailbox, the pickup directory and `GET /_mock/queue` need to know nothing
+    # about it, and `body TEXT NOT NULL` stays true.
+    """
+    CREATE TABLE IF NOT EXISTS unsent (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- the message that was going to be written, as in camt.053.001.08
+        type     TEXT NOT NULL,
+        -- the account it was for; NULL for one that names no single account
+        account  TEXT,
+        file_id  INTEGER REFERENCES file (id),
+        -- the business day it was for, where it had one
+        day      TEXT,
+        -- the writer's own complaint, with the path of the element it refused
+        problem  TEXT NOT NULL,
+        -- the bank clock's moment the bank gave up on it
+        at       TEXT NOT NULL
+    )
+    """,
     # Sequences that must never repeat, by name - a camt.054 MsgId or a
     # statement number per account. Kept apart from the rows they number so
     # that pruning messages (#17) cannot make a number come round again.
@@ -316,7 +338,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class DatabaseError(Exception):
