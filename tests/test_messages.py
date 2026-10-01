@@ -199,7 +199,9 @@ class DebitNotification(MessageCase):
     def test_a_later_settlement_date_brings_no_camt054_yet(self):
         later = TODAY + datetime.timedelta(days=4)          # Monday
         answer = self.send(pain001("LATE-1", ACME, [("L1", 100, UMBRELLA)], when=later)).json()
-        self.assertIn({"type": CAMT054.name, "account": "ACME", "due_on": later.isoformat()},
+        self.assertIn({"type": CAMT054.name, "account": "ACME", "due_on": later.isoformat(),
+                       "key": "%s/ACME/%s/payments-settling" % (CAMT054.name,
+                                                                later.isoformat())},
                       answer["queued"])
         self.assertEqual(self.of_type(self.mailbox(), CAMT054), [])
 

@@ -43,6 +43,10 @@ from . import accounts, bai2, credits, db, messages, nacha
 # module, and neither has to know about the other.
 TEXT_TYPES = dict(nacha.TEXT_TYPES, **bai2.TEXT_TYPES)
 
+# What a message the bank writes on booking reports: `reports` in
+# `GET /_mock/queue`, and part of the message's key (#155).
+SETTLING, ARRIVING, RETURNED = "payments settling", "money arriving", "payments returned"
+
 
 def queue_status(conn, decision, file_id, now, delay_ms=0,
                  source="") -> List[Dict[str, Any]]:
@@ -87,8 +91,8 @@ def queue_status(conn, decision, file_id, now, delay_ms=0,
     cursor = conn.execute(
         "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
         (kind, account, file_id, db.stamp(due), body))
-    return [{"id": cursor.lastrowid, "type": kind, "account": account,
-             "due_at": db.stamp(due)}]
+    return [{"id": cursor.lastrowid, "key": "m%d" % cursor.lastrowid, "type": kind,
+             "account": account, "due_at": db.stamp(due)}]
 
 
 def _silent(conn, decision) -> bool:
@@ -109,6 +113,28 @@ def _sender(batch) -> str:
     return batch.debtor_account or ""
 
 
+def _key(conn, kind, account, day, reports, file_id=None) -> str:
+    """What pairs a message the bank will write with the message once written
+    (#155): ``GET /_mock/queue`` shows it before, the mailbox after.
+
+    The type, the account, the day it books under, what it reports and - where
+    there is one message per original file - the file. The row keeps it because
+    it knows only the first two: ``due_at`` is when the booking ran, not the
+    day booked, and three kinds of ``camt.054`` store the same columns.
+
+    A second message of one kind for one day - a file posted on its own
+    settlement day, after that day's notification went out - is ``#2``, so a
+    key names one message. Asked before the message is written, this is the key
+    it will get; asked again after, the next one.
+    """
+    base = "/".join([kind, account, day, reports.replace(" ", "-")]
+                    + (["file-%d" % file_id] if file_id else []))
+    used = db.one(conn, "SELECT COUNT(*) AS n FROM message WHERE key = ?"
+                        " OR substr(key, 1, ?) = ?",
+                  (base, len(base) + 1, base + "#"))["n"]
+    return "%s#%d" % (base, used + 1) if used else base
+
+
 def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
     """A NACHA account's returns for one day and one original file, as the
     return file NACHA sends where ISO 20022 sends a pacs.004 (#54)."""
@@ -122,8 +148,10 @@ def _queue_return_file(conn, account, rows, day, file_id, now) -> None:
     modifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[(sequence - 1) % 36]
     body = nacha.return_file(accounts.ROUTING, account, rows, day, now, modifier)
     conn.execute(
-        "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
-        (nacha.RETURN, account["id"], file_id, db.stamp(now), body))
+        "INSERT INTO message (type, account, file_id, due_at, body, key)"
+        " VALUES (?,?,?,?,?,?)",
+        (nacha.RETURN, account["id"], file_id, db.stamp(now), body,
+         _key(conn, nacha.RETURN, account["id"], day.isoformat(), RETURNED, file_id)))
 
 
 def upcoming(conn, file_id) -> List[Dict[str, Any]]:
@@ -134,7 +162,80 @@ def upcoming(conn, file_id) -> List[Dict[str, Any]]:
                          " AND account_id IS NOT NULL ORDER BY settlement_date, account_id",
                    (file_id, accounts.ACCEPTED))
     return [{"type": messages.CAMT054.name, "account": r["account_id"],
-             "due_on": r["settlement_date"]} for r in rows]
+             "due_on": r["settlement_date"],
+             "key": _key(conn, messages.CAMT054.name, r["account_id"],
+                         r["settlement_date"], SETTLING)} for r in rows]
+
+
+def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
+    """What the bank is going to send and has not released, soonest first (#155).
+
+    Reads and changes nothing: nothing is released, nothing is taken. Two kinds
+    of entry, told apart by ``written``:
+
+    - a message already **written** and waiting for its time, which today is a
+      status report held back by ``--status-delay-ms``. It has an ``id``, and
+      ``GET /_mock/mailbox/<id>`` shows it;
+    - a message the bank **will write** when something books, which is most of
+      what a caller means by "about to send": the ``camt.054`` for payments
+      accepted and not yet settled, the one for money arriving, and what a
+      return brings - a ``pacs.004`` or a NACHA return file per original file,
+      and a ``camt.054`` credit where money comes back. These have no ``id``
+      yet, and are due at the start of their day in bank time, which is when
+      an advance to that day books them. ``reports`` says which of those it
+      is, because a debit notification and a return's credit for one account
+      on one day are two messages of one type.
+
+    Every entry has a ``key``, and the message is in the mailbox under the same
+    one (``_key``, ``key_of``): that is what pairs the two.
+
+    A statement is not here. It is not owed for anything that has happened: one
+    is written for every open account each time the clock is advanced past the
+    end of a business day, so listing "the next one" would be listing the
+    calendar. ``kind`` is the mailbox's prefix filter.
+    """
+    out = [{"id": row["id"], "key": key_of(row), "type": row["type"],
+            "account": row["account"],
+            "fileId": row["file_id"], "msgId": row["msg_id"], "dueAt": row["due_at"],
+            "written": True, "reports": "a file's status"}
+           for row in db.rows(conn, "SELECT message.*, file.msg_id FROM message"
+                                    " LEFT JOIN file ON file.id = message.file_id"
+                                    " WHERE released_at IS NULL ORDER BY message.id")]
+    expected = set()
+    for row in db.rows(conn, "SELECT account_id, settlement_date FROM payment"
+                             " WHERE status = ? AND booked_at IS NULL"
+                             " AND account_id IS NOT NULL", (accounts.ACCEPTED,)):
+        expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
+                      None, SETTLING))
+    for row in db.rows(conn, "SELECT credit.account_id, booking_date FROM credit"
+                             " JOIN account ON account.id = credit.account_id"
+                             " WHERE booked_at IS NULL AND account.closed = 0"):
+        expected.add((row["booking_date"], messages.CAMT054.name, row["account_id"],
+                      None, ARRIVING))
+    for row in db.rows(conn, "SELECT payment.*, account.format FROM payment"
+                             " JOIN account ON account.id = payment.account_id"
+                             " WHERE return_due IS NOT NULL AND returned_at IS NULL"
+                             " AND (payment.status = ? OR (payment.status = ?"
+                             " AND booked_at IS NOT NULL))",
+                       (accounts.REJECTED, accounts.ACCEPTED)):
+        answer = nacha.RETURN if row["format"] == "nacha" else messages.PACS004.name
+        expected.add((row["return_due"], answer, row["account_id"], row["file_id"],
+                      RETURNED))
+        if row["status"] == accounts.ACCEPTED:
+            # Money comes back only for a payment that was debited (#144).
+            expected.add((row["return_due"], messages.CAMT054.name, row["account_id"],
+                          None, RETURNED))
+    names = {row["id"]: row["msg_id"] for row in db.rows(conn, "SELECT id, msg_id FROM file")}
+    for day, kind_, account, file_id, reports in expected:
+        start = datetime.datetime.combine(datetime.date.fromisoformat(day),
+                                          datetime.time(0, 0), tzinfo=clock.zone)
+        out.append({"id": None, "key": _key(conn, kind_, account, day, reports, file_id),
+                    "type": kind_, "account": account, "fileId": file_id,
+                    "msgId": names.get(file_id), "dueAt": db.stamp(start),
+                    "written": False, "reports": reports})
+    out = [entry for entry in out if entry["type"].startswith(kind)]
+    return sorted(out, key=lambda e: (e["dueAt"], not e["written"], e["type"],
+                                      e["account"] or "", e["fileId"] or 0, e["reports"]))
 
 
 def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
@@ -164,8 +265,9 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
         body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
                                       msg_id, now)
         conn.execute(
-            "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
+            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.CAMT054.name, account_id, day, SETTLING)))
     _release_credits(conn, now, today, clock)
     released = db.rows(conn, "SELECT id, type, account, due_at FROM message"
                              " WHERE released_at IS NULL AND due_at <= ? ORDER BY id",
@@ -190,8 +292,9 @@ def _release_credits(conn, now, today, clock):
         body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
                                       "MB-C054-%s-%d" % (account_id[:18], sequence), now)
         conn.execute(
-            "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
+            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.CAMT054.name, account_id, day, ARRIVING)))
 
 
 def _release_returns(conn, now, today):
@@ -219,8 +322,10 @@ def _release_returns(conn, now, today):
         body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
                                       "MB-P004-%s-%d" % (account_id[:18], sequence), now)
         conn.execute(
-            "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
-            (messages.PACS004.name, account_id, file_id, stamp, body.decode("utf-8")))
+            "INSERT INTO message (type, account, file_id, due_at, body, key)"
+            " VALUES (?,?,?,?,?,?)",
+            (messages.PACS004.name, account_id, file_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.PACS004.name, account_id, day, RETURNED, file_id)))
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
@@ -228,8 +333,9 @@ def _release_returns(conn, now, today):
                                       datetime.date.fromisoformat(day),
                                       "MB-C054-%s-%d" % (account_id[:18], sequence), now)
         conn.execute(
-            "INSERT INTO message (type, account, due_at, body) VALUES (?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8")))
+            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.CAMT054.name, account_id, day, RETURNED)))
     return returned
 
 
@@ -247,7 +353,7 @@ def collect(conn, now, leave=False, kind="") -> List[Dict[str, Any]]:
     when the mock starts writing a newer one, and the version is not what they
     mean.
     """
-    sql = ("SELECT id, type, account, file_id, due_at, released_at, body"
+    sql = ("SELECT id, type, account, file_id, due_at, released_at, body, key"
            " FROM message WHERE released_at IS NOT NULL AND taken_at IS NULL")
     params: List[Any] = []
     if kind:
@@ -326,6 +432,14 @@ def summary(row) -> str:
     return "%s for %s" % (row["type"], account)
 
 
+def key_of(row) -> str:
+    """A message's key (#155): the one it was written under, which
+    ``GET /_mock/queue`` showed before it existed, or ``m<id>`` for a message
+    that was a row all along - a status report, a statement, a report - and
+    for one written before the key was kept."""
+    return row["key"] or "m%d" % row["id"]
+
+
 def as_json(rows) -> List[Dict[str, Any]]:
     """The mailbox listing: what each message is, and the message.
 
@@ -337,7 +451,8 @@ def as_json(rows) -> List[Dict[str, Any]]:
     actually wants; `?raw` exists for the case where the XML is all you want,
     not to make the JSON form incomplete.
     """
-    return [{"id": row["id"], "type": row["type"], "account": row["account"],
+    return [{"id": row["id"], "key": key_of(row), "type": row["type"],
+             "account": row["account"],
              "releasedAt": row["released_at"], "dueAt": row["due_at"],
              "fileId": row["file_id"], "summary": summary(row),
              "bytes": len(row["body"].encode("utf-8")),

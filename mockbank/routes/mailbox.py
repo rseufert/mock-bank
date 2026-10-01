@@ -11,7 +11,7 @@ from . import first, flag, route
 # few, and a mock left running for a day has thousands.
 REQUEST_LOG_PAGE = 100
 
-# Every path here releases first, `?leave` included: whether a caller is
+# Every mailbox path here releases first, `?leave` included: whether a caller is
 # collecting or peeking, the question they are asking is "what is waiting for
 # me", and a `pain.002` held back by `--status-delay-ms` is waiting once its
 # time has come. Peeking should not show a different bank from collecting.
@@ -50,6 +50,17 @@ def mailbox(h) -> None:
         return h.text(200, outbox.raw(rows), "text/plain; charset=utf-8" if text
                       else "application/xml; charset=utf-8")
     h.json(200, outbox.as_json(rows))
+
+
+@route("GET", "/_mock/queue",
+       note=("what the bank is going to send and has not released, soonest "
+             "first, with when; ?type=camt.054 to filter. Reading it changes "
+             "nothing"))
+def queue(h) -> None:
+    """What is queued (#155). The one path here that does not release first:
+    it answers "what is about to be sent", and sending it would change the
+    answer."""
+    h.json(200, outbox.queued(h.state.conn, h.state.clock, first(h.query, "type")))
 
 
 @route("GET", "/_mock/mailbox/<id>")
