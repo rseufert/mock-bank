@@ -159,9 +159,14 @@ class TheCreditorAccount(CollectingCase):
                          ("RJCT", [("C1", "rejected", "AC03")]))
 
     def test_one_that_is_closed(self):
-        answer = self.collect([("C1", 1000)], creditor=INITECH)
+        # Closed by its flag alone: INITECH is closed *and* `closed-account`, so
+        # it could not tell the two apart.
+        self.behave("EURODIS", closed=True)
+        answer = self.collect([("C1", 1000)], creditor=EURODIS)
         self.assertEqual(self.outcomes(answer), [("C1", "rejected", "AC04")])
-        self.assertIn("the creditor account", answer.json()["collections"][0]["reason_text"])
+        [rejected] = answer.json()["collections"]
+        self.assertIn("the creditor account", rejected["reason_text"])
+        self.assertIsNone(rejected["settlement_date"], "a rejected collection settles never")
 
     def test_one_that_behaves_as_closed(self):
         self.behave("ACME", behaviour="closed-account")
@@ -194,7 +199,8 @@ class ADebtorTheBankHolds(CollectingCase):
     and nothing is booked on it."""
 
     def test_a_closed_one_is_ac04_and_the_rest_of_the_file_goes_on(self):
-        answer = self.collect([("C1", 1000), ("C2", 2500)], debtors={"C1": INITECH})
+        self.behave("EURODIS", closed=True)        # the flag alone, as above
+        answer = self.collect([("C1", 1000), ("C2", 2500)], debtors={"C1": EURODIS})
         self.assertEqual((answer.json()["status"], self.outcomes(answer)),
                          ("PART", [("C1", "rejected", "AC04"), ("C2", "accepted", None)]))
         self.assertIn("the debtor account", answer.json()["collections"][0]["reason_text"])
@@ -211,6 +217,10 @@ class ADebtorTheBankHolds(CollectingCase):
         self.assertEqual(self.outcomes(answer), [
             ("C1", "accepted", None), ("C2", "rejected", "AM04"), ("C3", "accepted", None)])
         self.assertIn("has available, 2.50", answer.json()["collections"][1]["reason_text"])
+
+    def test_a_collection_of_exactly_the_balance_fits(self):
+        answer = self.collect([("C1", 1250)], debtors={"C1": GLOBEX})
+        self.assertEqual(self.outcomes(answer), [("C1", "accepted", None)])
 
     def test_the_debtors_balance_is_read_and_not_changed(self):
         self.collect([("C1", 1000)], debtors={"C1": GLOBEX})
