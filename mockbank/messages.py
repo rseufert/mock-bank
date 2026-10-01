@@ -21,8 +21,9 @@ wire.
 from __future__ import annotations
 
 import datetime
+import re
 from decimal import Decimal, InvalidOperation
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree as ET
 
 from . import schema
@@ -495,9 +496,7 @@ def _entry(p, day):
     if p["creditor_name"]:
         parties["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
     if p["creditor_iban"]:
-        parties["CdtrAcct"] = {"Id": (
-            {"IBAN": p["creditor_iban"]} if schema.iban_is_valid(p["creditor_iban"])
-            else {"Othr": {"Id": p["creditor_iban"]}})}
+        parties["CdtrAcct"] = {"Id": party_account(p["creditor_iban"])}
     if parties:
         tx["RltdPties"] = parties
     if p["creditor_bic"]:
@@ -535,7 +534,7 @@ def _incoming(c, day):
     if c["debtor_name"]:
         parties["Dbtr"] = {"Pty": {"Nm": c["debtor_name"][:140]}}
     if c["debtor_iban"]:
-        parties["DbtrAcct"] = {"Id": {"IBAN": c["debtor_iban"]}}
+        parties["DbtrAcct"] = {"Id": party_account(c["debtor_iban"])}
     if parties:
         tx["RltdPties"] = parties
     if c["debtor_bic"]:
@@ -554,6 +553,27 @@ def _incoming(c, day):
         "AcctSvcrRef": "MB-RCV-%d" % c["id"],
         "BkTxCd": {"Domn": {"Cd": domain, "Fmly": {"Cd": family, "SubFmlyCd": sub}}},
         "NtryDtls": [{"TxDtls": [tx]}]}
+
+
+# An `IBAN` element holds an IBAN and nothing else - the XSD's own pattern, which
+# has no room for spaces. `schema.iban_is_valid` forgives them on the way *in*,
+# deliberately: a tester who pastes `NL30 MOCK 0000 0000 05` means that account.
+# That makes it the wrong test for the way *out*, and using it put a spaced value
+# straight into `Id/IBAN`, which the writer refused - so the bank took the file
+# and then answered 500 to every later call (#166 case b).
+_STRICT_IBAN = re.compile(schema.PATTERNS["IBAN2007Identifier"])
+
+
+def party_account(value: str) -> Dict[str, Any]:
+    """A party's account as an ``Id``: ``IBAN`` when it strictly is one, else ``Othr``.
+
+    The account goes back the way it came. An unstructured account identifier is
+    valid input and valid output - a creditor account the sender gave as
+    ``Othr/Id`` is not an error, and the bank accepted it - so the only thing
+    wrong was the element it was written into.
+    """
+    return ({"IBAN": value} if _STRICT_IBAN.fullmatch(value or "")
+            else {"Othr": {"Id": value}})
 
 
 def _collected(c, day):
@@ -583,9 +603,7 @@ def _collected(c, day):
     if c["debtor_name"]:
         parties["Dbtr"] = {"Pty": {"Nm": c["debtor_name"][:140]}}
     if c["debtor_iban"]:
-        parties["DbtrAcct"] = {"Id": (
-            {"IBAN": c["debtor_iban"]} if schema.iban_is_valid(c["debtor_iban"])
-            else {"Othr": {"Id": c["debtor_iban"]}})}
+        parties["DbtrAcct"] = {"Id": party_account(c["debtor_iban"])}
     if parties:
         tx["RltdPties"] = parties
     if c["debtor_bic"]:
@@ -766,9 +784,7 @@ def write_pacs004(account, payments, day, msg_id, created_at) -> bytes:
             if p["debtor_name"]:
                 original["Dbtr"] = {"Pty": {"Nm": p["debtor_name"][:140]}}
             if p["debtor_iban"]:
-                original["DbtrAcct"] = {"Id": (
-                    {"IBAN": p["debtor_iban"]} if schema.iban_is_valid(p["debtor_iban"])
-                    else {"Othr": {"Id": p["debtor_iban"]}})}
+                original["DbtrAcct"] = {"Id": party_account(p["debtor_iban"])}
             tx["OrgnlTxRef"] = original
             transactions.append(tx)
             continue
@@ -777,9 +793,7 @@ def write_pacs004(account, payments, day, msg_id, created_at) -> bytes:
         if p["creditor_name"]:
             original["Cdtr"] = {"Pty": {"Nm": p["creditor_name"][:140]}}
         if p["creditor_iban"]:
-            original["CdtrAcct"] = {"Id": (
-                {"IBAN": p["creditor_iban"]} if schema.iban_is_valid(p["creditor_iban"])
-                else {"Othr": {"Id": p["creditor_iban"]}})}
+            original["CdtrAcct"] = {"Id": party_account(p["creditor_iban"])}
         tx["OrgnlTxRef"] = original
         transactions.append(tx)
     return schema.serialize(PACS004, {"PmtRtr": {

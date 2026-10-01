@@ -19,7 +19,7 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from . import db, nacha, schema
+from . import db, messages, nacha, schema
 
 # name -> what the bank does. Kept in the order the README lists them.
 BEHAVIOURS = {
@@ -400,6 +400,40 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
                      json.loads(changes["parameters"]) if "parameters" in changes
                      else existing["parameters"],
                      changes.get("format", existing["format"]))
+    becoming = changes.get("format", existing["format"])
+    if becoming != existing["format"]:
+        # The reason a return comes back with is stored on the payment when it
+        # books, so changing the format afterwards does not change it - and the
+        # release cannot write a `pacs.004` carrying a NACHA code, or an ACH
+        # return carrying an ISO one. Before #166 the switch was taken, and the
+        # bank then answered 500 to every advance and every mailbox read from the
+        # day the return fell due until it was reset.
+        stuck = scheduled_returns(conn, identifier, becoming)
+        if stuck:
+            due = sorted(row["return_due"] for row in stuck)
+            raise Invalid(
+                "%d return%s already scheduled on this account carr%s a reason "
+                "only %s can write (%s), the last due %s; the format cannot "
+                "change under them - let them come back first, or reset the mock"
+                % (len(stuck), "s" if len(stuck) > 1 else "",
+                   "y" if len(stuck) > 1 else "ies", existing["format"],
+                   ", ".join(sorted({row["return_reason"] for row in stuck})),
+                   due[-1]))
+    # Every message the bank writes for this account carries its name, so a name
+    # the writers cannot carry is refused here rather than found on the release
+    # path, where it makes every advance and every mailbox read a 500 until the
+    # mock is reset (#166 case a). The same shape as `credits.create`: write it
+    # once, now, the way the release will, and refuse what the writer refuses. A
+    # `camt.054` with no entries is the cheapest message that carries the account
+    # and nothing else, so this says nothing about any payment.
+    candidate = dict(existing)
+    candidate.update({key: value for key, value in changes.items()
+                      if key != "parameters"})
+    try:
+        messages.write_camt054(candidate, [], _PROBE_DAY, "MB-C054-CHECK", _PROBE_AT)
+    except ValueError as error:
+        raise Invalid("the bank could not write its own messages for this "
+                      "account: %s" % error) from None
     try:
         conn.execute("UPDATE account SET %s WHERE id = ?"
                      % ", ".join("%s = ?" % key for key in changes),
@@ -420,6 +454,12 @@ def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
 # so a misspelt `dyas` cannot silently mean three days.
 RETURN_LATER = {"days": 3, "reason": "AC04", "end_to_end_id": None}
 
+# How much of an `InstrId` a NACHA return can carry back: the original entry
+# trace number's own width, read off the declaration rather than written out, so
+# the two cannot disagree (#166 case c).
+NACHA_TRACE_WIDTH = next(field.width for field in nacha.RETURN_ADDENDA[1]
+                         if field.name == "original entry trace number")
+
 # A NACHA account's return reason is an R code, and closed is the default, as
 # AC04 is for an ISO 20022 account (#54).
 NACHA_RETURN_REASON = "R02"
@@ -429,6 +469,41 @@ def return_reason(parameters: Dict[str, Any], account_format: str) -> str:
     """The reason a return-later payment comes back with, for this format."""
     default = NACHA_RETURN_REASON if account_format == "nacha" else RETURN_LATER["reason"]
     return parameters.get("reason", default)
+
+
+# A fixed moment for the trial write in `update`. The probe asks whether this
+# account's own fields can be written into a message, and nothing about that
+# depends on when it is asked.
+_PROBE_DAY = datetime.date(2000, 1, 1)
+_PROBE_AT = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def reason_fits(reason: str, account_format: str) -> bool:
+    """Whether a return reason is one this format's return message can carry.
+
+    One test for two callers: `check_parameters`, which refuses a reason the
+    account is given, and `update`, which refuses a format change that would
+    leave an already-scheduled return unwritable (#166 case f).
+    """
+    if account_format == "nacha":
+        return reason in nacha.RETURN_REASONS
+    return reason in schema.CODE_SETS["ExternalReturnReason1Code"]
+
+
+def scheduled_returns(conn, identifier: str, account_format: str) -> List[Dict[str, Any]]:
+    """Returns waiting on this account that `account_format` could not write.
+
+    A return's reason is stored on the payment when it books, not read from the
+    account when it goes out, so changing the format afterwards leaves the stored
+    reason behind - and a `pacs.004` carrying a NACHA `R02`, or an ACH return
+    carrying `AC04`, cannot be written at all (#166 case f). Only returns that
+    have not gone back yet matter: one already returned has been written.
+    """
+    waiting = db.rows(conn, "SELECT return_due, return_reason FROM payment"
+                            " WHERE account_id = ? AND return_due IS NOT NULL"
+                            " AND returned_at IS NULL", (identifier,))
+    return [row for row in waiting if row["return_reason"]
+            and not reason_fits(row["return_reason"], account_format)]
 
 
 def check_parameters(behaviour: str, parameters: Dict[str, Any],
@@ -445,16 +520,14 @@ def check_parameters(behaviour: str, parameters: Dict[str, Any],
         raise Invalid("return-later's days is a whole number of business days from "
                       "0 to 60, not %r" % (days,))
     reason = return_reason(parameters, account_format)
-    if account_format == "nacha":
-        if reason not in nacha.RETURN_REASONS:
+    if not reason_fits(reason, account_format):
+        if account_format == "nacha":
             raise Invalid("return-later's reason on a NACHA account is a NACHA return "
                           "code, one of %s; %r is not" % (", ".join(sorted(
                               nacha.RETURN_REASONS)), reason))
-    else:
         codes = schema.CODE_SETS["ExternalReturnReason1Code"]
-        if reason not in codes:
-            raise Invalid("return-later's reason is an ISO 20022 return reason code, one "
-                          "of %s; %r is not" % (", ".join(sorted(codes)), reason))
+        raise Invalid("return-later's reason is an ISO 20022 return reason code, one "
+                      "of %s; %r is not" % (", ".join(sorted(codes)), reason))
     e2e = parameters.get("end_to_end_id")
     if e2e is not None and (not isinstance(e2e, str) or not e2e):
         raise Invalid("return-later's end_to_end_id is the EndToEndId of the one "
@@ -581,16 +654,19 @@ def decide(payment_file, findings, conn, clock, received_at, allow_duplicates=Fa
        a. a debtor account the bank does not hold: ``AC02``; one it holds
           that is closed: ``AC04``;
        b. a payment-level finding: its code (``AC01``, ``AM03``, ``AM05``);
-       c. a payment in another currency than the held debtor account: ``AM03``;
-       d. a held creditor account that is closed or ``closed-account``: ``AC04``;
-       e. a held creditor account that is ``bad-bank-id``: ``RC01``;
-       f. a debtor account with ``insufficient-funds``: ``AM04`` for each
+       c. on a NACHA account, an ``InstrId`` longer than the return addenda's
+          original entry trace number: ``FF01``, because a return could not then
+          be written for it (#166);
+       d. a payment in another currency than the held debtor account: ``AM03``;
+       e. a held creditor account that is closed or ``closed-account``: ``AC04``;
+       f. a held creditor account that is ``bad-bank-id``: ``RC01``;
+       g. a debtor account with ``insufficient-funds``: ``AM04`` for each
           payment that would take the available balance (the balance less
           what is accepted and not yet booked) below zero, accepting later
           smaller ones that fit. It is the only behaviour that looks at the
           balance; under every other one a payment books even below zero, as
           on an account with an overdraft;
-       g. under any behaviour, a payment that would overdraw the account past
+       h. under any behaviour, a payment that would overdraw the account past
           the 18 digits a statement can write (``MAX_BALANCE``): ``AM02`` (#106).
 
     5. A debtor account with ``silent``: decided and booked like any other,
@@ -667,6 +743,21 @@ def _payment_reason(conn, debtor, batch, payment, errors, available):
     for finding in errors:
         if _under(finding.path, payment.path):
             return finding.code, finding.text
+    if (debtor["format"] == "nacha" and payment.instruction_id
+            and len(payment.instruction_id) > NACHA_TRACE_WIDTH):
+        # Refused here because the bank cannot answer for it later (#166 case c).
+        # A NACHA account's rejections come back as returns (#54), and so does a
+        # `return-later` payment, and the return addenda carries the original
+        # entry's trace number in a fixed width. At receipt the bank does not know
+        # whether this payment will come back, so it refuses the one value that
+        # would make the answer unwritable if it did - rather than accepting it and
+        # answering 500 to every advance and mailbox read from the day it is due.
+        return schema.STRUCTURAL, (
+            "InstrId %r is %d characters; a NACHA return carries the original "
+            "entry trace number in %d, so if this payment came back the bank "
+            "could not write the return"
+            % (payment.instruction_id, len(payment.instruction_id),
+               NACHA_TRACE_WIDTH))
     if payment.currency != debtor["currency"]:
         return "AM03", ("the amount is in %s but the debtor account %s is held in %s"
                         % (payment.currency, debtor["iban"], debtor["currency"]))
