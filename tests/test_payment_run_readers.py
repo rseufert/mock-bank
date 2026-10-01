@@ -355,6 +355,30 @@ class ARealBanksFile(unittest.TestCase):
                          (Decimal("1595811.94"), Decimal("1593811.94")))
 
 
+class WhatAStatementCannotCarryBack(unittest.TestCase):
+    """`payment_run.UNCARRIABLE` against the writer it is about (#171).
+
+    The example imports no mock, so it cannot read `bai2.UNSAFE` and has to write
+    the set out. That is a copy, and a copy drifts: if `_safe` ever starts
+    replacing another character, the run would keep paying invoices whose
+    reference it mangles and nothing would say so. This holds the two equal, which
+    is the only thing making "from `bai2.UNSAFE` and `CONTROLS`, not a list typed
+    by hand" true rather than true on the day it was written.
+    """
+
+    def test_the_examples_set_is_exactly_the_writers(self):
+        self.assertEqual(set(payment_run.UNCARRIABLE),
+                         set(bai2.UNSAFE) | set(bai2.CONTROLS))
+
+    def test_a_reference_holding_one_really_does_come_back_changed(self):
+        # Not a tautology about two constants: the reason the guard exists is that
+        # `_safe` changes the value, so one of them is put through it.
+        for bad in (",", "/"):
+            reference = "INV%s1" % bad
+            self.assertNotEqual(bai2._safe(reference), reference, bad)
+            self.assertEqual(bai2._safe(reference), "INV 1", bad)
+
+
 class AnAccountThatIsNotAStatement(unittest.TestCase):
 
     def test_if_it_is_ours_it_is_a_problem_and_nothing_is_posted(self):

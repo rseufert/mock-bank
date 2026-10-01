@@ -202,6 +202,34 @@ class PayingOpenItems(MocksCase):
         self.assertEqual(self.by_reference(second)["UMB-0815"].status, "accepted")
         self.assertEqual(control(BANK, "GET", "/_mock/payments/UMB-0815")["amount"], 23800)
 
+    @unittest.skipUnless(NACHA, "what a BAI2 statement cannot carry back")
+    def test_a_reference_the_statement_cannot_carry_back_is_skipped(self):
+        """#171, #164 item 2: the entry carries it; the statement cannot.
+
+        BAI2 has no escape character, so `bai2._safe` turns a `,` or a `/` in the
+        reference into a space on the way back, and SAP matches the structured
+        reference exactly. The payment is never cleared, the item stays open, and
+        the next run pays it again - a double payment with nothing in either log
+        saying anything went wrong. Skipping it is the only honest answer the run
+        can give, because the run cannot change what the statement carries.
+        """
+        self.sap.invoice(GLOBEX, "GLX,4711", "10.00")          # a comma
+        self.sap.invoice(GLOBEX, "GLX/4712", "20.00")          # a slash
+        self.sap.invoice(GLOBEX, "GLX-4713", "5.00")           # neither
+        items = self.by_reference(self.payments.run(self.today, "R1"))
+        self.assertEqual({r: i.status for r, i in items.items()},
+                         {"GLX,4711": "skipped", "GLX/4712": "skipped",
+                          "GLX-4713": "accepted"})
+        # The reason names the character, so a reader knows what to change.
+        self.assertIn("BAI2 statement cannot carry back", items["GLX,4711"].reason)
+        self.assertIn(repr(","), items["GLX,4711"].reason)
+        self.assertIn(repr("/"), items["GLX/4712"].reason)
+        # Neither reached the bank, so neither can be paid and left unmatched.
+        for reference in ("GLX,4711", "GLX/4712"):
+            status, _body = call(BANK, "GET", "/_mock/payments/"
+                                 + urllib.parse.quote(reference, safe=""))
+            self.assertEqual(status, 404, reference)
+
     @unittest.skipUnless(NACHA, "what a NACHA entry cannot carry")
     def test_what_a_nacha_entry_cannot_carry_is_skipped_and_the_rest_paid(self):
         self.sap.invoice(GLOBEX, "GLX 4711", "10.00")          # a space
@@ -482,6 +510,70 @@ class TheNachaFileHeader(unittest.TestCase):
     def test_an_unknown_file_format_is_an_error(self):
         with self.assertRaises(ValueError):
             PaymentRun(SAP, BANK, ACME, "NACHA")
+
+
+class TwoSuppliersWithOneInvoiceNumber(unittest.TestCase):
+    """#171, #164 item 5: an invoice number is a supplier's own sequence.
+
+    Two suppliers can both bill `INV-1`, so a reference does not identify an item.
+    SAP's accounting document does, and SAP returns it on every CLEARED and
+    REOPENED row. Keyed on the reference, a dict of items collapses the two into
+    one *before any matching happens* and the earlier one is simply gone - so a
+    clearing can be recorded against an item SAP never cleared, while the item it
+    did clear is left looking unpaid and is paid again by the next run.
+
+    No mock has to be running: SAP's answer is the thing under test, so it is
+    handed over directly at `post_idoc`, which is where the run reads it. That
+    also makes the two-supplier case deterministic, which it would not be against
+    a live SAP picking one of two matching items itself (mock-sap#87).
+    """
+
+    GLOBEX_DOCUMENT = "0100000007"
+    UMBRELLA_DOCUMENT = "0100000008"
+
+    def both(self):
+        globex = Item(document="1000/2026/%s" % self.GLOBEX_DOCUMENT, supplier=GLOBEX,
+                      reference="INV-1", amount="10.00", status="accepted")
+        umbrella = Item(document="1000/2026/%s" % self.UMBRELLA_DOCUMENT,
+                        supplier=UMBRELLA, reference="INV-1", amount="20.00",
+                        status="accepted")
+        return Run(datetime.date(2026, 10, 2), "R1", [globex, umbrella]), globex, umbrella
+
+    def post(self, run, applied):
+        """One statement posted, with SAP's answer to it supplied."""
+        statement = {"number": "1", "day": "2026-10-05",
+                     "opening": Decimal("100.00"), "closing": Decimal("70.00"),
+                     "lines": [{"end_to_end_id": "INV-1", "amount": Decimal("10.00"),
+                                "side": "DBIT", "returned_for": ""},
+                               {"end_to_end_id": "INV-1", "amount": Decimal("20.00"),
+                                "side": "DBIT", "returned_for": ""}]}
+        runner = PaymentRun(SAP, BANK, ACME, MODE)
+        with unittest.mock.patch.object(runner.session, "post_idoc", return_value=applied):
+            return runner.post_statement(run, statement)
+
+    def test_each_clearing_goes_to_the_item_sap_says_it_cleared(self):
+        run, globex, umbrella = self.both()
+        self.post(run, {"CLEARED": [
+            {"LINE": 1, "REFERENCE": "INV-1",
+             "ACCOUNTINGDOCUMENT": self.GLOBEX_DOCUMENT,
+             "CLEARINGDOCUMENT": "0200000001", "AMOUNT": "10.00"},
+            {"LINE": 2, "REFERENCE": "INV-1",
+             "ACCOUNTINGDOCUMENT": self.UMBRELLA_DOCUMENT,
+             "CLEARINGDOCUMENT": "0200000002", "AMOUNT": "20.00"}]})
+        # Keyed on the reference, both rows resolve to whichever item the dict
+        # comprehension kept, the first clearing is written to it, and the second
+        # is then dropped because that item is no longer `accepted`.
+        self.assertEqual((globex.status, globex.reason), ("cleared", "0200000001"))
+        self.assertEqual((umbrella.status, umbrella.reason), ("cleared", "0200000002"))
+
+    def test_a_row_naming_no_accounting_document_is_said_out_loud(self):
+        run, globex, umbrella = self.both()
+        self.post(run, {"CLEARED": [{"LINE": 1, "REFERENCE": "INV-1",
+                                     "CLEARINGDOCUMENT": "0200000001",
+                                     "AMOUNT": "10.00"}]})
+        self.assertEqual((globex.status, umbrella.status), ("accepted", "accepted"))
+        self.assertTrue(any("names no accounting document" in p for p in run.problems),
+                        run.problems)
 
 
 if __name__ == "__main__":
