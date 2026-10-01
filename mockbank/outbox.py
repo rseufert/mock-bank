@@ -46,7 +46,7 @@ TEXT_TYPES = dict(nacha.TEXT_TYPES, **bai2.TEXT_TYPES)
 # What a message the bank writes on booking reports: `reports` in
 # `GET /_mock/queue`, and part of the message's key (#155).
 SETTLING, ARRIVING, RETURNED = "payments settling", "money arriving", "payments returned"
-COLLECTED = "collections settling"
+COLLECTED, COLLECTION_RETURNED = "collections settling", "collections returned"
 
 
 def queue_status(conn, decision, file_id, now, delay_ms=0,
@@ -229,6 +229,14 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
                              " AND account.closed = 0", (accounts.ACCEPTED,)):
         expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
                       None, COLLECTED))
+    for row in db.rows(conn, "SELECT collection.account_id, return_due, file_id"
+                             " FROM collection JOIN account ON account.id = collection.account_id"
+                             " WHERE return_due IS NOT NULL AND returned_at IS NULL"
+                             " AND account.closed = 0"):
+        for kind_, file_id in ((messages.PACS004.name, row["file_id"]),
+                               (messages.CAMT054.name, None)):
+            expected.add((row["return_due"], kind_, row["account_id"], file_id,
+                          COLLECTION_RETURNED))
     for row in db.rows(conn, "SELECT payment.*, account.format FROM payment"
                              " JOIN account ON account.id = payment.account_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
@@ -287,6 +295,7 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
              _key(conn, messages.CAMT054.name, account_id, day, SETTLING)))
     _release_credits(conn, now, today, clock)
     _release_collections(conn, now, today, clock)
+    _release_collection_returns(conn, now, today, clock)
     released = db.rows(conn, "SELECT id, type, account, due_at FROM message"
                              " WHERE released_at IS NULL AND due_at <= ? ORDER BY id",
                        (stamp,))
@@ -331,6 +340,52 @@ def _release_collections(conn, now, today, clock):
             "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
             (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
              _key(conn, messages.CAMT054.name, account_id, day, COLLECTED)))
+
+
+def _release_collection_returns(conn, now, today, clock):
+    """Debit what the debtor's bank sent back, and tell the client twice, as a
+    payment's return does: a ``pacs.004`` per account, day and original file,
+    and a ``camt.054`` debit per account and day (#131)."""
+    stamp = db.stamp(now)
+    by_file: Dict[tuple, List[Dict[str, Any]]] = {}
+    by_day: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in direct_debit.book_returns(conn, today, clock, now):
+        by_file.setdefault((row["account_id"], row["return_due"], row["file_id"]), []).append(row)
+        by_day.setdefault((row["account_id"], row["return_due"]), []).append(row)
+    for (account_id, day, file_id), rows in sorted(by_file.items()):
+        account = accounts.require(conn, account_id)
+        sequence = db.next_value(conn, "pacs.004:" + account_id)
+        body = messages.write_pacs004(account, rows, datetime.date.fromisoformat(day),
+                                      "MB-P004-%s-%d" % (account_id[:18], sequence), now)
+        conn.execute(
+            "INSERT INTO message (type, account, file_id, due_at, body, key)"
+            " VALUES (?,?,?,?,?,?)",
+            (messages.PACS004.name, account_id, file_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.PACS004.name, account_id, day, COLLECTION_RETURNED, file_id)))
+    for (account_id, day), rows in sorted(by_day.items()):
+        account = accounts.require(conn, account_id)
+        sequence = db.next_value(conn, "camt.054:" + account_id)
+        body = messages.write_camt054(account, rows, datetime.date.fromisoformat(day),
+                                      "MB-C054-%s-%d" % (account_id[:18], sequence), now)
+        conn.execute(
+            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
+            (messages.CAMT054.name, account_id, stamp, body.decode("utf-8"),
+             _key(conn, messages.CAMT054.name, account_id, day, COLLECTION_RETURNED)))
+
+
+def queue_refusal(conn, collection, now, delay_ms=0) -> Dict[str, Any]:
+    """The further ``pain.002`` for a collection refused before it settled
+    (#131), due like any status report; what was queued."""
+    msg_id = "MB-P002-R%06d" % db.next_value(conn, "pain002-refusal")
+    body = messages.write_pain002_refusal(collection, msg_id, now).decode("utf-8")
+    due = db.stamp(now + datetime.timedelta(milliseconds=delay_ms))
+    cursor = conn.execute(
+        "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
+        (messages.PAIN002.name, collection["account_id"], collection["file_id"], due, body))
+    conn.commit()
+    return {"id": cursor.lastrowid, "key": "m%d" % cursor.lastrowid,
+            "type": messages.PAIN002.name, "account": collection["account_id"],
+            "due_at": due}
 
 
 def _release_returns(conn, now, today):
@@ -580,6 +635,9 @@ def _position(conn, account, day):
     # A collection (#131) is a credit too, on the day it settled.
     later_credits += direct_debit.booked_after(conn, account["id"], when)
     booked += direct_debit.booked_on(conn, account["id"], when)
+    # ...and one the debtor's bank sent back is a debit, on its return day.
+    later_debits += direct_debit.returned_after(conn, account["id"], when)
+    booked += direct_debit.returned_on(conn, account["id"], when)
     closing = account["balance"] + int(later_debits) - int(later_credits)
     opening = closing + sum(-p["amount"] if p.get("credit") else p["amount"]
                             for p in booked)

@@ -31,6 +31,7 @@ Type codes
 ``257``         the credit for a payment that came back
 ``142``         money arriving from somebody else, #91
 ``165``         a collection that settled, #131
+``557``         a collection that went back, #131
 ==============  ==============================================================
 
 Every code here is settled against a source outside the project (#127), and
@@ -63,6 +64,12 @@ only written for NACHA accounts.
 ``ACH Debit Collection``, the proceeds of a debit the account holder collected
 (#131). The mock wrote it for a return until #127, which is the paragraph below;
 it is back for the movement the sample shows it on.
+
+``557``, *Individual ACH Return Item*, a debit. **The evidence is the table's
+description**, as for ``257``, which is the same item on the credit side. The
+only ``557`` in the samples is an ``ACH Credit Receipt Return`` - a credit the
+account holder received, going back - where ours is a debit it collected, going
+back. No sample shows a collection returned.
 
 **What they replaced, and why.** Until #127 these were ``495``, ``165`` and
 ``195``, marked as placeholders because no licensed code list existed when #57
@@ -146,6 +153,7 @@ DEBIT = "447"             # ACH Disbursement Funding Debit: "ACH Credit Payment"
 RETURNED_CREDIT = "257"   # Individual ACH Return Item
 RECEIVED_CREDIT = "142"   # ACH Credit Received (#91)
 COLLECTED_CREDIT = "165"  # Preauthorized ACH Credit: sample4's "ACH Debit Collection" (#131)
+RETURNED_COLLECTION = "557"   # Individual ACH Return Item, a debit (#131)
 # Codes still unverified. Empty since #127; one that loses its source goes back.
 PLACEHOLDER_CODES: Tuple[str, ...] = ()
 
@@ -646,7 +654,8 @@ def _transaction(payment: Dict) -> str:
     if payment.get("collected"):
         # A collection that settled (#131): the debtor's name is the text, and
         # the file it was asked for in the customer reference, as on a debit.
-        return _record("16", COLLECTED_CREDIT, _movement(payment["amount"]),
+        return _record("16", RETURNED_COLLECTION if payment.get("returned")
+                       else COLLECTED_CREDIT, _movement(payment["amount"]),
                        AVAILABLE_NOW, _safe(payment["end_to_end_id"]),
                        _safe(payment.get("msg_id") or ""),
                        payment.get("debtor_name") or "")

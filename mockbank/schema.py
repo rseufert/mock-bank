@@ -138,6 +138,8 @@ CODE_SETS = {
         "MD02": "MissingMandatoryInformationInMandate: mandate information is missing",
         "DUPL": "DuplicatePayment: the file or payment has already been received",
         "FF01": "InvalidFileFormat: the file format is incomplete or invalid",
+        "MD01": "NoMandate: there is no valid mandate for the collection",
+        "MD06": "RefundRequestByEndCustomer: the debtor asked for an authorised collection back",
         "MD07": "EndCustomerDeceased: the end customer is deceased",
         "MS02": "NotSpecifiedReasonCustomerGenerated: reason not specified, customer generated",
         "MS03": "NotSpecifiedReasonAgentGenerated: reason not specified, agent generated",
@@ -228,6 +230,8 @@ CODE_SETS = {
         "AM05": "Duplication: the payment was a duplicate",
         "BE04": "MissingCreditorAddress: the creditor's address is missing or incorrect",
         "CUST": "RequestedByCustomer: the creditor asked for the payment to be returned",
+        "MD01": "NoMandate: there is no valid mandate for the collection",
+        "MD06": "RefundRequestByEndCustomer: the debtor asked for an authorised collection back",
         "MD07": "EndCustomerDeceased: the end customer is deceased",
         "MS02": "NotSpecifiedReasonCustomerGenerated: reason not specified, customer generated",
         "MS03": "NotSpecifiedReasonAgentGenerated: reason not specified, agent generated",
@@ -252,11 +256,15 @@ BANK_TRANSACTION_CODES = {
                               "Transfer: money arriving from somebody else (#91)",
     ("PMNT", "IDDT", "ESDD"): "Payments / Issued Direct Debits / SEPA Core Direct "
                               "Debit: the credit a collection books (#131)",
+    ("PMNT", "IDDT", "UPDD"): "Payments / Issued Direct Debits / Reversal due to "
+                              "Return or Unpaid Direct Debit: the debit a returned "
+                              "collection books (#131)",
 }
 BOOKED_DEBIT = ("PMNT", "ICDT", "ESCT")
 RETURNED_CREDIT = ("PMNT", "ICDT", "RRTN")
 RECEIVED_CREDIT = ("PMNT", "RCDT", "ESCT")
 COLLECTED_CREDIT = ("PMNT", "IDDT", "ESDD")
+RETURNED_COLLECTION = ("PMNT", "IDDT", "UPDD")
 
 # Code sets checked by pattern rather than list, and identifier shapes.
 PATTERNS = {
