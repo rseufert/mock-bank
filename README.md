@@ -309,8 +309,11 @@ a record with no `/` ends at the newline. A `/` inside a field is content unless
 a record code and a separator follow it, and a line that does not begin with a
 record code continues the one above it, joined with nothing
 ([#142](https://github.com/rseufert/mock-bank/issues/142)) - so a field a
-fixed-width producer wrapped across two lines reads as one value. Five files from moov-io/bai2 are held
-to that. Three of them reconcile, and the check worth naming is that every
+fixed-width producer wrapped across two lines reads as one value. Nothing is
+inserted and nothing is dropped: a space or a column of padding before the wrap
+is the field's own content and survives it, while whitespace after a terminator
+is outside the record and does not. Five files from moov-io/bai2 are held to
+that. Three of them reconcile, and the check worth naming is that every
 control total and record count in those, recomputed from the records it covers,
 comes out as stated. The other two state totals that contradict themselves,
 which is those files and not the reader. One limit remains, because BAI2 has no

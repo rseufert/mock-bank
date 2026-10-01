@@ -144,10 +144,11 @@ class ARealBanksFile(unittest.TestCase):
         """The agreement, one level below the movements - and it had a hole.
 
         The test above compares each movement's amount, side and two references.
-        It does **not** compare the text, and `sample3`'s only wrapped line falls
-        in a text field, so the two readers could disagree about how a wrap joins
-        and nothing here noticed: reverting `payment_run`'s join alone, while
-        `mockbank.bai2` kept #142's, passed this whole suite.
+        It does **not** compare the text, and both wraps in the corpus -
+        `sample3` line 18 and `sample5` line 62 - fall in a text field, so the two
+        readers could disagree about how a wrap joins and nothing here noticed:
+        reverting `payment_run`'s join alone, while `mockbank.bai2` kept #142's,
+        passed this whole suite.
 
         Comparing the field lists closes it. It is also the stronger statement of
         what "two readers agree" should mean - not that they agree about the four
@@ -159,6 +160,65 @@ class ARealBanksFile(unittest.TestCase):
                 text = sample(name)
                 theirs = [[r.code] + list(r.values) for r in bai2._fold(text)]
                 self.assertEqual(payment_run.bai2_records(text), theirs)
+
+    def test_a_wrap_inside_a_reference_reads_as_one_value_here_too(self):
+        """`payment_run` on the case #142 exists for, held on its own.
+
+        No vendored file wraps outside a `16`'s text, so the agreement test above
+        can only hold the readers together where a sample happens to wrap - and
+        the field that matters to this reader is the one it reconciles on. A
+        newline left in `end_to_end_id` is a payment that stops matching its
+        invoice, and that is this reader's job, not `mockbank.bai2`'s.
+        """
+        wrapped = ("01,BANK,CUST,261001,0000,1,,,2/\n"
+                   "02,ACME,BANK,1,261001,0000,USD,/\n"
+                   "03,0000000001,USD,010,+125000,,Z,015,+0,,Z/\n"
+                   "16,495,125000,Z,INV-2026-\n"
+                   "0101,MSG-1,Globex Supplies B.V./\n"
+                   "49,+125000,4/\n98,+125000,1,6/\n99,+125000,1,8/\n")
+        [statement] = payment_run.bai2_statements(wrapped)
+        [line] = statement["lines"]
+        self.assertEqual(line["end_to_end_id"], "INV-2026-0101")
+        self.assertEqual(line["msg_id"], "MSG-1")
+        self.assertEqual((Decimal(line["amount"]), line["side"]),
+                         (Decimal("1250.00"), "DBIT"))
+        # And the same text through the other reader, which is the claim the
+        # agreement test cannot make about a field no sample wraps.
+        self.assertEqual(payment_run.bai2_records(wrapped),
+                         [[r.code] + list(r.values) for r in bai2._fold(wrapped)])
+
+    def test_a_space_on_either_side_of_a_wrap_is_kept_by_both(self):
+        """Joining with nothing means nothing is inserted - and nothing removed.
+
+        Both readers used to `rstrip()` every line before joining, so a producer
+        that wrapped *after* a space lost it: `PAYMENT FOR ` + `INVOICE 12` read
+        `PAYMENT FORINVOICE 12`. Until #142 the line break kept the words apart,
+        so the rule traded one defect for another. moov trims only a copy, for the
+        record-code test, and appends to its buffer untouched.
+
+        Whitespace after a terminator is a different thing - it is outside the
+        record - and still comes off.
+        """
+        def read(text):
+            fields = [[r.code] + list(r.values) for r in bai2._fold(text)]
+            self.assertEqual(payment_run.bai2_records(text), fields, text)
+            return fields[0][-1]
+
+        # A space before the break, which the producer wrote and meant.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,PAYMENT FOR \n"
+                              "INVOICE 12/\n"),
+                         "PAYMENT FOR INVOICE 12")
+        # One on each side: both are content, so both survive.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,PAYMENT FOR \n"
+                              " INVOICE 12/\n"),
+                         "PAYMENT FOR  INVOICE 12")
+        # A fixed-width field padded to its column, which is what wraps in the
+        # first place. sample1 writes `RETURNED CHEQUE     ` this way.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,ACME      \n"
+                              "LTD       /\n"),
+                         "ACME      LTD       ")
+        # Outside the record: the terminator's trailing whitespace still goes.
+        self.assertEqual(read("16,495,125000,Z,REF1,MSG-1,DONE/   \n"), "DONE")
 
     def test_sample3_adds_up_account_by_account(self):
         # Packed records and a wrapped one: if either were read wrong, a

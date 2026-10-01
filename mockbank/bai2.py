@@ -910,10 +910,18 @@ def _records(text: str):
     somebody looking for the problem should open.
     """
     out = []
-    for number, line in enumerate(text.splitlines(), start=1):
-        line = line.rstrip()
-        if not line.strip():
+    for number, raw_line in enumerate(text.splitlines(), start=1):
+        # Trailing whitespace *after* a terminator is outside the record and
+        # comes off. With no terminator the line may be continued, and then its
+        # trailing spaces are the last field's own padding: stripping them ran
+        # `PAYMENT FOR ` straight into `INVOICE 12`, and a fixed-width `ACME    `
+        # into the text that followed. Before #142 the line break kept those
+        # apart; now nothing else does. moov trims only a copy, for the code
+        # test, and appends to its buffer untouched.
+        trimmed = raw_line.rstrip()
+        if not trimmed:
             continue
+        line = trimmed if trimmed.endswith(TERMINATOR) else raw_line
         if not STARTS_RECORD.match(line.lstrip()):
             if not out:
                 raise Unreadable(
@@ -942,10 +950,16 @@ def _records(text: str):
             # One implementation and no file: **no BAI2 file anywhere in
             # moov-io/bai2 wraps outside a 16's text**, so nothing attests the
             # case this rule is for. The two wraps that exist both continue a
-            # 16's text, where the content is filler and reads as meaninglessly
-            # one way as the other. That is recorded on #142 rather than
-            # presented as settled, and the rule is the PM's decision on that
-            # basis.
+            # 16's text, but only `sample3`'s is filler that reads as
+            # meaninglessly one way as the other. `sample5` line 62 ends
+            # `GS ID: SC213480000120999` and line 63 is `88:EREF: 07370568132` -
+            # a continuation typed with a colon, so a wrap and not an 88 - and
+            # joining with nothing runs the two references together. moov's
+            # scanner reads it the same way, so the file does not contradict the
+            # rule's source; it does bear on a decision taken on "no file
+            # adjudicates", and both readings are posted on #142. That is
+            # recorded there rather than presented as settled, and the rule is
+            # the PM's decision on that basis.
             where, so_far = out[-1]
             out[-1] = (where, so_far + _ended(line))
             continue

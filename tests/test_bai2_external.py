@@ -565,8 +565,10 @@ class HowARecordEnds(unittest.TestCase):
 
         moov-io/bai2's scanner joins with nothing, and no file anywhere attests
         the case either way - the two wraps in existence both fall in a `16`'s
-        text where the content is filler. One implementation, no file, and the
-        PM's decision on that basis; #142 records it as exactly that.
+        text. **This** one is filler; `sample5`'s is not, and
+        `test_sample5s_wrap_runs_a_gs_id_into_the_eref_that_follows` pins what it
+        reads. One implementation, no file, and the PM's decision on that basis;
+        #142 records it as exactly that, with both of sample5's readings.
 
         The `,       1111111111` on the end is the `88` that follows, which joins
         with a separator, because that is what a continuation continues.
@@ -587,6 +589,47 @@ class HowARecordEnds(unittest.TestCase):
             bai2.detail(wrapped[0].values).text,
             "111111     ACH_SETL           1111111111111111111111111"
             "        ,       1111111111")
+
+    def test_sample5s_wrap_runs_a_gs_id_into_the_eref_that_follows(self):
+        """The second wrap in the corpus, pinned - and it is not filler (#142).
+
+        `sample3`'s wrap falls in a run of repeated digits, which reads as
+        meaninglessly one way as the other. **`sample5`'s does not.** Line 62 ends
+        `GS ID: SC213480000120999` with no terminator and line 63 is
+        `88:EREF: 07370568132` - a continuation typed with a colon where the
+        separator should be, so it is a wrap and not an `88` record, and its
+        content is a reference somebody meant.
+
+        Joined with nothing, the GS ID runs straight into `88:EREF`::
+
+            0.5.0:  '... GS ID: SC213480000120999\\n88:EREF: 07370568132'
+            now:    '... GS ID: SC21348000012099988:EREF: 07370568132'
+
+        moov-io/bai2's scanner reads it the same way, so this does not contradict
+        the rule's source - but #142's decision was taken on "no file
+        adjudicates", and this file bears on it. The two readings are posted there
+        for the PM to confirm or change. Pinned here because until now only the
+        two-reader agreement test touched this record, and that says the readers
+        agree, not what the value is.
+        """
+        [wrapped] = [r for r in bai2._fold(text(FIVE))
+                     if r.code == "16" and r.line == 62]
+        # Lines 62 to 66: the 16, its wrap, and the three 88s that follow.
+        # Unlike sample3, sample5's own trailers contradict themselves - see
+        # `TheTwoFixturesWhoseOwnArithmeticIsWrong` - so the count is read off
+        # the file's lines here and not argued from a control total.
+        self.assertEqual(wrapped.lines, 5)
+        lines = text(FIVE).splitlines()[61:66]
+        self.assertTrue(lines[0].startswith("16,255,931,"), lines[0][:20])
+        self.assertEqual(lines[1], "88:EREF: 07370568132")
+        self.assertTrue(all(l.startswith("88,") for l in lines[2:]), lines[2:])
+        self.assertNotIn("\n", "".join(wrapped.values))
+        detail = bai2.detail(wrapped.values)
+        self.assertEqual(detail.reference, "SC2134800001999")
+        self.assertIn("GS ID: SC21348000012099988:EREF: 07370568132", detail.text)
+        # The join inserts nothing and drops nothing: the characters either side
+        # of the break are exactly those of the two lines.
+        self.assertIn("SC213480000120999" + "88:EREF: 07370568132", detail.text)
 
     def test_a_wrap_inside_a_reference_reads_as_one_value(self):
         """The case #142 exists for, and the reason the rule is not cosmetic.

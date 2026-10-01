@@ -721,10 +721,14 @@ def bai2_records(text: str) -> List[List[str]]:
     next; an `88` continues the field stream of the record before it.
     """
     raw: List[str] = []
-    for line in text.splitlines():
-        line = line.rstrip()
-        if not line.strip():
+    for raw_line in text.splitlines():
+        # Whitespace after a terminator is outside the record; with no
+        # terminator the line may be continued and its trailing spaces are the
+        # last field's padding, which the break used to keep apart (#142).
+        trimmed = raw_line.rstrip()
+        if not trimmed:
             continue
+        line = trimmed if trimmed.endswith("/") else raw_line
         if not BAI2_STARTS.match(line.lstrip()):
             if not raw:
                 raise ValueError("a BAI2 file starts with a record code, not %r"
