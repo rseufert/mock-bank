@@ -291,7 +291,10 @@ one back:
   its ISO 20022 reason if there is one, and `R02` otherwise.
 
 On the `camt.054` the reason is in ISO 20022's words: `R05` is `AG01`, `R07`,
-`R10` and `R29` are `MD01`, and `R08` is `MS02`. The `R` codes are moov-io/ach's
+`R10` and `R29` are `MD01`, and `R08` is `MS02`. **That mapping is the mock's
+own**: no outside source pairs NACHA's return codes with ISO 20022's, so it is
+the nearest meaning, chosen here, and a real bank may say it differently. The
+`R` code in the return file is the one to rely on. The `R` codes are moov-io/ach's
 table (`addenda99.go` @ `7ee7ad0`); `tests/samples/external/nacha-return-WEB.ach`
 is a returned debit from outside, which the mock's reader has taken since #55.
 **The pairing of an `R` code with an ISO 20022 reason is the mock's own** and
