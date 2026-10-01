@@ -388,13 +388,18 @@ def _position(conn, account, day):
     when = day.isoformat()
     # Debits booked after the day took money out since; returns that
     # came back after it put money in. Undo both to reach the day's end.
+    # A return only put money in if the payment was debited in the first
+    # place. A NACHA account's rejections are given a return as well (#54,
+    # option (a)) and nothing is credited for those, because nothing was ever
+    # booked - so `booked_at IS NOT NULL` is what separates the two, and it is
+    # the same condition `accounts.book_returns` credits on (#144).
     later_debits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
                                 " WHERE account_id = ? AND booked_at IS NOT NULL"
                                 " AND settlement_date > ?",
                           (account["id"], when))["total"]
     later_credits = db.one(conn, "SELECT COALESCE(SUM(amount), 0) AS total FROM payment"
                                  " WHERE account_id = ? AND returned_at IS NOT NULL"
-                                 " AND return_due > ?",
+                                 " AND booked_at IS NOT NULL AND return_due > ?",
                            (account["id"], when))["total"]
     booked = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
                            " JOIN file ON file.id = payment.file_id"
@@ -404,6 +409,7 @@ def _position(conn, account, day):
     came_back = db.rows(conn, "SELECT payment.*, file.msg_id FROM payment"
                               " JOIN file ON file.id = payment.file_id"
                               " WHERE account_id = ? AND returned_at IS NOT NULL"
+                              " AND booked_at IS NOT NULL"
                               " AND return_due = ? ORDER BY payment.id",
                         (account["id"], when))
     booked += [dict(p, credit=True) for p in came_back]

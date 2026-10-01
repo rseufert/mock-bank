@@ -262,7 +262,8 @@ of three behaviours is rejected with its NACHA return code - `R01` for
 `insufficient-funds`, `R02` for `closed-account`, `R03` for `bad-bank-id` - and
 the acknowledgement says so. It also comes back the next business day as a
 return entry, the way ACH answers it: nothing was debited, so nothing is
-credited, and the return file is the whole answer. A payment that settles and
+credited, and the return file is the whole answer - it is on no statement and
+no `camt.052`, and it moves no balance on any day. A payment that settles and
 then comes back under `return-later` is a return entry too, where an ISO 20022
 account gets a `pacs.004`; its `reason` is an `R` code on a NACHA account, `R02`
 by default, and anything else is refused at `PATCH`. A return file is a real
