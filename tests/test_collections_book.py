@@ -10,7 +10,7 @@ acceptance and never debited.
 import datetime
 from xml.etree import ElementTree as ET
 
-from test_collections_read import pain008
+from test_collections_read import external, pain008
 from test_statements import (ACME, CAMT053, FRIDAY, MONDAY, TODAY, TUESDAY, StatementCase,
                              read_statement)
 
@@ -42,6 +42,7 @@ def entries(root):
             "debtor_iban": tx.findtext("m:RltdPties/m:DbtrAcct/m:Id/m:IBAN", namespaces=ns),
             "debtor_bic": tx.findtext("m:RltdAgts/m:DbtrAgt/m:FinInstnId/m:BICFI",
                                       namespaces=ns),
+            "note": [u.text for u in tx.findall("m:RmtInf/m:Ustrd", ns)],
         })
     return out
 
@@ -109,6 +110,17 @@ class SettlingOnTheClock(BookingCase):
         self.assertEqual(self.balance("ACME"), before)
         self.assertEqual([s["entries"] for s in self.acme_statements()], [[], []])
 
+    def test_each_day_states_its_own_collections_and_opens_where_the_last_closed(self):
+        before = self.balance("ACME")
+        self.collect([("C1", 1000)], msg_id="DD-1")
+        self.collect([("C2", 2500)], msg_id="DD-2", when=MONDAY)
+        self.advance(TUESDAY)
+        _thursday, friday, monday = self.acme_statements()
+        self.assertEqual((friday["opening"], friday["closing"], friday["entries"]),
+                         (before, before + 1000, [("C1", 1000)]))
+        self.assertEqual((monday["opening"], monday["closing"], monday["entries"]),
+                         (before + 1000, before + 3500, [("C2", 2500)]))
+
     def test_a_debtor_the_bank_holds_is_not_debited(self):
         # Only the account holder's side books, as for a payment into an
         # account the bank holds.
@@ -135,9 +147,35 @@ class WhatTheBankSaysAboutIt(BookingCase):
             "code": ("PMNT", "IDDT", "ESDD"),
             "refs": {"MsgId": "DD-1", "PmtInfId": "DD-1-B1", "EndToEndId": "C1",
                      "MndtId": "M-C1"},
-            "debtor": "Customer C1", "debtor_iban": UMBRELLA_IBAN, "debtor_bic": "MOCKNL2A"})
+            "debtor": "Customer C1", "debtor_iban": UMBRELLA_IBAN, "debtor_bic": "MOCKNL2A",
+            "note": []})
         self.assertEqual(entry["code"], schema.COLLECTED_CREDIT)
         self.assertIn(schema.COLLECTED_CREDIT, schema.BANK_TRANSACTION_CODES)
+
+    def test_a_file_from_outside_keeps_its_remittance_line_and_its_mandate(self):
+        # The apiome sample, collecting for ACME: its dates are past, so both
+        # collections settle on the first day the bank can.
+        answer = self.post("/payments", body=external(
+            "pain.008.001.08-direct-debit.xml").replace(
+                b"DE89370400440532013000", ACME.encode("ascii"))).json()
+        self.assertEqual(answer["accepted"], 2, answer)
+        self.advance(FRIDAY)
+        [note] = self.of_type(self.mailbox(), CAMT054)
+        self.assertEqual([(e["refs"]["EndToEndId"], e["refs"]["MndtId"], e["note"],
+                           e["debtor_iban"]) for e in entries(note)],
+                         [("E2E-DD-0001", "MANDATE-001", ["Electricity January 2026"],
+                           "DE91100000000123456789"),
+                          ("E2E-DD-0002", "MANDATE-002", ["Gas January 2026"],
+                           "DE12500105170648489890")])
+
+    def test_statement_gap_leaves_the_collection_off_and_keeps_the_balances(self):
+        self.patch("/_mock/accounts/ACME", body={"behaviour": "statement-gap"})
+        before = self.balance("ACME")
+        self.collect([("C1", 1000)])
+        self.advance(MONDAY)
+        friday = self.acme_statements()[-1]
+        self.assertEqual((friday["opening"], friday["closing"], friday["entries"]),
+                         (before, before + 1000, []))
 
     def test_the_statement_and_the_intraday_report_carry_the_same_entry(self):
         before = self.balance("ACME")
