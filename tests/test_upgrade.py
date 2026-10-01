@@ -300,6 +300,10 @@ class FromVersionSeven(FileDatabaseCase):
     credit that books on the clock."""
 
     start_on_setup = False
+    # A Wednesday. The last test books a credit for today and expects it on the
+    # balance a day later, which on the real clock failed every Saturday: the
+    # credit waits for Monday and a day's advance only reaches Sunday (#148).
+    config_kwargs = {"clock": "2026-09-30T09:00"}
 
     def setUp(self):
         super().setUp()
