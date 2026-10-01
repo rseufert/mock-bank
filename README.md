@@ -1110,7 +1110,7 @@ than half-supporting it.
 | --- | --- |
 | EBICS, SWIFT FIN and SWIFTNet transport | Both need certificates and cryptography, which breaks zero dependencies; the same call mock-edi made on S/MIME. HTTP and folders cover testing. |
 | Signed or encrypted files | Same reason; an encrypted file is refused with a message saying so. |
-| Direct debits beyond `pain.008.001.08` | 0.6 collects with `pain.008.001.08` (#131). Not there: a NACHA file's debit entries as collections, which the reader still reports as a finding; `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
+| Direct debits beyond `pain.008.001.08` | 0.6 collects with `pain.008.001.08` (#131). **A NACHA file's debit entries as collections are the next step, also in 0.6** ([#176](https://github.com/rseufert/mock-bank/issues/176)); until it lands the reader reports a debit entry as a finding. Out on purpose: `pain.008.001.02`, the older version many banks still take; and a mandate register - the mock reports the mandate a file states and polices none (no amendments, no `FRST` before `RCUR`). |
 | Real-time payments, cards, FX | Different rails and rules; each is a project of its own. |
 | Fraud, sanctions and AML screening | Real logic, not wire shapes; out of scope permanently, like SAP business logic in mock-sap. |
 

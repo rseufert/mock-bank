@@ -277,6 +277,26 @@ class ADebtorThisBankHolds(RefusingCase):
         self.assertEqual((monday["opening"], monday["closing"], monday["entries"]),
                          (before + 3500, before + 2500, [("C1", 1000)]))
 
+    def test_one_move_of_the_clock_over_three_days_states_each_day_its_own(self):
+        # C1 settles on Friday and goes back on Monday; C2 settles on Monday and
+        # goes back on Tuesday. The clock is moved once, so every booking is
+        # done before the first statement is written, and each day's position
+        # has to undo what came after it.
+        self.patch("/_mock/accounts/GLOBEX", body={
+            "behaviour": "return-later", "parameters": {"days": 1}})
+        before = self.balance("ACME")
+        self.collect([("C1", 100)], msg_id="DD-1", debtors={"C1": GLOBEX_IBAN})
+        self.collect([("C2", 200)], msg_id="DD-2", when=MONDAY, debtors={"C2": GLOBEX_IBAN})
+        self.advance(TUESDAY + datetime.timedelta(days=1))
+        self.assertEqual(self.balance("ACME"), before)
+        _thursday, friday, monday, tuesday = self.acme_statements()
+        self.assertEqual((friday["opening"], friday["closing"], friday["entries"]),
+                         (before, before + 100, [("C1", 100)]))
+        self.assertEqual((monday["opening"], monday["closing"], monday["entries"]),
+                         (before + 100, before + 200, [("C2", 200), ("C1", 100)]))
+        self.assertEqual((tuesday["opening"], tuesday["closing"], tuesday["entries"]),
+                         (before + 200, before, [("C2", 200)]))
+
     def test_it_names_one_collection_when_the_account_does(self):
         self.patch("/_mock/accounts/GLOBEX", body={
             "behaviour": "return-later", "parameters": {"days": 1, "end_to_end_id": "C2"}})
