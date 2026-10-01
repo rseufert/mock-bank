@@ -33,6 +33,7 @@ SCHEMA_V6 = os.path.join(HERE, "fixtures", "schema-v6.sql")
 SCHEMA_V7 = os.path.join(HERE, "fixtures", "schema-v7.sql")
 SCHEMA_V8 = os.path.join(HERE, "fixtures", "schema-v8.sql")
 SCHEMA_V9 = os.path.join(HERE, "fixtures", "schema-v9.sql")
+SCHEMA_V10 = os.path.join(HERE, "fixtures", "schema-v10.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -439,6 +440,45 @@ class FromVersionNine(FileDatabaseCase):
         self.assertEqual(new["key"], coming["key"])
 
 
+class FromVersionTen(FileDatabaseCase):
+    """A file from before a collection kept what a NACHA debit entry carries
+    (#176): the collection it holds keeps reading, with nothing in the new
+    columns, and the next one from a `pain.008` leaves them empty too."""
+
+    start_on_setup = False
+    config_kwargs = {"clock": "2026-01-02T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V10, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME', 'NL41MOCK0000000001', 'MOCKNL2A', 'EUR', 1000,"
+            " 'accept')")
+        conn.execute("INSERT INTO file (id, msg_id, message, received_at, status, reported)"
+                     " VALUES (1, 'OLD-1', 'pain.008.001.08', '2025-12-30T09:00:00Z',"
+                     " 'ACCP', 1)")
+        conn.execute(
+            "INSERT INTO collection (file_id, end_to_end_id, account_id, amount, currency,"
+            " status, settlement_date, booked_at) VALUES (1, 'OLD-C', 'ACME', 500, 'EUR',"
+            " 'accepted', '2025-12-31', '2025-12-31T09:00:00Z')")
+        conn.commit()
+        conn.close()
+
+    def test_an_old_collection_keeps_reading_and_a_new_one_is_taken(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        old = self.get("/_mock/collections/OLD-C").json()
+        self.assertEqual((old["status"], old["entry_class"], old["transaction_code"],
+                          old["debtor_clearing_id"]), ("accepted", None, None, None))
+        answer = self.post("/payments", body=pain008([("C1", 1000)]))
+        self.assertEqual((answer.status, answer.json()["status"]), (202, "ACCP"), answer.body)
+        new = self.get("/_mock/collections/C1").json()
+        self.assertEqual((new["mandate_id"], new["entry_class"]), ("M-C1", None))
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -473,7 +513,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (10, "5aed922072cbd3e1")
+    FINGERPRINT = (11, "386a6a0a6ccaeff4")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

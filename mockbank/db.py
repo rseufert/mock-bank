@@ -211,7 +211,13 @@ SCHEMA = [
         booked_at          TEXT,
         return_due         TEXT,
         return_reason      TEXT,
-        returned_at        TEXT
+        returned_at        TEXT,
+        -- a collection read from a NACHA debit entry (#176): its SEC code,
+        -- its transaction code and the receiving bank's routing number, which
+        -- a return of it has to echo. NULL for one from a pain.008.
+        entry_class        TEXT,
+        transaction_code   TEXT,
+        debtor_clearing_id TEXT
     )
     """,
     # What the bank sends back, queued for when it is due. The writers (#7)
@@ -310,7 +316,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class DatabaseError(Exception):

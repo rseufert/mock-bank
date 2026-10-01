@@ -19,7 +19,7 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from . import db, nacha, schema
+from . import db, messages, nacha, schema
 
 # name -> what the bank does. Kept in the order the README lists them.
 BEHAVIOURS = {
@@ -321,6 +321,22 @@ def resolve(conn, payment_file) -> None:
     creditor at another bank, or a debtor the bank does not hold (`AC02`).
     Changes the model in place; nothing is stored here.
     """
+    if isinstance(payment_file, messages.CollectionFile):
+        # The mirror (#131, #176): the batch names the creditor account, and
+        # each collection a debtor by routing and account number.
+        for batch in payment_file.batches:
+            if batch.creditor_account and by_iban(conn, batch.creditor_account) is None:
+                held = by_account_number(conn, batch.creditor_account)
+                if held is not None:
+                    batch.creditor_account = held["iban"]
+            for collection in batch.collections:
+                if (getattr(collection, "debtor_clearing_id", None) == ROUTING
+                        and collection.debtor_account
+                        and by_iban(conn, collection.debtor_account) is None):
+                    held = by_account_number(conn, collection.debtor_account)
+                    if held is not None:
+                        collection.debtor_account = held["iban"]
+        return
     for batch in (payment_file.batches if payment_file else []):
         if batch.debtor_account and by_iban(conn, batch.debtor_account) is None:
             held = by_account_number(conn, batch.debtor_account)
