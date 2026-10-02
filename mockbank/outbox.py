@@ -640,6 +640,31 @@ def collect(conn, now, leave=False, kind="") -> List[Dict[str, Any]]:
     return rows
 
 
+def sent(conn, kind="") -> List[Dict[str, Any]]:
+    """Every message the bank has sent, collected or not, oldest first (#186).
+
+    The mailbox forgets a message once it is collected, so somebody watching a
+    client could not find what the client had already taken. This is the same
+    listing with those still in it and ``takenAt`` on each: when it was
+    collected, or None. Reads and changes nothing - it releases nothing and
+    takes nothing - so it shows exactly what has been released, and
+    ``GET /_mock/queue`` shows the rest.
+
+    Not everything ever sent: retention removes collected messages as they age
+    (``db.prune``), and a reset removes them all. ``kind`` is the mailbox's
+    prefix filter.
+    """
+    sql = "SELECT * FROM message WHERE released_at IS NOT NULL"
+    params: List[Any] = []
+    if kind:
+        # A literal prefix, as in `collect`, and for its reasons.
+        sql += " AND substr(type, 1, length(?)) = ?"
+        params.extend([kind, kind])
+    rows = db.rows(conn, sql + " ORDER BY id", params)
+    return [dict(entry, takenAt=row["taken_at"])
+            for entry, row in zip(as_json(rows), rows)]
+
+
 def message(conn, message_id) -> Dict[str, Any]:
     """One message by id, taken or not, or None.
 

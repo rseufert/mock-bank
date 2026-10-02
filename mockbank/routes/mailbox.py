@@ -63,6 +63,22 @@ def queue(h) -> None:
     h.json(200, outbox.queued(h.state.conn, h.state.clock, first(h.query, "type")))
 
 
+@route("GET", "/_mock/messages",
+       note=("every message the bank has sent, collected or not, oldest "
+             "first, each with takenAt; ?type=pain.002 to filter. Reading it "
+             "takes nothing"))
+def messages(h) -> None:
+    """What was sent, including what has been collected (#186).
+
+    A path of its own rather than a flag on the mailbox: the mailbox's default
+    takes what it lists, so a flag left off or mistyped there would take a
+    client's messages from under it. Nothing asked of this path can. Like the
+    queue it does not release first either, so an observer reading it between a
+    client's own calls changes nothing the client will see.
+    """
+    h.json(200, outbox.sent(h.state.conn, first(h.query, "type")))
+
+
 @route("GET", "/_mock/mailbox/<id>")
 def message(h, identifier: str) -> None:
     h.state.release()
