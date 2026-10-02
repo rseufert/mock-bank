@@ -8,9 +8,11 @@ check. Only the account holder's side books: a debtor the bank holds is read at
 acceptance and never debited.
 """
 import datetime
+import re
 from xml.etree import ElementTree as ET
 
 from test_collections_read import external, pain008
+from test_payments import EURODIS, INITECH, sample
 from test_statements import (ACME, CAMT053, FRIDAY, MONDAY, TODAY, TUESDAY, StatementCase,
                              read_statement)
 
@@ -288,3 +290,67 @@ class TheWholeDayWalksClean(BookingCase):
         for item in self.get("/_mock/mailbox?leave").json():
             root = ET.fromstring(item["body"].encode("utf-8"))
             self.assertEqual(schema.check(schema.identify(root), root), [], item["type"])
+
+
+class TheShippedSample(BookingCase):
+    """`tests/samples/pain008_four_collections.xml` against the seed (#187).
+
+    The point of the file is that it needs no setup: the four accounts it
+    collects from are the four the seed starts with, so a first-time user gets
+    an acceptance, an `AM04` and an `AC04` out of one post. Each expectation
+    below comes from a seeded behaviour, so a change to the seed breaks this
+    test rather than quietly making the sample dull.
+    """
+    SAMPLE = "pain008_four_collections.xml"
+
+    def posted(self):
+        resp = self.post("/payments", body=sample(self.SAMPLE))
+        self.assertEqual(resp.status, 202, resp.body)
+        return resp.json()
+
+    def test_the_file_the_repository_ships_is_read_with_no_finding(self):
+        answer = self.post("/_mock/validate", body=sample(self.SAMPLE),
+                           headers={"Accept": "application/json"})
+        self.assertEqual(answer.status, 200, answer.body)
+        self.assertEqual(answer.json()["findings"], [])
+        self.assertEqual(answer.json()["file"]["message"], "pain.008.001.08")
+
+    def test_it_collects_from_the_seeds_own_accounts(self):
+        # Read out of the file with a regex, not with the mock's reader, so
+        # this does not agree with itself about what the sample says.
+        text = sample(self.SAMPLE)
+        self.assertEqual(re.findall(r"<DbtrAcct>\s*<Id>\s*<IBAN>(\w+)</IBAN>", text),
+                         [UMBRELLA_IBAN, GLOBEX_IBAN, INITECH, EURODIS])
+        self.assertEqual(re.findall(r"<CdtrAcct>\s*<Id>\s*<IBAN>(\w+)</IBAN>", text), [ACME])
+        held = {a["iban"]: a for a in self.get("/_mock/accounts").json()}
+        self.assertEqual([held[iban]["behaviour"] for iban in (GLOBEX_IBAN, INITECH, EURODIS)],
+                         ["insufficient-funds", "closed-account", "bad-bank-id"])
+        self.assertNotIn(UMBRELLA_IBAN, held, "the accepted one is at another bank")
+
+    def test_the_seed_answers_it_accepted_am04_and_ac04(self):
+        answer = self.posted()
+        self.assertEqual((answer["status"], answer["accepted"], answer["rejected"]),
+                         ("PART", 2, 2))
+        self.assertEqual([(c["end_to_end_id"], c["outcome"], c["reason"], c["amount"])
+                          for c in answer["collections"]],
+                         [("DD-2026-0101", "accepted", None, 125000),
+                          # GLOBEX has 12.50, so any of these is more than it has
+                          ("DD-2026-0102", "rejected", "AM04", 34000),
+                          ("DD-2026-0103", "rejected", "AC04", 98025),
+                          # EURODIS is held: bad-bank-id describes a creditor,
+                          # so as a debtor it is read and accepted
+                          ("DD-2026-0104", "accepted", None, 150050)])
+
+    def test_the_two_it_accepted_credit_acme_and_are_on_the_statement(self):
+        before = self.balance("ACME")
+        answer = self.posted()
+        self.assertEqual({c["settlement_date"] for c in answer["collections"]
+                          if c["outcome"] == "accepted"}, {FRIDAY.isoformat()})
+        self.assertEqual(self.balance("ACME"), before, "not before its day")
+        self.advance(FRIDAY)
+        self.assertEqual(self.balance("ACME"), before + 125000 + 150050)
+        self.advance(MONDAY)
+        friday = self.acme_statements()[-1]
+        self.assertEqual((friday["opening"], friday["closing"], friday["entries"]),
+                         (before, before + 275050,
+                          [("DD-2026-0101", 125000), ("DD-2026-0104", 150050)]))

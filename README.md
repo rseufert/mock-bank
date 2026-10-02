@@ -606,6 +606,21 @@ mandate or no date of signature is `MD02`. An accepted collection is to settle
 on its requested collection date, rolled to a business day, and never before the
 business day after the bank can start on the file.
 
+The file the repository ships collects for `ACME` from the four accounts the
+seed starts with, so it needs nothing set up first:
+
+```bash
+curl -s --data-binary @tests/samples/pain008_four_collections.xml \
+     http://127.0.0.1:8080/payments
+```
+
+Two of its four collections are accepted - `DD-2026-0101`, whose debtor is at
+another bank, and `DD-2026-0104`, a debtor this bank holds - and two are
+rejected on receipt: `DD-2026-0102` is `AM04`, because `GLOBEX` has 12.50 to
+its name, and `DD-2026-0103` is `AC04`, because `INITECH` is closed. So the
+file's status is `PART`, and the two that were accepted credit `ACME` together
+on their settlement date.
+
 **On that day the creditor account is credited.** The bank sends a `camt.054`
 with a `CRDT` entry for each collection - one notification per account and
 settlement date - and the day's `camt.053`, or BAI2 statement for a NACHA-format
@@ -638,7 +653,10 @@ bank's answer, and what it does depends on when it arrives:
   the first day the bank can book it - today, on a business day before the
   cutoff - and the bank sends a `pacs.004` naming the `pain.008` and a
   `camt.054` debit, one of each as for a payment's return. The statement for
-  that day carries the debit. Until then both are listed in `GET /_mock/queue`.
+  that day carries the debit. When the bank can book the return today both are
+  released at once and are never queued; when it cannot - a weekend or a
+  holiday, or after the cutoff - both are listed in `GET /_mock/queue` until
+  the day it books.
 
 The reason is an ISO 20022 return reason the status report can also carry:
 `AC04`, `AM04`, `MD01` (no mandate), `MD06` (the debtor asked for it back),
@@ -660,7 +678,8 @@ Four, the same four every time, one per failure you are likely to want. The
 IBANs carry real mod-97 check digits and `MOCK` is not an assigned bank code,
 so they are valid to parse and belong to nobody. They are the same accounts
 `tests/samples/pain001_four_payments.xml` names, so the sample file works
-against the mock out of the box.
+against the mock out of the box, as does
+`tests/samples/pain008_four_collections.xml`, which collects from them.
 
 | Id | IBAN | Balance | Behaviour | Why it is there |
 | --- | --- | --- | --- | --- |
