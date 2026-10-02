@@ -269,7 +269,7 @@ jobs:
                          assert a['accepted']==2 and a['rejected']==2, a; \
                          print('the wheel took a file:', a['status'])"
           curl -sf http://127.0.0.1:8081/_mock/state | head -c 400
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/*
