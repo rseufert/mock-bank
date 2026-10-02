@@ -35,6 +35,7 @@ SCHEMA_V8 = os.path.join(HERE, "fixtures", "schema-v8.sql")
 SCHEMA_V9 = os.path.join(HERE, "fixtures", "schema-v9.sql")
 SCHEMA_V10 = os.path.join(HERE, "fixtures", "schema-v10.sql")
 SCHEMA_V11 = os.path.join(HERE, "fixtures", "schema-v11.sql")
+SCHEMA_V12 = os.path.join(HERE, "fixtures", "schema-v12.sql")
 
 
 class FromAnOlderFile(FileDatabaseCase):
@@ -512,6 +513,56 @@ class FromVersionEleven(FileDatabaseCase):
         self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 1000)
 
 
+class FromVersionTwelve(FileDatabaseCase):
+    """A file from 0.6.0, before a message kept when it was queued (#185).
+
+    A message that file already holds has no `queuedAt` and is given none:
+    nothing recorded it. A payment it holds that has not settled is still in the
+    queue, and what queued that - its file arriving - was always kept, so its
+    entry says so and its message carries it.
+    """
+
+    start_on_setup = False
+    config_kwargs = {"clock": "2026-01-02T09:00"}
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        with open(SCHEMA_V12, encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance, behaviour)"
+            " VALUES ('ACME', 'ACME', 'NL41MOCK0000000001', 'MOCKNL2A', 'EUR', 1000,"
+            " 'accept')")
+        conn.execute("INSERT INTO file (id, msg_id, message, received_at, status, reported)"
+                     " VALUES (1, 'OLD-1', 'pain.001.001.09', '2025-12-30T09:00:00Z',"
+                     " 'ACCP', 1)")
+        conn.execute(
+            "INSERT INTO payment (file_id, end_to_end_id, account_id, debtor_iban, amount,"
+            " currency, creditor_name, creditor_iban, status, settlement_date)"
+            " VALUES (1, 'OLD-P', 'ACME', 'NL41MOCK0000000001', 500, 'EUR', 'Payee',"
+            " 'NL09MOCK0000000004', 'accepted', '2026-01-05')")
+        conn.execute(
+            "INSERT INTO message (type, account, file_id, due_at, released_at, body)"
+            " VALUES ('pain.002.001.10', 'ACME', 1, '2025-12-30T09:00:00Z',"
+            " '2025-12-30T09:00:00Z', '<Document/>')")
+        conn.commit()
+        conn.close()
+
+    def test_an_old_message_has_no_queued_at_and_an_old_payment_keeps_its_own(self):
+        self.start()
+        self.assertEqual(self.user_version(), db.SCHEMA_VERSION)
+        [old] = self.get("/_mock/mailbox?leave").json()
+        self.assertEqual((old["type"], old["queuedAt"]), ("pain.002.001.10", None))
+        [entry] = self.get("/_mock/queue").json()
+        self.assertEqual((entry["reports"], entry["queuedAt"]),
+                         ("payments settling", "2025-12-30T09:00:00Z"))
+        self.post("/_mock/advance?to=2026-01-05")
+        [new] = self.get("/_mock/mailbox?leave&type=camt.054").json()
+        self.assertEqual((new["key"], new["queuedAt"]),
+                         (entry["key"], "2025-12-30T09:00:00Z"))
+
+
 class FromANewerMock(FileDatabaseCase):
     """A file from a version that knows more than this one: refused, untouched."""
 
@@ -546,7 +597,7 @@ class TheVersionMovesWithTheSchema(unittest.TestCase):
     like one it already understands.
     """
 
-    FINGERPRINT = (12, "b27f801ab37a77c6")
+    FINGERPRINT = (13, "aa844d16b4e46fd8")
 
     def test_a_changed_schema_has_a_new_version(self):
         text = " ".join("".join(db.SCHEMA + db.INDEXES).split())

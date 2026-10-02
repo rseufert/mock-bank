@@ -217,7 +217,13 @@ SCHEMA = [
         -- a return of it has to echo. NULL for one from a pain.008.
         entry_class        TEXT,
         transaction_code   TEXT,
-        debtor_clearing_id TEXT
+        debtor_clearing_id TEXT,
+        -- the bank clock's moment the debtor's bank refused it by hand, before
+        -- or after it settled (#185). It is when the return it brings came to
+        -- be owed, which no other column says: a refusal can come days after
+        -- the booking. NULL for one nobody refused, and for every row from
+        -- before version 13.
+        refused_at         TEXT
     )
     """,
     # What the bank sends back, queued for when it is due. The writers (#7)
@@ -248,7 +254,12 @@ SCHEMA = [
         -- written (#155): type, account, the day it books under and what it
         -- reports. NULL for a message that was a row from the start, and for
         -- every row from before version 10; those answer to `m<id>`.
-        key          TEXT
+        key          TEXT,
+        -- the bank clock's moment it came to be owed (#185): what its entry in
+        -- GET /_mock/queue said, kept so the mailbox says the same. NULL for a
+        -- statement and a report, which are never in the queue, and for every
+        -- row from before version 13 - nothing recorded it, so none is made up.
+        queued_at    TEXT
     )
     """,
     # A camt.053 the bank issued: one per account per business day, never
@@ -338,7 +349,7 @@ INDEXES = [
 # whenever SCHEMA or INDEXES changes, so that a file written by a newer mock is
 # refused rather than misread; `tests/test_upgrade.py` fails until you do.
 # 0 is any file written before the version was recorded.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class DatabaseError(Exception):

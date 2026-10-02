@@ -760,10 +760,11 @@ comparable.
 
 | Bank clock | Real clock |
 | --- | --- |
-| a message's `releasedAt` and `dueAt` | `/_mock/requests`' `at`: when the call reached this process |
+| a message's `queuedAt`, `releasedAt` and `dueAt` | `/_mock/requests`' `at`: when the call reached this process |
 | a payment's `booked_at`, and a credit's | `started` in `/_mock/state`: when the mock was launched |
 | a payment's `returned_at`, both kinds | the pickup folder's own record of having written a file |
 | a credit's `received_at`, and a file's | |
+| a collection's `refused_at` | |
 
 A payment's `booked_at` and a credit's were real time through 0.5.0, which a
 reader could see in three places: `booked_at` on a payment and on a credit, and
@@ -786,6 +787,48 @@ served nowhere before, so the nearest thing a client had was the `pain.002`'s
 file of collections is stamped by the same rule and the same code; reporting it on
 `GET /_mock/collections` belongs to that feature's own step.
 
+### When a message was queued
+
+`dueAt` says when the bank will send a message. `queuedAt` says when the bank
+came to owe it: the bank-clock moment its entry entered `GET /_mock/queue`,
+whatever caused that. It does not depend on when anybody read the queue, so two
+captures of one run agree, and the message carries the same `queuedAt` into the
+mailbox, where a single read at the end can pair it on `key`
+([#185](https://github.com/rseufert/mock-bank/issues/185)).
+
+| The entry | Was queued when |
+| --- | --- |
+| a `camt.054` for payments or collections not yet settled | the file arrived: its `received_at`. With several files for one account and day, the earliest |
+| a `camt.054` for money arriving | the bank heard of it: the credit's `received_at` |
+| what a payment's return brings, under `return-later` | the payment booked and its return was scheduled: its `booked_at`, not the file's arrival |
+| a NACHA account's rejection coming back as a return file | the file arrived, which is when that return is scheduled |
+| what a refused collection brings | the debtor's bank refused it: the collection's `refused_at`, which can be days after it booked |
+| a status report held back by `--status-delay-ms` | it was written, which is when its file arrived |
+
+An entry's `queuedAt` is never later than the bank clock at the first read that
+shows it. A message that was never in the queue because it was due at once - a
+return refused and sent back on the same business day, a status report with no
+delay - was queued as it was sent, and says so.
+
+Two things have none, and read `null`:
+
+- **A statement and an intraday report.** Neither is in the queue: a statement is
+  written for every open account as a business day ends, owed for nothing that
+  happened.
+- **A message written before 0.7.** Nothing recorded when it was queued, and none
+  is made up. An entry still waiting in a `--db` file from an older version does
+  have one, because what queued it was always kept.
+
+One falls back. **A collection refused by hand before 0.7** whose return is still
+waiting has no `refused_at`, so that return reads as queued when the collection
+booked, or when its file arrived if it never did.
+
+One case moves. A `camt.054` for collections not yet settled reads as queued when
+the earliest collection **it still reports** arrived. If two files collect into
+one account on one day and every collection of the earlier file is refused before
+it settles, the entry stays, for the later file, and its `queuedAt` becomes that
+file's arrival.
+
 ## Endpoints
 
 Two ways in, both feeding one pipeline, plus a `/_mock` control plane shaped
@@ -799,13 +842,13 @@ like mock-edi's so the two feel the same.
 | Payment file in | `POST /payments` | Answers `202` with a JSON summary: the file status, each payment's `EndToEndId` with its outcome, reason and settlement date, and what is queued; `422` when the file is rejected outright |
 | Payments | `GET /_mock/payments`, `GET /_mock/payments/<EndToEndId>` | Every payment the bank decided on, newest first; by `EndToEndId`, the newest payment with that id, or `?all` for every one (an `EndToEndId` is unique within a file, not across files) |
 | What it could not send | `GET /_mock/unsent` | The messages the bank owes and could not write, oldest first, each with the writer's own complaint and the day it was for (#166). Counted in `/_mock/state` under `messages.unsent`; nothing retries them, and a reset forgets them |
-| Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body and its `key`; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
-| What it is going to send | `GET /_mock/queue` | What the bank has not released yet, soonest first, each with `dueAt`: a message already written and held back (a status report under `--status-delay-ms`, with its `id`), and the ones it will write when something books, with no `id` yet - the `camt.054` for payments not yet settled, for money arriving and for collections not yet settled or on their way back, and the `pacs.004` or NACHA return file and the credit a return brings. `reports` says which. **Every entry has a `key`, and the message arrives in the mailbox under the same `key`**, so "was waiting" pairs with "arrived" without matching on type and time: `camt.054.001.08/ACME/2026-10-06/payments-settling` for one the bank will write (type, account, the day it books under, what it reports, and the file where there is one message per file), `m<id>` for one already written. Treat it as opaque. A second message of one kind for one day - a file posted on its own settlement day, after that day's notification went out - ends `#2`, so a key names one message. `?type=` filters on a prefix, as the mailbox does. Reading it releases nothing and takes nothing. A statement is not listed: one is written for every open account when the clock is advanced past the end of a business day |
+| Collect answers | `GET /_mock/mailbox` | Every message released and not yet collected, oldest first, as JSON with its XML body, its `key` and its `queuedAt`; collecting takes them. `?leave` to peek without taking, `?raw` for the XML bodies alone, `?type=pain.002` to filter on a type prefix, and they combine |
+| What it is going to send | `GET /_mock/queue` | What the bank has not released yet, soonest first, each with `queuedAt` and `dueAt`: a message already written and held back (a status report under `--status-delay-ms`, with its `id`), and the ones it will write when something books, with no `id` yet - the `camt.054` for payments not yet settled, for money arriving and for collections not yet settled or on their way back, and the `pacs.004` or NACHA return file and the credit a return brings. `reports` says which. **Every entry has a `key`, and the message arrives in the mailbox under the same `key`**, so "was waiting" pairs with "arrived" without matching on type and time: `camt.054.001.08/ACME/2026-10-06/payments-settling` for one the bank will write (type, account, the day it books under, what it reports, and the file where there is one message per file), `m<id>` for one already written. Treat it as opaque. A second message of one kind for one day - a file posted on its own settlement day, after that day's notification went out - ends `#2`, so a key names one message. `?type=` filters on a prefix, as the mailbox does. Reading it releases nothing and takes nothing. A statement is not listed: one is written for every open account when the clock is advanced past the end of a business day. **`queuedAt` is when the entry entered the queue**; see [When a message was queued](#when-a-message-was-queued) |
 | One message | `GET /_mock/mailbox/<id>` | That message's XML, whether or not it has been collected |
 | Collect it again | `POST /_mock/mailbox/<id>/unread` | Puts one back in the mailbox, for a test that collects twice |
 | Money arriving | `POST /_mock/credits`, `GET /_mock/credits` | Make a credit arrive in an account from a payer you describe: it books on its value date and shows on the `camt.054` and `camt.053` as a received transfer. The listing is every credit, newest first |
 | Collections | `GET /_mock/collections`, `GET /_mock/collections/<EndToEndId>` | Every direct debit the bank decided on from a `pain.008`, newest first, with its mandate, its debtor, the decision, its settlement date, when its file was received, when it booked and when it went back; or the newest with one `EndToEndId`, `?all` for every one |
-| The debtor's bank says no | `POST /_mock/collections/<EndToEndId>/refuse` | With `{"reason": "MD01"}`. Before settlement the collection is rejected and a further `pain.002` says so; after, the money goes back with a `pacs.004` and a `camt.054` debit. For a debtor at another bank: one this bank holds decides by its own behaviour |
+| The debtor's bank says no | `POST /_mock/collections/<EndToEndId>/refuse` | With `{"reason": "MD01"}`. The collection keeps the moment as `refused_at`. Before settlement the collection is rejected and a further `pain.002` says so; after, the money goes back with a `pacs.004` and a `camt.054` debit. For a debtor at another bank: one this bank holds decides by its own behaviour |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
@@ -1282,6 +1325,7 @@ than half-supporting it.
 | 0.4 | Money arriving: an incoming credit on `POST /_mock/credits`, so cash application is testable; a worked example using all three mocks, procure to pay | **Done.** `procure_to_pay`'s ten tests pass in CI against mock-sap and mock-edi from PyPI |
 | 0.5 | BAI2 finished: `bai2.read` and `payment_run`'s reader take a real bank's file (a text field with commas, records packed onto a line, a record with no `/`, funds types `V`, `S` and `D`), a payee's name reaches the BAI2 statement as the `camt.053` has it, and the transaction type codes are the ones a bank writes, each from a named source; an intraday `camt.052` on request | **Done.** What the mock reads and writes holds against moov-io/bai2's sample files from outside the project |
 | 0.6 | Direct debits: `pain.008.001.08` read, validated and booked as collections, a debtor the bank holds deciding by its own state and behaviour, and the debtor's bank refusing or returning one; a NACHA file's debit entries collected the same way and returned as a return file (#176); `GET /_mock/queue` for what the bank has not sent yet (#155) and `GET /_mock/unsent` for what it could not write (#166); bookings stamped with the bank's clock (#147); a wrapped BAI2 line joined without its line break (#142); the worked examples importable as `mockbank.examples` (#169) | **Done.** A message the bank cannot write no longer stops the others, and input it could not answer for is refused at the door |
+| 0.7 | What a client that watches the bank asked for: `queuedAt` on every queue entry and on the message it becomes (#185); a listing that includes collected messages (#186) | In progress |
 
 ## Contributing
 
