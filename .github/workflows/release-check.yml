@@ -27,7 +27,7 @@ jobs:
     name: the released version is tagged and published
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The tags are the thing being checked, and a default checkout does not
           # fetch them. `check_release.py` fetches them itself if they are
