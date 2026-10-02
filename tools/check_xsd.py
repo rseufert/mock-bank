@@ -233,7 +233,8 @@ def xmllint(xsd_path, xml_path):
 def files_to_check():
     """(path, must it validate) for every file whose verdict is known."""
     own = [os.path.join(SAMPLES, name) for name in
-           ("pain001_four_payments.xml", "pain001_four_payments_001_03.xml")]
+           ("pain001_four_payments.xml", "pain001_four_payments_001_03.xml",
+            "pain008_four_collections.xml")]
     valid = sorted(glob.glob(os.path.join(SAMPLES, "external", "*.xml")))
     invalid = sorted(glob.glob(os.path.join(SAMPLES, "external", "invalid", "*.xml")))
     return [(p, True) for p in own + valid] + [(p, False) for p in invalid]

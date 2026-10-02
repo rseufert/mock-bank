@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A clean pain.008.001.08: one batch of four euro direct debits ACME
+     collects from the seeded accounts, so the seed decides every one of
+     them. Every IBAN and BIC is syntactically valid and belongs to no
+     real bank. -->
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.008.001.08">
+  <CstmrDrctDbtInitn>
+    <GrpHdr>
+      <MsgId>ACME-DD-20261001-0001</MsgId>
+      <CreDtTm>2026-09-30T09:30:00+02:00</CreDtTm>
+      <NbOfTxs>4</NbOfTxs>
+      <CtrlSum>4070.75</CtrlSum>
+      <InitgPty>
+        <Nm>ACME Corporation</Nm>
+      </InitgPty>
+    </GrpHdr>
+    <PmtInf>
+      <PmtInfId>ACME-DD-20261001-0001-B1</PmtInfId>
+      <PmtMtd>DD</PmtMtd>
+      <NbOfTxs>4</NbOfTxs>
+      <CtrlSum>4070.75</CtrlSum>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>SEPA</Cd>
+        </SvcLvl>
+        <LclInstrm>
+          <Cd>CORE</Cd>
+        </LclInstrm>
+        <SeqTp>RCUR</SeqTp>
+      </PmtTpInf>
+      <ReqdColltnDt>2026-10-01</ReqdColltnDt>
+      <Cdtr>
+        <Nm>ACME Corporation</Nm>
+        <PstlAdr>
+          <StrtNm>Keizersgracht</StrtNm>
+          <BldgNb>1</BldgNb>
+          <PstCd>1015 AA</PstCd>
+          <TwnNm>Amsterdam</TwnNm>
+          <Ctry>NL</Ctry>
+        </PstlAdr>
+      </Cdtr>
+      <CdtrAcct>
+        <Id>
+          <IBAN>NL41MOCK0000000001</IBAN>
+        </Id>
+        <Ccy>EUR</Ccy>
+      </CdtrAcct>
+      <CdtrAgt>
+        <FinInstnId>
+          <BICFI>MOCKNL2A</BICFI>
+        </FinInstnId>
+      </CdtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtrSchmeId>
+        <Id>
+          <PrvtId>
+            <Othr>
+              <Id>NL41ZZZ000000000001</Id>
+              <SchmeNm>
+                <Prtry>SEPA</Prtry>
+              </SchmeNm>
+            </Othr>
+          </PrvtId>
+        </Id>
+      </CdtrSchmeId>
+      <DrctDbtTxInf>
+        <PmtId>
+          <InstrId>ACME-DD-1</InstrId>
+          <EndToEndId>DD-2026-0101</EndToEndId>
+        </PmtId>
+        <InstdAmt Ccy="EUR">1250.00</InstdAmt>
+        <DrctDbtTx>
+          <MndtRltdInf>
+            <MndtId>ACME-MNDT-0001</MndtId>
+            <DtOfSgntr>2025-02-17</DtOfSgntr>
+          </MndtRltdInf>
+        </DrctDbtTx>
+        <DbtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </DbtrAgt>
+        <Dbtr>
+          <Nm>Umbrella Logistics S.A.</Nm>
+        </Dbtr>
+        <DbtrAcct>
+          <Id>
+            <IBAN>NL30MOCK0000000005</IBAN>
+          </Id>
+        </DbtrAcct>
+        <RmtInf>
+          <Ustrd>Subscription 2026-10, contract UML-7781</Ustrd>
+        </RmtInf>
+      </DrctDbtTxInf>
+      <DrctDbtTxInf>
+        <PmtId>
+          <InstrId>ACME-DD-2</InstrId>
+          <EndToEndId>DD-2026-0102</EndToEndId>
+        </PmtId>
+        <InstdAmt Ccy="EUR">340.00</InstdAmt>
+        <DrctDbtTx>
+          <MndtRltdInf>
+            <MndtId>ACME-MNDT-0002</MndtId>
+            <DtOfSgntr>2025-06-01</DtOfSgntr>
+          </MndtRltdInf>
+        </DrctDbtTx>
+        <DbtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </DbtrAgt>
+        <Dbtr>
+          <Nm>Globex Supplies B.V.</Nm>
+        </Dbtr>
+        <DbtrAcct>
+          <Id>
+            <IBAN>NL14MOCK0000000002</IBAN>
+          </Id>
+        </DbtrAcct>
+        <RmtInf>
+          <Ustrd>Subscription 2026-10, contract GLX-1042</Ustrd>
+        </RmtInf>
+      </DrctDbtTxInf>
+      <DrctDbtTxInf>
+        <PmtId>
+          <InstrId>ACME-DD-3</InstrId>
+          <EndToEndId>DD-2026-0103</EndToEndId>
+        </PmtId>
+        <InstdAmt Ccy="EUR">980.25</InstdAmt>
+        <DrctDbtTx>
+          <MndtRltdInf>
+            <MndtId>ACME-MNDT-0003</MndtId>
+            <DtOfSgntr>2024-11-20</DtOfSgntr>
+          </MndtRltdInf>
+        </DrctDbtTx>
+        <DbtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </DbtrAgt>
+        <Dbtr>
+          <Nm>Initech Services N.V.</Nm>
+        </Dbtr>
+        <DbtrAcct>
+          <Id>
+            <IBAN>NL84MOCK0000000003</IBAN>
+          </Id>
+        </DbtrAcct>
+        <RmtInf>
+          <Ustrd>Subscription 2026-10, contract INI-3390</Ustrd>
+        </RmtInf>
+      </DrctDbtTxInf>
+      <DrctDbtTxInf>
+        <PmtId>
+          <InstrId>ACME-DD-4</InstrId>
+          <EndToEndId>DD-2026-0104</EndToEndId>
+        </PmtId>
+        <InstdAmt Ccy="EUR">1500.50</InstdAmt>
+        <DrctDbtTx>
+          <MndtRltdInf>
+            <MndtId>ACME-MNDT-0004</MndtId>
+            <DtOfSgntr>2025-09-08</DtOfSgntr>
+          </MndtRltdInf>
+        </DrctDbtTx>
+        <DbtrAgt>
+          <FinInstnId>
+            <BICFI>MOCKNL2A</BICFI>
+          </FinInstnId>
+        </DbtrAgt>
+        <Dbtr>
+          <Nm>Eurodis Handels GmbH Düsseldorf</Nm>
+        </Dbtr>
+        <DbtrAcct>
+          <Id>
+            <IBAN>NL57MOCK0000000004</IBAN>
+          </Id>
+        </DbtrAcct>
+        <RmtInf>
+          <Ustrd>Abonnement 2026-10, Vertrag EUR-5516, Straße 5</Ustrd>
+        </RmtInf>
+      </DrctDbtTxInf>
+    </PmtInf>
+  </CstmrDrctDbtInitn>
+</Document>
