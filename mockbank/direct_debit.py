@@ -313,10 +313,10 @@ def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
         # so nothing is debited (#54's option (a), for a collection).
         due = row["settlement_date"] if in_nacha else None
         conn.execute("UPDATE collection SET status = ?, reason = ?, reason_text = ?,"
-                     " settlement_date = NULL, return_due = ?, return_reason = ?"
-                     " WHERE id = ?",
+                     " settlement_date = NULL, return_due = ?, return_reason = ?,"
+                     " refused_at = ? WHERE id = ?",
                      (REJECTED, body["reason"], text, due, body["reason"] if due else None,
-                      row["id"]))
+                      db.stamp(now), row["id"]))
         conn.commit()
         return (dict(row, status=REJECTED, reason=body["reason"], reason_text=text),
                 not in_nacha)
@@ -325,10 +325,11 @@ def refuse(conn, clock, now: datetime.datetime, end_to_end_id: str, body: Any):
         raise Refused(409, "returning %s would overdraw account %s past the 18 digits "
                            "a statement can write" % (end_to_end_id, account["id"]))
     due = clock.settlement_date(now).isoformat()
-    conn.execute("UPDATE collection SET return_due = ?, return_reason = ? WHERE id = ?",
-                 (due, body["reason"], row["id"]))
+    conn.execute("UPDATE collection SET return_due = ?, return_reason = ?, refused_at = ?"
+                 " WHERE id = ?", (due, body["reason"], db.stamp(now), row["id"]))
     conn.commit()
-    return dict(row, return_due=due, return_reason=body["reason"]), False
+    return dict(row, return_due=due, return_reason=body["reason"],
+                refused_at=db.stamp(now)), False
 
 
 def returns_due(conn, account_id: str) -> int:

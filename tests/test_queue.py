@@ -51,7 +51,8 @@ class AMessageWrittenAndHeldBack(QueueCase):
         self.assertEqual(status, {
             "id": answer["queued"][0]["id"], "key": "m%d" % answer["queued"][0]["id"],
             "type": "pain.002.001.10", "account": "ACME",
-            "fileId": self.file_of("M1"), "msgId": "M1", "dueAt": "2026-10-01T09:01:00Z",
+            "fileId": self.file_of("M1"), "msgId": "M1",
+            "queuedAt": "2026-10-01T09:00:00Z", "dueAt": "2026-10-01T09:01:00Z",
             "written": True,
             "reports": "a file's status"})
         self.assertEqual(self.mailbox("pain.002"), [])
@@ -95,7 +96,8 @@ class AMessageTheBankWillWrite(QueueCase):
         self.assertEqual(self.queue(), [
             {"id": None, "key": "camt.054.001.08/ACME/2026-10-06/payments-settling",
              "type": "camt.054.001.08", "account": "ACME", "fileId": None,
-             "msgId": None, "dueAt": "2026-10-06T00:00:00Z", "written": False,
+             "msgId": None, "queuedAt": "2026-10-01T09:00:00Z",
+             "dueAt": "2026-10-06T00:00:00Z", "written": False,
              "reports": "payments settling"}])
         self.assertEqual(self.mailbox("camt.054"), [])
         self.post("/_mock/advance?to=2026-10-06")

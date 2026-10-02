@@ -74,8 +74,9 @@ def queue_status(conn, decision, file_id, now, delay_ms=0,
     due = now + datetime.timedelta(milliseconds=delay_ms)
     account = debtor["id"] if debtor else None
     cursor = conn.execute(
-        "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
-        (kind, account, file_id, db.stamp(due), body))
+        "INSERT INTO message (type, account, file_id, due_at, body, queued_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (kind, account, file_id, db.stamp(due), body, db.stamp(now)))
     return [{"id": cursor.lastrowid, "key": "m%d" % cursor.lastrowid, "type": kind,
              "account": account, "due_at": db.stamp(due)}]
 
@@ -222,7 +223,36 @@ def _key(conn, kind, account, day, reports, file_id=None) -> str:
     return "%s#%d" % (base, used + 1) if used else base
 
 
-def _queue_return_file(conn, account, rows, day, file_id, now, reports=None) -> None:
+def _send(conn, kind, account_id, body, key, now, promised, file_id=None) -> None:
+    """Write a message that was a queue entry until now, under the key and the
+    ``queuedAt`` the queue showed for it (#155, #185).
+
+    ``promised`` is what ``GET /_mock/queue`` would have said before this release
+    booked anything (``_promised``). An entry not in it came into being in this
+    release - a return scheduled and due at once - so it was queued now.
+    """
+    stamp = db.stamp(now)
+    conn.execute(
+        "INSERT INTO message (type, account, file_id, due_at, body, key, queued_at)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (kind, account_id, file_id, stamp, body, key, promised.get(key, stamp)))
+
+
+def _promised(conn, clock) -> Dict[str, Optional[str]]:
+    """Each unwritten queue entry's ``queuedAt`` by key, as the queue says it now.
+
+    Taken before a release books anything, because booking is what empties the
+    queue: afterwards the rows no longer say they were waiting. The message is
+    then written with the value its entry showed, so the pair of ``key`` and
+    ``queuedAt`` survives the hand-over by construction and not by two pieces of
+    code agreeing (#185).
+    """
+    return {entry["key"]: entry["queuedAt"] for entry in queued(conn, clock)
+            if not entry["written"]}
+
+
+def _queue_return_file(conn, account, rows, day, file_id, now, promised,
+                       reports=None) -> None:
     """A NACHA account's returns for one day and one original file, as the
     return file NACHA sends where ISO 20022 sends a pacs.004 (#54). The rows
     are payments that came back, or collections (#176)."""
@@ -242,12 +272,9 @@ def _queue_return_file(conn, account, rows, day, file_id, now, reports=None) -> 
                     now, day=day.isoformat(), file_id=file_id)
     if body is None:
         return
-    conn.execute(
-        "INSERT INTO message (type, account, file_id, due_at, body, key)"
-        " VALUES (?,?,?,?,?,?)",
-        (nacha.RETURN, account["id"], file_id, db.stamp(now), body,
-         _key(conn, nacha.RETURN, account["id"], day.isoformat(), reports or RETURNED,
-              file_id)))
+    _send(conn, nacha.RETURN, account["id"], body,
+          _key(conn, nacha.RETURN, account["id"], day.isoformat(), reports or RETURNED,
+               file_id), now, promised, file_id)
 
 
 def upcoming(conn, file_id) -> List[Dict[str, Any]]:
@@ -302,61 +329,85 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
     """
     out = [{"id": row["id"], "key": key_of(row), "type": row["type"],
             "account": row["account"],
-            "fileId": row["file_id"], "msgId": row["msg_id"], "dueAt": row["due_at"],
+            "fileId": row["file_id"], "msgId": row["msg_id"],
+            "queuedAt": row["queued_at"], "dueAt": row["due_at"],
             "written": True, "reports": "a file's status"}
            for row in db.rows(conn, "SELECT message.*, file.msg_id FROM message"
                                     " LEFT JOIN file ON file.id = message.file_id"
                                     " WHERE released_at IS NULL ORDER BY message.id")]
-    expected = set()
-    for row in db.rows(conn, "SELECT account_id, settlement_date FROM payment"
-                             " WHERE status = ? AND booked_at IS NULL"
+    # Each entry with the earliest moment anything it reports came to be owed.
+    expected: Dict[tuple, Optional[str]] = {}
+
+    def expect(day, kind_, account, file_id, reports, since):
+        entry = (day, kind_, account, file_id, reports)
+        known = [at for at in (expected.get(entry), since) if at]
+        expected[entry] = min(known) if known else None
+
+    for row in db.rows(conn, "SELECT account_id, settlement_date, file.received_at"
+                             " FROM payment JOIN file ON file.id = payment.file_id"
+                             " WHERE payment.status = ? AND booked_at IS NULL"
                              " AND account_id IS NOT NULL", (accounts.ACCEPTED,)):
-        expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
-                      None, SETTLING))
-    for row in db.rows(conn, "SELECT credit.account_id, booking_date FROM credit"
+        expect(row["settlement_date"], messages.CAMT054.name, row["account_id"],
+               None, SETTLING, row["received_at"])
+    for row in db.rows(conn, "SELECT credit.account_id, booking_date, received_at FROM credit"
                              " JOIN account ON account.id = credit.account_id"
                              " WHERE booked_at IS NULL AND account.closed = 0"):
-        expected.add((row["booking_date"], messages.CAMT054.name, row["account_id"],
-                      None, ARRIVING))
-    for row in db.rows(conn, "SELECT collection.account_id, settlement_date FROM collection"
+        expect(row["booking_date"], messages.CAMT054.name, row["account_id"],
+               None, ARRIVING, row["received_at"])
+    for row in db.rows(conn, "SELECT collection.account_id, settlement_date,"
+                             " file.received_at FROM collection"
                              " JOIN account ON account.id = collection.account_id"
+                             " JOIN file ON file.id = collection.file_id"
                              " WHERE collection.status = ? AND booked_at IS NULL"
                              " AND account.closed = 0", (accounts.ACCEPTED,)):
-        expected.add((row["settlement_date"], messages.CAMT054.name, row["account_id"],
-                      None, COLLECTED))
+        expect(row["settlement_date"], messages.CAMT054.name, row["account_id"],
+               None, COLLECTED, row["received_at"])
+    # A return is owed from the moment it was scheduled, not from the file's
+    # arrival (#185): when the debtor's bank refused it, where somebody did;
+    # when it booked, where the account it was taken from sends it back by
+    # itself; and when the file arrived for one a NACHA account's file had
+    # rejected, which is scheduled there and then.
     for row in db.rows(conn, "SELECT collection.account_id, return_due, file_id, booked_at,"
-                             " account.format FROM collection"
+                             " account.format, COALESCE(collection.refused_at,"
+                             " CASE WHEN collection.status = ? THEN file.received_at"
+                             " ELSE collection.booked_at END) AS since FROM collection"
                              " JOIN account ON account.id = collection.account_id"
+                             " JOIN file ON file.id = collection.file_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
-                             " AND account.closed = 0"):
+                             " AND account.closed = 0", (accounts.REJECTED,)):
         answer = nacha.RETURN if row["format"] == "nacha" else messages.PACS004.name
-        expected.add((row["return_due"], answer, row["account_id"], row["file_id"],
-                      COLLECTION_RETURNED))
+        expect(row["return_due"], answer, row["account_id"], row["file_id"],
+               COLLECTION_RETURNED, row["since"])
         if row["booked_at"]:
             # Money goes back only for a collection that settled.
-            expected.add((row["return_due"], messages.CAMT054.name, row["account_id"],
-                          None, COLLECTION_RETURNED))
-    for row in db.rows(conn, "SELECT payment.*, account.format FROM payment"
+            expect(row["return_due"], messages.CAMT054.name, row["account_id"],
+                   None, COLLECTION_RETURNED, row["since"])
+    # A payment's return is only ever scheduled as it books, or as its file
+    # arrives for a NACHA account's rejection, and both moments are kept.
+    for row in db.rows(conn, "SELECT payment.*, account.format, file.received_at FROM payment"
                              " JOIN account ON account.id = payment.account_id"
+                             " JOIN file ON file.id = payment.file_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
                              " AND (payment.status = ? OR (payment.status = ?"
                              " AND booked_at IS NOT NULL))",
                        (accounts.REJECTED, accounts.ACCEPTED)):
         answer = nacha.RETURN if row["format"] == "nacha" else messages.PACS004.name
-        expected.add((row["return_due"], answer, row["account_id"], row["file_id"],
-                      RETURNED))
+        since = (row["booked_at"] if row["status"] == accounts.ACCEPTED
+                 else row["received_at"])
+        expect(row["return_due"], answer, row["account_id"], row["file_id"],
+               RETURNED, since)
         if row["status"] == accounts.ACCEPTED:
             # Money comes back only for a payment that was debited (#144).
-            expected.add((row["return_due"], messages.CAMT054.name, row["account_id"],
-                          None, RETURNED))
+            expect(row["return_due"], messages.CAMT054.name, row["account_id"],
+                   None, RETURNED, since)
     names = {row["id"]: row["msg_id"] for row in db.rows(conn, "SELECT id, msg_id FROM file")}
-    for day, kind_, account, file_id, reports in expected:
+    for (day, kind_, account, file_id, reports), since in expected.items():
         start = datetime.datetime.combine(datetime.date.fromisoformat(day),
                                           datetime.time(0, 0), tzinfo=clock.zone)
         out.append({"id": None, "key": _key(conn, kind_, account, day, reports, file_id),
                     "type": kind_, "account": account, "fileId": file_id,
-                    "msgId": names.get(file_id), "dueAt": db.stamp(start),
-                    "written": False, "reports": reports})
+                    "msgId": names.get(file_id), "queuedAt": since,
+                    "dueAt": db.stamp(start), "written": False, "reports": reports})
     out = [entry for entry in out if entry["type"].startswith(kind)]
     return sorted(out, key=lambda e: (e["dueAt"], not e["written"], e["type"],
                                       e["account"] or "", e["fileId"] or 0, e["reports"]))
@@ -372,9 +423,10 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     ``camt.054`` credit (``_release_returns``). The clock is required rather
     than optional: a caller that left it out would book payments whose
     returns then silently never happened."""
+    promised = _promised(conn, clock)
     booked = accounts.book_due(conn, today, now, commit=False)
     accounts.schedule_returns(conn, booked, clock)
-    _release_returns(conn, now, today)
+    _release_returns(conn, now, today, promised)
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in booked:
         groups.setdefault((row["account_id"], row["settlement_date"]), []).append(row)
@@ -392,13 +444,11 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
                         now, day=day)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body,
-             _key(conn, messages.CAMT054.name, account_id, day, SETTLING)))
-    _release_credits(conn, now, today, clock)
-    _release_collections(conn, now, today, clock)
-    _release_collection_returns(conn, now, today, clock)
+        _send(conn, messages.CAMT054.name, account_id, body,
+              _key(conn, messages.CAMT054.name, account_id, day, SETTLING), now, promised)
+    _release_credits(conn, now, today, clock, promised)
+    _release_collections(conn, now, today, clock, promised)
+    _release_collection_returns(conn, now, today, clock, promised)
     released = db.rows(conn, "SELECT id, type, account, due_at FROM message"
                              " WHERE released_at IS NULL AND due_at <= ? ORDER BY id",
                        (stamp,))
@@ -408,10 +458,9 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     return released
 
 
-def _release_credits(conn, now, today, clock):
+def _release_credits(conn, now, today, clock, promised):
     """Book the money arriving today, and say so: a ``camt.054`` credit per
     account and booking day, the same granularity as the debits (#91)."""
-    stamp = db.stamp(now)
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in credits.book_due(conn, today, clock, now):
         by_day.setdefault((row["account_id"], row["booking_date"]), []).append(
@@ -426,16 +475,13 @@ def _release_credits(conn, now, today, clock):
                         now, day=day)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body,
-             _key(conn, messages.CAMT054.name, account_id, day, ARRIVING)))
+        _send(conn, messages.CAMT054.name, account_id, body,
+              _key(conn, messages.CAMT054.name, account_id, day, ARRIVING), now, promised)
 
 
-def _release_collections(conn, now, today, clock):
+def _release_collections(conn, now, today, clock, promised):
     """Book the collections that settle today, and say so: a ``camt.054`` credit
     per account and settlement date, the same granularity as the debits (#131)."""
-    stamp = db.stamp(now)
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in direct_debit.book_due(conn, today, clock, now):
         by_day.setdefault((row["account_id"], row["settlement_date"]), []).append(row)
@@ -449,17 +495,14 @@ def _release_collections(conn, now, today, clock):
                         now, day=day)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body,
-             _key(conn, messages.CAMT054.name, account_id, day, COLLECTED)))
+        _send(conn, messages.CAMT054.name, account_id, body,
+              _key(conn, messages.CAMT054.name, account_id, day, COLLECTED), now, promised)
 
 
-def _release_collection_returns(conn, now, today, clock):
+def _release_collection_returns(conn, now, today, clock, promised):
     """Debit what the debtor's bank sent back, and tell the client twice, as a
     payment's return does: a ``pacs.004`` per account, day and original file,
     and a ``camt.054`` debit per account and day (#131)."""
-    stamp = db.stamp(now)
     by_file: Dict[tuple, List[Dict[str, Any]]] = {}
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in direct_debit.book_returns(conn, today, clock, now):
@@ -473,7 +516,7 @@ def _release_collection_returns(conn, now, today, clock):
         account = accounts.require(conn, account_id)
         if account["format"] == "nacha":
             _queue_return_file(conn, account, rows, datetime.date.fromisoformat(day),
-                               file_id, now, COLLECTION_RETURNED)
+                               file_id, now, promised, COLLECTION_RETURNED)
             continue
         sequence = db.next_value(conn, "pacs.004:" + account_id)
         body = _written(conn, messages.PACS004.name, account_id,
@@ -483,11 +526,9 @@ def _release_collection_returns(conn, now, today, clock):
                         now, day=day, file_id=file_id)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, file_id, due_at, body, key)"
-            " VALUES (?,?,?,?,?,?)",
-            (messages.PACS004.name, account_id, file_id, stamp, body,
-             _key(conn, messages.PACS004.name, account_id, day, COLLECTION_RETURNED, file_id)))
+        _send(conn, messages.PACS004.name, account_id, body,
+              _key(conn, messages.PACS004.name, account_id, day, COLLECTION_RETURNED, file_id),
+              now, promised, file_id)
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
@@ -498,10 +539,8 @@ def _release_collection_returns(conn, now, today, clock):
                         now, day=day)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body,
-             _key(conn, messages.CAMT054.name, account_id, day, COLLECTION_RETURNED)))
+        _send(conn, messages.CAMT054.name, account_id, body,
+              _key(conn, messages.CAMT054.name, account_id, day, COLLECTION_RETURNED), now, promised)
 
 
 def queue_refusal(conn, collection, now, delay_ms=0) -> Dict[str, Any]:
@@ -511,20 +550,21 @@ def queue_refusal(conn, collection, now, delay_ms=0) -> Dict[str, Any]:
     body = messages.write_pain002_refusal(collection, msg_id, now).decode("utf-8")
     due = db.stamp(now + datetime.timedelta(milliseconds=delay_ms))
     cursor = conn.execute(
-        "INSERT INTO message (type, account, file_id, due_at, body) VALUES (?,?,?,?,?)",
-        (messages.PAIN002.name, collection["account_id"], collection["file_id"], due, body))
+        "INSERT INTO message (type, account, file_id, due_at, body, queued_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (messages.PAIN002.name, collection["account_id"], collection["file_id"], due, body,
+         db.stamp(now)))
     conn.commit()
     return {"id": cursor.lastrowid, "key": "m%d" % cursor.lastrowid,
             "type": messages.PAIN002.name, "account": collection["account_id"],
             "due_at": due}
 
 
-def _release_returns(conn, now, today):
+def _release_returns(conn, now, today, promised):
     """Credit back what is due to come back, and tell the client twice: a
     ``pacs.004`` per account, day and original file, and a ``camt.054`` credit
     per account and day - the same granularity as the debits."""
     returned = accounts.book_returns(conn, today, now)
-    stamp = db.stamp(now)
     by_file: Dict[tuple, List[Dict[str, Any]]] = {}
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in returned:
@@ -538,7 +578,7 @@ def _release_returns(conn, now, today):
         account = accounts.require(conn, account_id)
         if account["format"] == "nacha":
             _queue_return_file(conn, account, rows, datetime.date.fromisoformat(day),
-                               file_id, now)
+                               file_id, now, promised)
             continue
         sequence = db.next_value(conn, "pacs.004:" + account_id)
         body = _written(conn, messages.PACS004.name, account_id,
@@ -548,11 +588,9 @@ def _release_returns(conn, now, today):
                         now, day=day, file_id=file_id)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, file_id, due_at, body, key)"
-            " VALUES (?,?,?,?,?,?)",
-            (messages.PACS004.name, account_id, file_id, stamp, body,
-             _key(conn, messages.PACS004.name, account_id, day, RETURNED, file_id)))
+        _send(conn, messages.PACS004.name, account_id, body,
+              _key(conn, messages.PACS004.name, account_id, day, RETURNED, file_id),
+              now, promised, file_id)
     for (account_id, day), rows in sorted(by_day.items()):
         account = accounts.require(conn, account_id)
         sequence = db.next_value(conn, "camt.054:" + account_id)
@@ -564,10 +602,8 @@ def _release_returns(conn, now, today):
                         now, day=day)
         if body is None:
             continue
-        conn.execute(
-            "INSERT INTO message (type, account, due_at, body, key) VALUES (?,?,?,?,?)",
-            (messages.CAMT054.name, account_id, stamp, body,
-             _key(conn, messages.CAMT054.name, account_id, day, RETURNED)))
+        _send(conn, messages.CAMT054.name, account_id, body,
+              _key(conn, messages.CAMT054.name, account_id, day, RETURNED), now, promised)
     return returned
 
 
@@ -585,8 +621,8 @@ def collect(conn, now, leave=False, kind="") -> List[Dict[str, Any]]:
     when the mock starts writing a newer one, and the version is not what they
     mean.
     """
-    sql = ("SELECT id, type, account, file_id, due_at, released_at, body, key"
-           " FROM message WHERE released_at IS NOT NULL AND taken_at IS NULL")
+    sql = ("SELECT id, type, account, file_id, due_at, released_at, body, key,"
+           " queued_at FROM message WHERE released_at IS NOT NULL AND taken_at IS NULL")
     params: List[Any] = []
     if kind:
         # A literal prefix, not a LIKE pattern. LIKE would make `_` and `%` in
@@ -685,6 +721,7 @@ def as_json(rows) -> List[Dict[str, Any]]:
     """
     return [{"id": row["id"], "key": key_of(row), "type": row["type"],
              "account": row["account"],
+             "queuedAt": row["queued_at"],
              "releasedAt": row["released_at"], "dueAt": row["due_at"],
              "fileId": row["file_id"], "summary": summary(row),
              "bytes": len(row["body"].encode("utf-8")),
