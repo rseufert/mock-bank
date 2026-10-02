@@ -34,7 +34,7 @@ jobs:
           # missing, but starting with them makes a missing tag mean a missing
           # tag rather than a shallow clone.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Nothing is half released
