@@ -1,0 +1,12 @@
+# The package has no dependencies, so the Actions the workflows run are the
+# whole dependency surface (docs/GITHUB.md). This keeps them current, which is
+# what makes pinning `pypa/gh-action-pypi-publish` to a commit SHA safe to keep
+# doing: a pin nothing updates is a pin somebody eventually loosens.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - no changelog

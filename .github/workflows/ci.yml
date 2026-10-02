@@ -330,3 +330,35 @@ jobs:
           docker logs mock-bank-open 2>&1 | grep -q "WARNING - listening on 0.0.0.0 with no --auth" \
             || { echo "no exposure warning from a container with no --auth"; docker logs mock-bank-open; exit 1; }
           docker rm -f mock-bank-open
+
+  # The one check the `main` ruleset requires (docs/GITHUB.md). The matrix
+  # names above are generated and change whenever the matrix does, so requiring
+  # them by name would break on the next Python release; this name is fixed.
+  #
+  # `if: always()` is the point. Without it this job is *skipped* when a job it
+  # needs fails, and a required check that was skipped counts as passed. So it
+  # always runs, and fails unless every job it needs succeeded - a cancelled or
+  # skipped one is a failure too, since no job here skips on purpose.
+  all:
+    name: CI passed
+    if: always()
+    needs: [test, docs, smoke, package, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job this workflow runs succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -eu
+          echo "$RESULTS"
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["RESULTS"])
+          bad = {name: job["result"] for name, job in needs.items()
+                 if job["result"] != "success"}
+          if bad:
+              sys.exit("not passed: %s" % ", ".join(
+                  "%s %s" % pair for pair in sorted(bad.items())))
+          print("all %d jobs succeeded" % len(needs))
+          PY
