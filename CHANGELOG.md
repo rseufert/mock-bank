@@ -13,6 +13,112 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.7.0] - 2026-10-02
+
+### Added
+
+- **A queue entry says when the bank came to owe it, and so does its message**
+  (#185). Every entry in `GET /_mock/queue` has `queuedAt`: the bank-clock moment
+  it entered the queue, whatever caused that. For a payment or a collection not
+  yet settled it is when the file arrived; for money arriving, when the bank heard
+  of it; for a return, when the payment booked and its return was scheduled, not
+  when the file arrived; for a refused collection, when the debtor's bank refused
+  it. It does not depend on when the queue was read, so two captures of one run
+  agree, and it is never later than the bank clock at the first read that shows
+  the entry. One case moves, and the README says which: an entry for collections
+  not yet settled, when every collection of the earliest file in it is refused
+  before settling.
+
+  The message carries the same `queuedAt` into `GET /_mock/mailbox`, so one read at
+  the end can say when each message was promised, paired on `key`. A statement and
+  an intraday report have `null`: neither is ever in the queue. So does a message
+  written by an older version, because nothing recorded it and none is made up.
+
+  A collection also keeps `refused_at`, the moment the debtor's bank refused it,
+  shown on `GET /_mock/collections`. That is what a refused collection's return is
+  queued from, and no other field said it: a refusal can come days after the
+  booking.
+
+  The database schema is version 13 (`message.queued_at`, `collection.refused_at`).
+  A `--db` file from 0.6.0 is upgraded in place when the mock opens it.
+
+- **`GET /_mock/messages` lists what the bank has sent, collected or not** (#186).
+  The mailbox no longer lists a message once a client has collected it, so somebody
+  watching that client could not find it again: `GET /_mock/mailbox/<id>` serves
+  only the body, to a caller who already knows the id. The new listing has every
+  released message, oldest first, with the mailbox's fields and `takenAt`: the
+  bank-clock moment it was collected, or `null`. `?type=` filters on a prefix, as
+  the mailbox does.
+
+  It is a path of its own and not a flag on the mailbox, whose default takes what
+  it lists. Nothing asked of this one takes a message, and it releases nothing
+  either, so reading it between a client's calls changes nothing the client sees.
+  With `GET /_mock/queue`, which lists what has not been released, every message
+  is listed once.
+
+  It shows what the bank still holds. `--retention-days` removes collected messages
+  as they age, and a reset removes them all.
+
+- **A `pain.008` sample the seed accepts**, `tests/samples/pain008_four_collections.xml`
+  (#187). One batch of four euro direct debits ACME collects under SEPA Core
+  mandates, with the seeded accounts as its debtors, so one post against a fresh
+  mock gives a first-time user every outcome worth seeing:
+
+  ```
+  DD-2026-0101  1250.00  at another bank          accepted
+  DD-2026-0102   340.00  GLOBEX, 12.50 to hand    rejected  AM04
+  DD-2026-0103   980.25  INITECH, closed          rejected  AC04
+  DD-2026-0104  1500.50  EURODIS, held            accepted
+  ```
+
+  The file's status is `PART`, and the two accepted ones credit ACME 2750.50 on
+  their settlement date. It stands beside `pain001_four_payments.xml` and
+  `nacha_four_payments_to_the_seed.ach`, and is used in the README's direct debit
+  walk-through.
+
+  Until now the repository shipped no direct debit file the mock would collect
+  anything for: the two external `pain.008` samples are decided `AC03` on every
+  collection, because their creditor accounts are not the mock's, so mock-films
+  wrote its own file to film the choreography.
+
+  It is written by `schema.serialize`, so the element order is the dictionary's
+  rather than a hand-typed guess, and `tools/check_xsd.py` now validates it with
+  the other clean samples - ISO's own XSD agreeing with the order the dictionary
+  chose. `tests/test_collections_book.py` posts it, holds the four outcomes
+  against the behaviours the seed gives those accounts, and reads the file's own
+  IBANs with a regex rather than with the mock's reader, so the test cannot agree
+  with itself about what the sample says.
+
+### Fixed
+
+- **The README said a same-day return waits on the queue** (#187). Under *The
+  debtor's bank can say no*, the "After it settled" bullet ended "Until then both
+  are listed in `GET /_mock/queue`", which holds only for a return the bank books
+  on a later day. Reported by mock-films, which refused a settled collection
+  `MD06` on a business day before the cutoff and found the queue empty.
+
+  The behaviour was right and the sentence was not. Measured, on a Thursday clock
+  with the collection settled:
+
+  ```
+  refused Monday 09:00 (before the cutoff)   return books Monday   queue []
+  refused Saturday                           return books Monday   queue [camt.054, pacs.004]
+  refused Monday 16:00 (after the cutoff)    return books Tuesday  queue [camt.054, pacs.004]
+  ```
+
+  So the sentence now names both cases: released at once and never queued when
+  the bank can book the return today, listed until the day it books when it
+  cannot - a weekend or a holiday, or after the cutoff.
+
+  The two neighbouring passages were checked for the same wording and neither
+  needed it. A collection's own `camt.054` *is* always queued, because an accepted
+  collection never settles on the day its file arrives - asked to collect on the
+  day of arrival, it settles the next business day - so "Until then the
+  notification is listed in `GET /_mock/queue`" a few paragraphs above is right as
+  it stands. The NACHA return passage makes no claim about the queue; its
+  `nacha.return` and `camt.054` go out at once on a same-day return exactly as the
+  `pacs.004` pair does.
+
 ## [0.6.0] - 2026-10-01
 
 ### Added
@@ -1204,7 +1310,8 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/rseufert/mock-bank/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rseufert/mock-bank/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rseufert/mock-bank/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rseufert/mock-bank/compare/v0.3.0...v0.4.0
