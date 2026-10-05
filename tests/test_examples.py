@@ -278,5 +278,60 @@ class TheTourOnlyUsesEndpointsThisMockHas(unittest.TestCase):
         self.assertEqual(script.count("CURL+=(-u"), 1)
 
 
+
+class TheIntegrationsThatMoved(unittest.TestCase):
+    """`mockbank.examples` says where a moved example went.
+
+    `from mockbank.examples import payment_run` worked from 0.6.0 to 0.7.0 and
+    mock-films used it. Python's own message for a name that is gone is that it
+    cannot be imported, which is true and sends the reader nowhere.
+    """
+
+    def test_asking_for_one_names_mock_acme(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import examples
+        finally:
+            sys.path.remove(ROOT)
+        self.assertEqual(set(examples.MOVED),
+                         {"bank_messages", "invoice_check", "pay_invoices",
+                          "payment_run", "procure_to_pay"})
+        for name in examples.MOVED:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    os.path.exists(os.path.join(EXAMPLES, name + ".py")),
+                    "a file by that name is back, and this message would hide it")
+                with self.assertRaises(ImportError) as moved:
+                    getattr(examples, name)
+                self.assertIn("mockacme.%s" % name, str(moved.exception))
+                self.assertIn("https://github.com/rseufert/mock-acme",
+                              str(moved.exception))
+
+    def test_the_from_import_a_caller_actually_wrote_gets_that_message(self):
+        sys.path.insert(0, ROOT)
+        try:
+            with self.assertRaises(ImportError) as moved:
+                from examples import payment_run                # noqa: F401
+        finally:
+            sys.path.remove(ROOT)
+        self.assertIn("mock-acme", str(moved.exception))
+
+    def test_a_name_that_was_never_there_is_an_ordinary_attribute_error(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import examples
+        finally:
+            sys.path.remove(ROOT)
+        with self.assertRaises(AttributeError):
+            examples.nothing_by_this_name
+
+    def test_what_stayed_still_imports(self):
+        sys.path.insert(0, ROOT)
+        try:
+            from examples import client, statement             # noqa: F401
+        finally:
+            sys.path.remove(ROOT)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

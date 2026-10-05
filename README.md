@@ -57,11 +57,10 @@ By [Rick Seufert](https://rickseufert.com). The [projects page](https://rickseuf
 has this mock, [mock-sap](https://github.com/rseufert/mock-sap),
 [mock-edi](https://github.com/rseufert/mock-edi) and the worked examples that
 use them together. mock-bank is the third leg: `po_bridge` sends the order,
-`invoice_check` approves the invoice, and
-[`payment_run`](#worked-example-a-payment-run-against-sap) moves the money and
-posts the statement back to SAP.
-[`pay_invoices`](#worked-example-paying-the-suppliers-invoices) pays mock-edi's
-invoices through this mock directly.
+`invoice_check` approves the invoice, and `payment_run` moves the money and
+posts the statement back to SAP. `pay_invoices` pays mock-edi's invoices
+through this mock directly. All of them are in
+[mock-acme](https://github.com/rseufert/mock-acme), the integration between the mocks.
 
 ---
 
@@ -387,7 +386,7 @@ evidence, since no export here shows a collection returned). Before 0.5
 these were `495`, `165` and `195`, which a real bank writes for an outgoing wire,
 the proceeds of a debit collection and an incoming wire. A reader that takes a
 movement's direction from the code's range, 100 to 399 a credit and 400 to 699 a
-debit, as `examples/payment_run.py` does, reads both the same.
+debit, as mock-acme's `payment_run` does, reads both the same.
 
 `mockbank.bai2.read` reads a real bank's file as well as the mock's own
 ([#114](https://github.com/rseufert/mock-bank/issues/114)). A `88` continuation
@@ -1005,272 +1004,29 @@ ever released. This is worth stating because the first version did keep a set,
 and restarting it filled the pickup directory with months of files the client
 had collected long before.
 
-## Worked example: paying the supplier's invoices
+## Worked examples: in mock-acme
 
-[`examples/pay_invoices.py`](examples/pay_invoices.py) is the payment leg of an
-order-to-pay flow, joining this mock to
-[mock-edi](https://github.com/rseufert/mock-edi). The supplier bills in EDIFACT;
-the integration pays each `INVOIC` on its due date and then decides, from what
-the bank sends back, which invoices are actually paid:
+Three worked integrations lived in `examples/` here. They are code that sits
+*between* this mock and the other two, so they have moved to
+[mock-acme](https://github.com/rseufert/mock-acme), which holds one copy of each and tests it against all three
+mocks:
 
-```
-mock-edi  ──INVOIC──▶  pay_invoices  ──pain.001──▶  mock-bank
-                                     ◀──pain.002──  accepted: scheduled, not paid
-                                     ◀──camt.054──  the money left
-                                     ◀──camt.053──  on the statement: paid
-```
+| Was | Is now | What it does |
+| --- | --- | --- |
+| `examples/pay_invoices.py` | [`mockacme/pay_invoices.py`](https://github.com/rseufert/mock-acme/blob/main/mockacme/pay_invoices.py) | Collects [mock-edi](https://github.com/rseufert/mock-edi)'s EDIFACT invoices, pays each on its due date in one `pain.001`, and follows it to the statement |
+| `examples/payment_run.py` | [`mockacme/payment_run.py`](https://github.com/rseufert/mock-acme/blob/main/mockacme/payment_run.py) | Selects [mock-sap](https://github.com/rseufert/mock-sap)'s open items, pays them as a `pain.001` or a NACHA file, and posts the bank's statement back to SAP as a `FINSTA01` |
+| `examples/procure_to_pay.py` | [`mockacme/procure_to_pay.py`](https://github.com/rseufert/mock-acme/blob/main/mockacme/procure_to_pay.py) | One purchase across all three mocks, from the order to the cleared payment |
 
-Standard library only, and it imports neither mock: it reads the `INVOIC` by
-hand, builds the `pain.001` with `xml.etree`, and matches every answer to its
-invoice by `EndToEndId` and `MsgId`. Seven tests, each one a way a payment run
-goes wrong quietly:
+Their tests moved with them, and so did `tests/test_payment_run_readers.py`,
+which holds `payment_run`'s hand-written statement readers to this mock's own
+writers. [`examples/README.md`](examples/README.md) says which file became
+which.
 
-| Test | What it proves |
-| --- | --- |
-| `test_accepted_is_scheduled_and_the_statement_makes_it_paid` | A `pain.002` that accepts a payment schedules it on the due date; only the `camt.053` makes the invoice paid |
-| `test_closed_supplier_account_leaves_the_invoice_open` | `AC04` leaves the invoice open with the reason, held rather than retried, and nothing debited |
-| `test_an_invoice_sent_twice_is_paid_once` | mock-edi's `duplicate-invoice` sends it twice; it is paid once |
-| `test_a_run_retried_after_a_crash_does_not_pay_twice` | The same payments make the same `MsgId`, so a retried run's file is refused with `DUPL`, and that refusal does not reopen what the first file paid |
-| `test_insufficient_funds_leaves_invoices_open` | `AM04` on every payment is read payment by payment, even though the group status is `RJCT` |
-| `test_a_returned_payment_reopens_the_invoice` | Under `return-later` the invoice is paid, then the `pacs.004`'s credit on a later statement reopens it |
-| `test_a_payment_missing_from_the_statement_is_not_paid` | Under `statement-gap` the `camt.054` says the money left and the `camt.053` does not show it; the invoice is not paid, and says why |
-
-```bash
-pip install mock-edi
-mock-edi --port 8080 &
-python3 -m mockbank --port 8090 &
-python3 -m unittest -v examples.test_pay_invoices
-```
-
-`EDI_URL` and `BANK_URL` point the tests at mocks running elsewhere. The tests
-switch mock-edi's `ACME` partner to EDIFACT `D:96A:UN`, which bills in euros,
-so the buyer is ACME in both mocks. CI runs them against mock-edi from PyPI.
-
-## Worked example: a payment run against SAP
-
-[`examples/payment_run.py`](examples/payment_run.py) is the other end of the
-same flow, joining this mock to [mock-sap](https://github.com/rseufert/mock-sap).
-The invoices are already posted in SAP. The run does what SAP's `F110` does:
-it selects the open supplier items that are due, pays each one, and posts every
-statement back so SAP clears what was paid and reopens what came back.
-
-```
-mock-sap  ──open items──▶  payment_run  ──pain.001──▶  mock-bank
-                                        ◀──pain.002──  accepted, or why not
-                                        ◀──camt.053──  what actually left, and came back
-mock-sap  ◀──FINSTA01─────  payment_run                clear what it paid, reopen returns
-```
-
-Standard library only, and it imports neither mock. The `EndToEndId` is the
-supplier's own invoice number (`SupplierInvoiceIDByInvcgParty`), so the bank's
-answers and SAP's clearing meet on the same reference. The `MsgId` is the run
-date and identification, as `F110`'s are, so the same run sent twice is `DUPL`.
-Each `camt.053` is checked (opening plus entries is closing) before it is
-converted, and the `FINSTA01` writes a debit the way SAP writes a negative
-number, with the minus after it, because nothing in the IDoc says which way a
-line goes. What it shares with `pay_invoices.py` is in
-[`examples/bank_messages.py`](examples/bank_messages.py), so a copy of either
-takes that one file with it.
-
-**Look at `run.problems` first.** An answer the run could not use goes there,
-in words: the bank answering anything but `202` or `422` to the payment file, a
-mailbox answering with an error, SAP refusing a statement - and a bank or SAP
-that does not answer at all, down or refusing the connection, which is named as
-such. None of it is raised and none of it is dropped. A payment file the bank
-never received leaves every item `selected`, to send again. An empty list is what a clean run looks like. Each item's
-`status` and `reason` say the rest: `rejected` with the bank's code, `cleared`
-with SAP's clearing document, `unreconciled` when a statement does not add up,
-`returned` with the bank's reason.
-
-The six tests from the plan on [#16](https://github.com/rseufert/mock-bank/issues/16),
-numbered as there, and what the rest of the suite adds to them:
-
-| Test | What it proves |
-| --- | --- |
-| `test_1_a_clean_run_is_paid_matched_and_cleared` | Monday's statement adds up, every item is cleared in SAP with a clearing document, and the next run finds nothing to pay |
-| `test_a_closed_account_is_rejected_ac04_and_the_rest_accepted` (2) | The item paid to INITECH's closed account is rejected `AC04` from the `pain.002` and the rest are accepted; each payment went to the account its invoice names |
-| `test_3_a_return_reopens_the_invoice_distinguishable_from_one_never_paid` | Under `return-later` a paid invoice comes back three business days later and is reopened in SAP, open like one never paid but with `ClearingIsReversed` set, and the next run selects it |
-| `test_the_same_run_twice_is_dupl_and_pays_nothing_twice` (4) | The same run has the same `MsgId`; the bank refuses the copy with `DUPL`, nothing is paid twice, and the refusal leaves the first file's outcome alone |
-| `test_5_a_statement_gap_leaves_the_missing_payment_unreconciled_and_open` | Under `statement-gap` the statement does not add up, by exactly one payment: that payment is `unreconciled` and its item stays open, and SAP's own arithmetic check says so too |
-| `test_6_after_the_cutoff_it_waits_for_mondays_statement` | A run at 16:00 on a Friday settles on Monday; Friday's statement clears nothing and Monday's clears everything |
-| `test_posting_the_same_statement_twice_clears_nothing_twice` | A client that retries a statement post does no harm |
-| `test_an_item_not_yet_due_is_not_selected` | An invoice on `NT30` terms is left for a later run |
-| `test_the_selection_asks_sap_to_leave_blocked_and_cleared_items_out` | The query SAP receives asks for supplier lines that are neither blocked nor cleared |
-| `test_a_blocked_invoice_is_never_selected` | An invoice blocked for payment on the supplier invoice, as an SAP user blocks one, never reaches the bank; the unblocked one beside it is paid |
-| `test_a_bank_that_answers_with_an_error_is_a_problem_not_silence`, `test_sap_refusing_a_statement_is_recorded_against_it` | An error answer from either side goes into `run.problems` in words, and nothing stops half way |
-| `test_a_bank_that_does_not_answer_is_a_problem_not_silence`, `test_sap_not_answering_the_selection_selects_nothing_and_says_so`, `test_sap_not_answering_a_statement_is_recorded_against_it` | A side that does not answer at all - a port nothing listens on - is a named problem too, not a traceback, and a file that never reached the bank leaves its items as they were |
-| `test_two_payments_of_the_missing_amount_are_both_named` | A shortfall two payments could explain names both rather than guessing one |
-
-```bash
-pip install mock-sap
-mock-sap --port 8000 &
-python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
-python3 -m unittest -v examples.test_payment_run
-```
-
-**NACHA mode.** `PaymentRun(..., file_format="nacha")` pays the same
-invoices by ACH: a NACHA file of credits instead of the `pain.001`, the bank's
-acknowledgement read instead of the `pain.002`, and each supplier paid to the
-ABA routing and account number SAP holds for it (`BankNumber`, `BankAccount`)
-instead of an IBAN. The file's header is built from the run, so the same run
-sent twice is still the same file and still `DUPL`. The bank tells NACHA files
-apart by origin, date, creation time and file ID modifier, and the run's
-identification goes into the last two exactly, which leaves room for one to
-three capital letters or digits. A longer identification is refused before
-anything is selected. SAP's `F110` identifications are five characters, so a
-caller with those keeps a mapping of its own to three. If it were hashed instead, two runs that hashed alike
-would be one file to the bank, and the second would be refused as a repeat and
-never paid. An item a NACHA entry cannot carry is skipped with the reason, as
-a foreign-currency item is:
-- a reference over 15 characters, or holding a space or anything that is not
-  ASCII;
-- an amount of 100,000,000.00 or more;
-- an account number over 17 characters;
-- a name that is not ASCII.
-
-The statement may be BAI2, which is what a US bank sends an ACH account (#57),
-and `reconcile` reads it by hand into the same statement a `camt.053` gives:
-the balances, and each movement's direction from its type code's range, so no
-particular code has to be known. The reason an ACH payment came back is read
-from the bank's NACHA return file, where it is an `R` code. The same
-tests run in this mode too, which is 0.3's definition of done, with one more
-for what an entry cannot carry:
-
-```bash
-PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v examples.test_payment_run
-```
-
-In that mode the tests make ACME a dollar account in NACHA format and give the
-three suppliers US bank details through `A_BusinessPartnerBank`; a closed
-account is answered `R02` where the ISO run sees `AC04`.
-
-**The example does not advance bank time; the tests do.** A client cannot move
-a real bank's clock. It sends its file and reads statements as they arrive, so
-`reconcile` posts whatever the bank has sent so far, and a payment not on a
-statement yet simply stays `accepted`. The tests move mock-bank's clock with
-`POST /_mock/advance` to make those statements arrive. That is also why
-mock-bank starts at `--clock 2026-10-02T16:00`, a Friday after the 15:00 cutoff:
-test 6 needs that moment, a reset returns to it, and the other tests advance to
-Monday morning first.
-
-mock-sap's seed has suppliers that bank where mock-bank's seed says they do
-(GLOBEX, INITECH, EURODIS and Umbrella Logistics), but no supplier invoices, so
-each test posts its own `INVOIC` IDocs. Nothing in the example or the tests
-writes to the open-item cube, which is read-only in SAP and, from mock-sap
-0.13.1, in the mock. `SAP_URL` and `BANK_URL` point the tests at mocks running
-elsewhere. CI runs them against mock-sap from PyPI.
-
-## Worked example: procure to pay, all three mocks
-
-**Running the examples from an install.** They ship in the wheel as
-`mockbank.examples`, so `pip install mock-bank` is enough to import and run them
-without cloning anything
-([#169](https://github.com/rseufert/mock-bank/issues/169)):
-
-```python
-from mockbank.examples import procure_to_pay, payment_run
-```
-
-```bash
-pip install mock-bank
-python3 -m unittest -v mockbank.examples.test_procure_to_pay
-```
-
-The files are the same ones this README links to - `examples/` is mapped onto that
-import path rather than copied - so nothing here goes stale when they change.
-Importing needs `mock-bank` alone: the examples reach mock-sap and mock-edi over
-HTTP and import neither.
-
-They are examples, not a supported client library, and the import path is the only
-promise made about them. `payment_run` can still pay an invoice twice in the ways
-[#164](https://github.com/rseufert/mock-bank/issues/164) lists - among them a
-reference carrying a comma or a slash, and two suppliers sharing an invoice
-number. Read them and copy them; do not put them in front of real money.
-
-[`examples/procure_to_pay.py`](examples/procure_to_pay.py) carries one purchase
-the whole way, joining this mock to both
-[mock-sap](https://github.com/rseufert/mock-sap) and
-[mock-edi](https://github.com/rseufert/mock-edi). The other two worked examples
-each use two mocks; this one exists for what only appears between them.
-
-```
-SAP  ──850──▶  supplier          a purchase order becomes an EDI order
-     ◀──855/856/810──  supplier  confirmed, shipped, invoiced
-SAP  ◀──INVOIC──                 matched, posted, and now owed
-     ──pain.001──▶  bank         a payment run selects what is due
-SAP  ◀──FINSTA01◀──camt.053──    the statement clears what was paid
-```
-
-It composes rather than reimplements: the three-way match is
-[`examples/invoice_check.py`](examples/invoice_check.py), a checked copy of
-mock-sap's example, and selection, payment and reconciliation are
-[`examples/payment_run.py`](examples/payment_run.py). The only logic of its own
-is `DurableInvoiceCheck`.
-
-**It was written to find bugs and it found three**, each one invisible to a pair
-of mocks whose tests were green, because each pair asserts what the *next* system
-received rather than what it could do with what it received. An `INVOIC` that
-named no supplier, so nothing was owed; a mock reporting status `53` for having
-posted nothing; and an order placed in EUR that came back invoiced in dollars,
-where this mock refusing the payment - a SEPA transfer is in EUR - was the only
-objection anywhere in the chain
-([mock-sap#68](https://github.com/rseufert/mock-sap/issues/68),
-[#67](https://github.com/rseufert/mock-sap/issues/67),
-[#74](https://github.com/rseufert/mock-sap/issues/74)).
-
-**Both protections against paying an invoice twice are accidents of what else was
-lost, and neither is a check.** A supplier retries an invoice after the first was
-taken, and a restarted middleware posts it again:
-
-* *Upstream*, a fresh `InvoiceCheck` has forgotten its ship notices as well as
-  what it posted, so a retry arriving alone is blocked for billing more than was
-  shipped - `item 00010 bills 100, shipped 0`. That is a second thing being
-  missing, not the duplicate being caught. Resend the despatch advice with it, as
-  a partner replaying a batch does, and it posts.
-* *Downstream*, within one run `PaymentRun.select` marks a repeated reference
-  `skipped`, so two payments in one file cannot share an `EndToEndId`. It looks
-  caught. The next run pays it, because by then the first has cleared and the
-  second is alone in the selection.
-
-The fix is to ask the system of record: does SAP already hold a supplier invoice
-with this number, from this invoicing party? One `$filter`, and it survives a
-restart because SAP is where the answer lives. Per party, because an invoice
-number is only unique within one - and with its quotes doubled, because the
-number is the supplier's to choose and `O'BRIEN-014` would otherwise close the
-literal early and be answered with a `400`.
-
-| Test | What it proves |
-| --- | --- |
-| `test_1_a_purchase_becomes_a_cleared_payment` | The whole loop: an order out, the supplier's answers back, a matched invoice posted as an open payable in EUR, paid on its due date, and cleared by the statement |
-| `test_the_payment_carries_the_suppliers_own_invoice_number` | The `EndToEndId` is what SAP stored as `SupplierInvoiceIDByInvcgParty`, so the bank's answer is findable in SAP |
-| `test_2_without_asking_sap_the_duplicate_is_paid_too` | A retried invoice plus a middleware restart posts a second payable, and the payment run pays it in the run after the one that skipped it: the supplier is paid twice and nothing refused it |
-| `test_a_resent_invoice_alone_is_blocked_for_the_wrong_reason` | The upstream accident, held rather than described: the retry arriving on its own is blocked for `bills 100, shipped 0`, because the restart lost the ship notice too |
-| `test_2b_asking_sap_refuses_the_duplicate_across_a_restart` | Asking SAP blocks the copy across the restart, and the one real invoice still clears |
-| `test_the_duplicate_question_is_asked_per_supplier` | Two suppliers may both number an invoice the same; one is not the other, and refusing the second would mean it is never paid |
-| `test_an_invoice_number_holding_a_quote_is_asked_about_correctly` | `O'BRIEN-014` is a supplier's number, not OData syntax; the quote is doubled and the question is answered rather than refused |
-| `test_3_a_price_disagreement_is_blocked_before_any_money_moves` | A block with a real cause - an `810` disagreeing with the purchase order - and the bank is never asked at all |
-| `test_a_short_shipment_is_paid_for_what_shipped` | The supplier ships and bills less than was ordered and is paid that; matching the ordered quantity would block it and paying it would overpay |
-| `test_4_a_rejected_payment_leaves_the_invoice_owed` | SAP approved it, the bank refused it `AC04` on a closed account SAP still believes in, and the item stays open and stays distinguishable from one paid and returned |
-
-**What it does not do.** It does not tell the supplier what was paid. That needs a
-remittance advice - X12 820 or EDIFACT `REMADV` - which mock-edi does not speak
-yet ([mock-edi#149](https://github.com/rseufert/mock-edi/issues/149)), so the loop
-ends with SAP and the bank agreeing and the supplier none the wiser. Which is
-why a supplier keeps dunning you for an invoice you paid.
-
-**mock-sap 0.13.2 is a real floor**: before it the `INVOIC` this example sends
-created no payable, and the `850` declared no currency. **mock-edi has no floor** -
-the tests pass against every published version back to 0.2.1, the oldest on PyPI.
-The examples are not carried in any wheel, so this one needs the checkout.
-
-```bash
-pip install "mock-sap>=0.13.2" mock-edi
-git clone https://github.com/rseufert/mock-bank && cd mock-bank
-mock-sap --port 8000 &
-mock-edi --port 8080 &
-python3 -m mockbank --port 8090 --clock 2026-10-02T16:00 &
-python3 -m unittest -v examples.test_procure_to_pay
-```
+**`from mockbank.examples import payment_run` no longer works.** It did from
+0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme.
+`mockbank.examples.client` and `mockbank.examples.statement`, which need nothing
+but this mock, are still in the wheel. mock-acme is not on PyPI; install it from
+its repository.
 
 ## Docker
 
@@ -1316,9 +1072,8 @@ mockbank/validate.py           findings about a payment file: refusals, structur
 ```
 
 `python -m mockbank` is the entry point; `tests/` drives a real server over
-HTTP; `tools/` holds the checks CI runs; `examples/demo.sh` is the curl tour, and
-`examples/pay_invoices.py` and `examples/payment_run.py` the worked integrations
-with mock-edi and mock-sap.
+HTTP; `tools/` holds the checks CI runs; `examples/demo.sh` is the curl tour. The worked
+integrations with mock-edi and mock-sap are in [mock-acme](https://github.com/rseufert/mock-acme).
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says how the pieces are meant to
 fit, and [docs/FILES.md](docs/FILES.md) describes every file.
 

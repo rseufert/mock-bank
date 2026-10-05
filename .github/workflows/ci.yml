@@ -118,68 +118,6 @@ jobs:
             sleep 0.25
           done
           python examples/client.py --base http://127.0.0.1:8082
-      - name: Run the pay_invoices example against mock-edi from PyPI
-        run: |
-          set -euo pipefail
-          python -m pip install mock-edi
-          mock-edi --port 8080 -q &
-          EDI_PID=$!
-          python -m mockbank --port 8090 -q &
-          BANK_PID=$!
-          trap 'kill $EDI_PID $BANK_PID 2>/dev/null || true' EXIT
-          for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:8080/_mock/health >/dev/null \
-              && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
-            sleep 0.25
-          done
-          python -m unittest -v examples.test_pay_invoices
-      - name: Run the procure_to_pay example against all three mocks from PyPI
-        run: |
-          set -euo pipefail
-          # mock-sap 0.13.2 is a real floor: before it the INVOIC this example
-          # sends created no payable and the order's currency was not declared.
-          # mock-edi carries no floor - the example was run against every
-          # published version back to 0.2.1, the oldest on PyPI, and all pass -
-          # so CI takes the latest, which is what CI is for.
-          python -m pip install "mock-sap>=0.13.2" mock-edi
-          mock-sap --port 8000 -q &
-          SAP_PID=$!
-          mock-edi --port 8080 -q &
-          EDI_PID=$!
-          # The same Friday-after-cutoff start as payment_run's, though this
-          # example reads each invoice's own due date and advances to it: the
-          # supplier dates its 810 today and bills net 30, so the payable falls
-          # due about a month out and a fixed date here would rot.
-          python -m mockbank --port 8090 -q --clock 2026-10-02T16:00 &
-          BANK_PID=$!
-          trap 'kill $SAP_PID $EDI_PID $BANK_PID 2>/dev/null || true' EXIT
-          for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:8000/_mock/health >/dev/null \
-              && curl -sf http://127.0.0.1:8080/_mock/health >/dev/null \
-              && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
-            sleep 0.25
-          done
-          python -m unittest -v examples.test_procure_to_pay
-      - name: Run the payment_run example against mock-sap from PyPI
-        run: |
-          set -euo pipefail
-          python -m pip install mock-sap
-          mock-sap --port 8000 -q &
-          SAP_PID=$!
-          # A Friday after the cutoff, which test 6 needs; the others move on
-          # to Monday morning themselves.
-          python -m mockbank --port 8090 -q --clock 2026-10-02T16:00 &
-          BANK_PID=$!
-          trap 'kill $SAP_PID $BANK_PID 2>/dev/null || true' EXIT
-          for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:8000/_mock/health >/dev/null \
-              && curl -sf http://127.0.0.1:8090/_mock/health >/dev/null && break
-            sleep 0.25
-          done
-          python -m unittest -v examples.test_payment_run
-          # The same tests with the run paying by ACH: the 0.3 milestone's
-          # definition of done (#55).
-          PAYMENT_RUN_FORMAT=nacha python -m unittest -v examples.test_payment_run
       - name: The tour again, against a mock trading through a folder
         run: |
           set -eu
@@ -273,24 +211,25 @@ jobs:
         with:
           name: distributions
           path: dist/*
-      - name: The worked examples are importable from the installed wheel
+      - name: The examples are importable from the installed wheel
         run: |
           set -eu
-          # #169: mock-films plays this choreography across three mocks and had no
-          # way to import it after `pip install mock-bank`. From /tmp, so the
-          # repository's own `examples/` cannot answer instead of the wheel, and
-          # with nothing but mock-bank installed, because the examples reach
-          # mock-sap and mock-edi over HTTP and must not import them.
+          # #169. From /tmp, so the repository's own `examples/` cannot answer
+          # instead of the wheel, and with nothing but mock-bank installed.
           cd /tmp
           python - <<'PY'
-          from mockbank.examples import (bank_messages, client, invoice_check,
-                                         payment_run, procure_to_pay, statement)
-          import sys
-          assert procure_to_pay.ProcureToPay
-          assert payment_run.PaymentRun
-          leaked = [n for n in sys.modules if "mock_sap" in n or "mock_edi" in n]
-          assert not leaked, leaked
-          print("mockbank.examples imports from the wheel:", procure_to_pay.__file__)
+          from mockbank.examples import client, statement
+          import mockbank.examples
+          # The worked integrations moved to rseufert/mock-acme. Asking for one
+          # has to say where it went, not only that it is missing.
+          for name in mockbank.examples.MOVED:
+              try:
+                  getattr(mockbank.examples, name)
+              except ImportError as moved:
+                  assert "mock-acme" in str(moved), moved
+              else:
+                  raise SystemExit("mockbank.examples.%s is still in the wheel" % name)
+          print("mockbank.examples imports from the wheel:", client.__file__)
           PY
 
   docker:

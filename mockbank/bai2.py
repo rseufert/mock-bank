@@ -80,7 +80,7 @@ Wire``. So ``165`` for a return was wrong, not merely unverified, and
 ``495``/``195`` described the wrong rail.
 
 A reader that takes a movement's direction from the code's range - 100 to 399 a
-credit, 400 to 699 a debit, as ``examples/payment_run.py`` does - reads the new
+credit, 400 to 699 a debit, as mock-acme's ``payment_run`` does - reads the new
 codes exactly as it read the old ones. A reader that matched on the old codes
 does not.
 
@@ -1070,7 +1070,7 @@ def _fold(text: str) -> List["Folded"]:
     that is wrong in a file with an `88` in it and right in every file this mock
     writes.
 
-    This is what `examples/payment_run.py` had been doing since #113 while this
+    This is what `payment_run` (now in mock-acme) had been doing since #113 while this
     module refused any file containing an `88` - the module and the example
     disagreeing about the format, with only the example held to a real file.
     """
