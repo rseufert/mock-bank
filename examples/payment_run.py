@@ -702,6 +702,16 @@ class PaymentRun:
         convention agreed with mock-sap on mock-bank#16. The reference is in
         the structured `E1EDP02`, which is matched exactly, rather than only in
         the note to payee.
+
+        **The currency is the run's, not EUR** (#164 item 4). `CUXWAERZ` and
+        `FIIKWAER` were written as EUR whatever account the run paid from, so
+        an ACH run - which pays in dollars, and skips any item that is not in
+        them - handed SAP a statement of dollar payments labelled as euros.
+        It reconciled anyway only because mock-sap did not compare a line's
+        currency against the item's either; mock-sap#88 is that half, and
+        with one fixed and not the other the dollar payments stop clearing.
+        An amount without a currency is not an amount, and this run has
+        exactly one: items in any other are not selected.
         """
         def sap(amount: Decimal) -> str:
             return "%.2f-" % -amount if amount < 0 else "%.2f" % amount
@@ -709,7 +719,8 @@ class PaymentRun:
         def amounts(*pairs) -> str:
             return "".join(
                 "<E1IDPU5 SEGMENT=\"1\"><MOAQUAL>%s</MOAQUAL><MOABETR>%s</MOABETR>"
-                "<CUXWAERZ>EUR</CUXWAERZ></E1IDPU5>" % (q, sap(a)) for q, a in pairs)
+                "<CUXWAERZ>%s</CUXWAERZ></E1IDPU5>"
+                % (q, sap(a), self.currency) for q, a in pairs)
 
         body = []
         for position, line in enumerate(lines, 1):
@@ -729,10 +740,10 @@ class PaymentRun:
                 "</EDI_DC40><E1IDKU1 SEGMENT=\"1\"><BGMREF>%s</BGMREF>"
                 "<E1EDK03 SEGMENT=\"1\"><IDDAT>026</IDDAT><DATUM>%s</DATUM></E1EDK03>"
                 "<E1IDB02 SEGMENT=\"1\"><FIIBKENN>%s</FIIBKENN><FIIKONTO>%s</FIIKONTO>"
-                "<FIIBLAND>%s</FIIBLAND><FIIKWAER>EUR</FIIKWAER></E1IDB02>%s"
+                "<FIIBLAND>%s</FIIBLAND><FIIKWAER>%s</FIIKWAER></E1IDB02>%s"
                 "</E1IDKU1></IDOC></FINSTA01>"
                 % (escape(number), day.replace("-", ""), escape(self.company["bic"]),
-                   escape(iban), iban[:2], "".join(body)))
+                   escape(iban), iban[:2], self.currency, "".join(body)))
 
 
 def camt_statements(text: str) -> List[Dict]:
