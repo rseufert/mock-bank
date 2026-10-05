@@ -44,9 +44,10 @@ mock-bank = "mockbank.__main__:main"
 
 [tool.setuptools]
 # `mockbank.examples` is `examples/` mapped onto an import path, not a copy and
-# not a move (#169): mock-films plays this choreography and could not reach it
-# after `pip install mock-bank`, because `examples/` shipped in the sdist and in
-# no importable place. The files stay where every README link points at them.
+# not a move (#169), so the files stay where every README link points at them.
+# It holds `client` and `statement` now: the worked integrations it was first
+# shipped for have moved to rseufert/mock-acme, and `examples/__init__.py` says
+# so to anyone who still asks for one.
 packages = ["mockbank", "mockbank.routes", "mockbank.examples"]
 
 [tool.setuptools.package-dir]

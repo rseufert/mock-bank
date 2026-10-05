@@ -133,7 +133,7 @@ class EachCodeIsTheOneABankWrites(unittest.TestCase):
 
     def test_each_is_in_the_range_a_reader_takes_its_direction_from(self):
         # 100-399 a credit and 400-699 a debit, which is all
-        # examples/payment_run.py knows: the change must not move one across.
+        # mock-acme's payment_run knows: the change must not move one across.
         codes = table()
         for code, kind in ((bai2.DEBIT, "DB"), (bai2.RETURNED_CREDIT, "CR"),
                            (bai2.RECEIVED_CREDIT, "CR"), (bai2.COLLECTED_CREDIT, "CR"),
