@@ -38,6 +38,10 @@ class State:
         # release_due is idempotent over "due and not yet done", so a hook
         # that failed half-way is finished by the next advance.
         self.clock.on_advance.append(self._on_advance)
+        # The moment up to which every ended business day has its statement.
+        # Kept here and not taken from an advance, because the clock also moves
+        # by itself: a day that ends on the real clock ends all the same (#157).
+        self.statements_to = self.clock.now()
         self.started = db.utcnow()
         self.resets = 0
         # What retention has removed since the mock started, so a tester who
@@ -63,14 +67,27 @@ class State:
         # Book first, so a day's statement sees that day's bookings.
         now = after.replace(microsecond=0)
         outbox.release_due(self.conn, now, after.date(), self.clock)
-        outbox.issue_statements(
-            self.conn, self.clock, outbox.ended_business_days(self.clock, before, after), now)
+        self._issue_statements(after)
         # Deliver before pruning, always. Pruning cannot remove a message the
         # folder has not received - see State.prune - but the order also means a
         # message released and aged out in the same advance still reaches the
         # directory, which is the reading a tester would expect.
         self.deliver()
         self.prune()
+
+    def _issue_statements(self, moment) -> None:
+        """A statement for every business day that has ended since the last
+        look, whoever moved the clock: an advance, or the night (#157).
+
+        Called after the booking, so a day's statement sees that day's
+        bookings. Nothing is issued for the days a mock on ``--db`` was not
+        running: the mark starts where the clock does.
+        """
+        days = outbox.ended_business_days(self.clock, self.statements_to, moment)
+        if days:
+            outbox.issue_statements(self.conn, self.clock, days,
+                                    moment.replace(microsecond=0))
+        self.statements_to = moment
 
     def prune(self) -> Dict[str, int]:
         """Apply --keep-requests and --retention-days, keeping a running total.
@@ -127,6 +144,7 @@ class State:
             self.conn.commit()
             db.seed(self.conn)
             self.clock.reset()
+            self.statements_to = self.clock.now()
             self.pruned = {}
             if self.dropbox is not None:
                 self.dropbox.forget()
@@ -141,8 +159,16 @@ class State:
         return self.clock.today()
 
     def release(self):
-        """Book what is due and release what is due; see outbox.release_due."""
-        released = outbox.release_due(self.conn, self.now(), self.today(), self.clock)
+        """Book what is due and release what is due; see outbox.release_due.
+
+        And issue the statements of any day that has ended meanwhile. One
+        reading of the clock for all of it, so the booking and the statements
+        agree about which day it is at midnight.
+        """
+        moment = self.clock.now()
+        released = outbox.release_due(self.conn, moment.replace(microsecond=0),
+                                      moment.date(), self.clock)
+        self._issue_statements(moment)
         self.deliver()
         return released
 
