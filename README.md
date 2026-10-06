@@ -443,6 +443,13 @@ reconciliation has to notice. A balance changed by `PATCH` is a change no entry
 explains, and the next statement's opening shows the jump. A closed account
 gets no statements.
 
+The clock passes a day's end in two ways, and both count. `POST /_mock/advance`
+issues the statements of the days it crosses as it answers. Bank time also runs
+by itself, so a mock left up over midnight has a day end with nobody asking:
+its statements are issued at the next release - the next mailbox read, file
+received or advance - and are stamped then, not at midnight. A mock on `--db`
+issues nothing for the days it was not running.
+
 The `camt.054` profile is a choice too: the mock sends one debit notification
 per account each time payments book - on receipt when the settlement date is
 today, or when the clock crosses it - with an entry per payment, rather than one
@@ -1028,9 +1035,11 @@ writers. [`examples/README.md`](examples/README.md) says which file became
 which.
 
 **`from mockbank.examples import payment_run` no longer works.** It did from
-0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme.
-`mockbank.examples.client` and `mockbank.examples.statement`, which need nothing
-but this mock, are still in the wheel. mock-acme is not on PyPI; install it from
+0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme and the
+command that installs it. `mockbank.examples.client` and
+`mockbank.examples.statement`, which need nothing but this mock, are still in
+the wheel. mock-acme is on PyPI: `pip install mock-acme`. Its own tests are not
+in that wheel, which holds the package alone, so running them means a clone of
 its repository.
 
 ## Docker

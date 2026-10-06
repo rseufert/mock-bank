@@ -27,5 +27,6 @@ def __getattr__(name):
     if name in MOVED:
         raise ImportError(
             "mockbank.examples.%s moved to mock-acme, where it is mockacme.%s: "
-            "https://github.com/rseufert/mock-acme" % (name, name))
+            "pip install mock-acme, or https://github.com/rseufert/mock-acme"
+            % (name, name))
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
