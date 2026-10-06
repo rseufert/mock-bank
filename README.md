@@ -709,6 +709,15 @@ insufficient funds sends *from* `GLOBEX`. The sample's fifth party,
 `NL30MOCK0000000005`, is deliberately not seeded - a creditor at another bank
 is not an account this bank holds, and a payment to one simply settles.
 
+**An account you add needs an id of its own in the first 18 characters.** An id
+may use letters, digits and `.`, `-` or `_`, because it becomes a path in the
+control plane's URLs. Every `MsgId` the bank writes for an account -
+`MB-C053-ACME-1` and the rest - is built from the first 18 characters of its id,
+which is what keeps the whole `MsgId` inside ISO's 35. So two accounts whose ids
+are identical over that much of them would be sent their statements and
+notifications under one `MsgId`, and a client that de-duplicates on it would
+drop one of the two: the second account is refused at creation, naming the first.
+
 A behaviour describes the account it is set on. `closed-account` and
 `bad-bank-id` describe a *creditor*: they are read from the account a payment
 pays into, when the bank holds it. The other seven describe a *debtor* and are
