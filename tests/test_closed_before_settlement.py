@@ -59,8 +59,7 @@ class ClosedCase(MockServerCase):
                 if m["account"] == "ACME"]
 
     def queue(self):
-        # Whether it is about one file, and not which: a reset does not start
-        # the row ids again (#159).
+        # Whether it is about one file, and not which.
         return [(e["type"], e["reports"], e["dueAt"], e["fileId"] is not None)
                 for e in self.get("/_mock/queue").json() if e["account"] == "ACME"]
 
