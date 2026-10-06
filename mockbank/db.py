@@ -696,6 +696,26 @@ def seed(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def restart_sequences(conn: sqlite3.Connection, tables: Sequence[str]) -> None:
+    """Make the next row of each emptied table id 1 again; the caller commits.
+
+    `DELETE FROM payment` leaves SQLite's `AUTOINCREMENT` sequence where it was,
+    so the next insert carries on from the highest id the table ever held. That
+    is right for a mock that keeps running and wrong for `POST /_mock/reset`,
+    which is a new bank: the row ids a test reads, the `MB-P002-` `MsgId` built
+    from a file's id, and the `<type>-<account>-<id>.xml` names in the pickup
+    directory all carried on from the bank before the reset, so a case that
+    passed alone failed in a suite that reset between cases (#159).
+
+    `sqlite_sequence` holds one row per `AUTOINCREMENT` table and SQLite creates
+    it with the first such table, so the schema's eight guarantee it is there.
+    A name with no row - `account`, `counter` and `holiday` declare no
+    `AUTOINCREMENT` - matches nothing and is left alone.
+    """
+    conn.execute("DELETE FROM sqlite_sequence WHERE name IN (%s)"
+                 % ", ".join("?" * len(tables)), tuple(tables))
+
+
 def next_value(conn: sqlite3.Connection, name: str) -> int:
     """The next number in the sequence `name`, starting at 1. Never repeats,
     whatever is deleted elsewhere; the caller commits."""

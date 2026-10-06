@@ -443,6 +443,13 @@ reconciliation has to notice. A balance changed by `PATCH` is a change no entry
 explains, and the next statement's opening shows the jump. A closed account
 gets no statements.
 
+The clock passes a day's end in two ways, and both count. `POST /_mock/advance`
+issues the statements of the days it crosses as it answers. Bank time also runs
+by itself, so a mock left up over midnight has a day end with nobody asking:
+its statements are issued at the next release - the next mailbox read, file
+received or advance - and are stamped then, not at midnight. A mock on `--db`
+issues nothing for the days it was not running.
+
 The `camt.054` profile is a choice too: the mock sends one debit notification
 per account each time payments book - on receipt when the settlement date is
 today, or when the clock crosses it - with an entry per payment, rather than one
@@ -701,6 +708,15 @@ payment, not to the account. The sample pays `GLOBEX`, and a test that wants
 insufficient funds sends *from* `GLOBEX`. The sample's fifth party,
 `NL30MOCK0000000005`, is deliberately not seeded - a creditor at another bank
 is not an account this bank holds, and a payment to one simply settles.
+
+**An account you add needs an id of its own in the first 18 characters.** An id
+may use letters, digits and `.`, `-` or `_`, because it becomes a path in the
+control plane's URLs. Every `MsgId` the bank writes for an account -
+`MB-C053-ACME-1` and the rest - is built from the first 18 characters of its id,
+which is what keeps the whole `MsgId` inside ISO's 35. So two accounts whose ids
+are identical over that much of them would be sent their statements and
+notifications under one `MsgId`, and a client that de-duplicates on it would
+drop one of the two: the second account is refused at creation, naming the first.
 
 A behaviour describes the account it is set on. `closed-account` and
 `bad-bank-id` describe a *creditor*: they are read from the account a payment
@@ -1055,9 +1071,11 @@ writers. [`examples/README.md`](examples/README.md) says which file became
 which.
 
 **`from mockbank.examples import payment_run` no longer works.** It did from
-0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme.
-`mockbank.examples.client` and `mockbank.examples.statement`, which need nothing
-but this mock, are still in the wheel. mock-acme is not on PyPI; install it from
+0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme and the
+command that installs it. `mockbank.examples.client` and
+`mockbank.examples.statement`, which need nothing but this mock, are still in
+the wheel. mock-acme is on PyPI: `pip install mock-acme`. Its own tests are not
+in that wheel, which holds the package alone, so running them means a clone of
 its repository.
 
 ## Docker

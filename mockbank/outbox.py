@@ -154,6 +154,19 @@ def record_unsent(conn, kind, account, problem, now, day=None, file_id=None) -> 
                  (kind, account, file_id, day, str(problem), db.stamp(now)))
 
 
+def _msg_id(prefix: str, account_id: str, sequence: int) -> str:
+    """`MB-C054-ACME-3`: the bank's own id for a message it writes for an account.
+
+    The account's id is cut to `messages.MSG_ID_ACCOUNT_CHARS`, which is what
+    keeps the whole thing inside a 35-character `MsgId`. Two accounts identical
+    over those characters would be sent the same `MsgId`, so `accounts.create`
+    refuses the second of them (#160) - and this is one function rather than the
+    nine copies of the slice it replaced, so that refusal and these writers
+    cannot come to disagree about how much of the id is used.
+    """
+    return "%s%s-%d" % (prefix, account_id[:messages.MSG_ID_ACCOUNT_CHARS], sequence)
+
+
 def _written(conn, kind, account, write, now, day=None, file_id=None):
     """The message body, or None after recording why it could not be written.
 
@@ -453,7 +466,7 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
             row["msg_id"] = db.one(conn, "SELECT msg_id FROM file WHERE id = ?",
                                    (row["file_id"],))["msg_id"]
         sequence = db.next_value(conn, "camt.054:" + account_id)
-        msg_id = "MB-C054-%s-%d" % (account_id[:18], sequence)
+        msg_id = _msg_id("MB-C054-", account_id, sequence)
         body = _written(conn, messages.CAMT054.name, account_id,
                         lambda: messages.write_camt054(
                             account, rows, datetime.date.fromisoformat(day), msg_id, now),
@@ -508,7 +521,7 @@ def _release_credits(conn, now, today, clock, promised):
         body = _written(conn, messages.CAMT054.name, account_id,
                         lambda: messages.write_camt054(
                             account, rows, datetime.date.fromisoformat(day),
-                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                            _msg_id("MB-C054-", account_id, sequence), now),
                         now, day=day)
         if body is None:
             continue
@@ -528,7 +541,7 @@ def _release_collections(conn, now, today, clock, promised):
         body = _written(conn, messages.CAMT054.name, account_id,
                         lambda: messages.write_camt054(
                             account, rows, datetime.date.fromisoformat(day),
-                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                            _msg_id("MB-C054-", account_id, sequence), now),
                         now, day=day)
         if body is None:
             continue
@@ -559,7 +572,7 @@ def _release_collection_returns(conn, now, today, clock, promised):
         body = _written(conn, messages.PACS004.name, account_id,
                         lambda: messages.write_pacs004(
                             account, rows, datetime.date.fromisoformat(day),
-                            "MB-P004-%s-%d" % (account_id[:18], sequence), now),
+                            _msg_id("MB-P004-", account_id, sequence), now),
                         now, day=day, file_id=file_id)
         if body is None:
             continue
@@ -572,7 +585,7 @@ def _release_collection_returns(conn, now, today, clock, promised):
         body = _written(conn, messages.CAMT054.name, account_id,
                         lambda: messages.write_camt054(
                             account, rows, datetime.date.fromisoformat(day),
-                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                            _msg_id("MB-C054-", account_id, sequence), now),
                         now, day=day)
         if body is None:
             continue
@@ -621,7 +634,7 @@ def _release_returns(conn, now, today, clock, promised):
         body = _written(conn, messages.PACS004.name, account_id,
                         lambda: messages.write_pacs004(
                             account, rows, datetime.date.fromisoformat(day),
-                            "MB-P004-%s-%d" % (account_id[:18], sequence), now),
+                            _msg_id("MB-P004-", account_id, sequence), now),
                         now, day=day, file_id=file_id)
         if body is None:
             continue
@@ -635,7 +648,7 @@ def _release_returns(conn, now, today, clock, promised):
                         lambda: messages.write_camt054(
                             account, [dict(r, credit=True) for r in rows],
                             datetime.date.fromisoformat(day),
-                            "MB-C054-%s-%d" % (account_id[:18], sequence), now),
+                            _msg_id("MB-C054-", account_id, sequence), now),
                         now, day=day)
         if body is None:
             continue
@@ -835,7 +848,7 @@ def _statement_body(account, day, number, opening, closing, shown, now, clock):
         # is not the place to add a third guess.
         return bai2.STATEMENT, bai2.write_statement(
             account, day, number, opening, closing, shown, created_at=now)
-    msg_id = "MB-C053-%s-%d" % (account["id"][:18], number)
+    msg_id = _msg_id("MB-C053-", account["id"], number)
     return messages.CAMT053.name, messages.write_camt053(
         account, day, number, opening, closing, shown, msg_id, now,
         clock.zone).decode("utf-8")
@@ -984,7 +997,7 @@ def issue_report(conn, clock, account, now) -> Dict[str, Any]:
     today = clock.today()
     opening, interim, booked = _position(conn, account, today)
     number = db.next_value(conn, "camt.052:" + account["id"])
-    msg_id = "MB-C052-%s-%d" % (account["id"][:18], number)
+    msg_id = _msg_id("MB-C052-", account["id"], number)
     body = messages.write_camt052(account, today, number, opening, interim, booked,
                                   msg_id, now, clock.zone).decode("utf-8")
     stamp = db.stamp(now)

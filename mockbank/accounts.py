@@ -350,12 +350,39 @@ def resolve(conn, payment_file) -> None:
                     payment.creditor_account = held["iban"]
 
 
+def _shares_msg_ids_with(conn, identifier: str) -> Optional[str]:
+    """The account whose `MsgId`s this id would duplicate, or None (#160).
+
+    `MsgId`s are built from the first `messages.MSG_ID_ACCOUNT_CHARS` of an
+    account's id, so two accounts identical over that much of it are sent the
+    same ones - `MB-C053-ABCDEFGHIJKLMNOPQR-1` for both, day after day. Asked
+    at creation, as `create`'s trial write is: this is the same failure, an
+    input the bank accepts and then cannot write a distinguishable answer for.
+    An id no longer than that cut cannot collide without being the id itself,
+    which is already refused.
+    """
+    cut = messages.MSG_ID_ACCOUNT_CHARS
+    row = db.one(conn, "SELECT id FROM account WHERE substr(id, 1, ?) = ?"
+                       " ORDER BY id LIMIT 1", (cut, identifier[:cut]))
+    return None if row is None else row["id"]
+
+
 def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     """Register an account, refusing anything the mock could not then act on."""
     _check_id(identifier)
     if get(conn, identifier) is not None:
         raise Invalid("there is already an account %r; PATCH it instead"
                       % identifier)
+    clash = _shares_msg_ids_with(conn, identifier)
+    if clash is not None:
+        raise Invalid(
+            "id %r is the same as account %r over its first %d characters, and "
+            "every MsgId the bank writes for an account is built from those - "
+            "so the two would be sent statements and notifications under one "
+            "MsgId, and a client that de-duplicates on it would drop one of "
+            "them. Use ids that differ inside the first %d characters."
+            % (identifier, clash, messages.MSG_ID_ACCOUNT_CHARS,
+               messages.MSG_ID_ACCOUNT_CHARS))
     if "iban" in fields and not isinstance(fields["iban"], str):
         raise Invalid("iban has to be text, not %s (%r)"
                       % (type(fields["iban"]).__name__, fields["iban"]))

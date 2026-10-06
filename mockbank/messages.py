@@ -28,6 +28,16 @@ from xml.etree import ElementTree as ET
 
 from . import schema
 
+# How many characters of an account's id go into a `MsgId` the bank writes. A
+# `MsgId` is 35 characters (`schema.Ident`), the longest prefix the bank puts in
+# front of one is eight (`MB-C053-`), and a dash and the account's own sequence
+# follow - so 18 leaves room for an eight-digit sequence. Two accounts whose ids
+# are identical over these characters would be sent the same `MsgId`, which is
+# why `accounts.create` refuses the second of them (#160). Named here because
+# the writers in `outbox` and that refusal have to agree, and nine hardcoded
+# 18s is how they came to disagree.
+MSG_ID_ACCOUNT_CHARS = 18
+
 READABLE = [name for name, m in schema.MESSAGES.items() if m.direction == "in"]
 # Of those, what asks the bank to collect rather than to pay (#131).
 COLLECTIONS = [name for name in READABLE if name.startswith("pain.008.")]
