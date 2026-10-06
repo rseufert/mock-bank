@@ -1028,9 +1028,11 @@ writers. [`examples/README.md`](examples/README.md) says which file became
 which.
 
 **`from mockbank.examples import payment_run` no longer works.** It did from
-0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme.
-`mockbank.examples.client` and `mockbank.examples.statement`, which need nothing
-but this mock, are still in the wheel. mock-acme is not on PyPI; install it from
+0.6.0 to 0.7.0, and it now raises an `ImportError` naming mock-acme and the
+command that installs it. `mockbank.examples.client` and
+`mockbank.examples.statement`, which need nothing but this mock, are still in
+the wheel. mock-acme is on PyPI: `pip install mock-acme`. Its own tests are not
+in that wheel, which holds the package alone, so running them means a clone of
 its repository.
 
 ## Docker
