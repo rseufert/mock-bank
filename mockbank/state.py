@@ -105,16 +105,25 @@ class State:
         includes the ``counter`` table, so statement numbers and ``camt.054``
         ``MsgId`` s start again at 1: a reset is a new bank, not a restart of
         the old one, which is what keeps its numbers (see ``db.next_value``).
+
+        The ``AUTOINCREMENT`` sequences are restarted for the same reason, so
+        the same input after a reset gives the same row ids, the same
+        ``MB-P002-`` ``MsgId`` and the same pickup file names as on a fresh
+        start (#159, and ``db.restart_sequences``).
         """
         with self.lock:
             # `unsent` is in the list and before `file`, which it references: a
             # reset is a new bank, so what the old one could not write is gone
             # too (#166).
-            for table in ("statement", "counter", "message", "unsent", "payment",
-                          "collection", "credit",
-                          "file",
-                          "request_log", "holiday", "account"):
+            emptied = ("statement", "counter", "message", "unsent", "payment",
+                       "collection", "credit",
+                       "file",
+                       "request_log", "holiday", "account")
+            for table in emptied:
                 self.conn.execute("DELETE FROM %s" % table)
+            # Emptying a table does not move its sequence back, so without this
+            # the new bank's first payment is id 5 rather than 1.
+            db.restart_sequences(self.conn, emptied)
             self.conn.commit()
             db.seed(self.conn)
             self.clock.reset()
