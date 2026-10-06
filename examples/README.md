@@ -30,8 +30,9 @@ all three mocks: [mock-acme](https://github.com/rseufert/mock-acme).
 | `tests/test_payment_run_readers.py` | [`tests/test_payment_run_readers.py`](https://github.com/rseufert/mock-acme/blob/main/tests/test_payment_run_readers.py) |
 
 `from mockbank.examples import payment_run` worked from mock-bank 0.6.0 to
-0.7.0. It now raises an `ImportError` that names mock-acme. mock-acme is not on
-PyPI; it installs from its repository.
+0.7.0. It now raises an `ImportError` that names mock-acme and how to install
+it: `pip install mock-acme`. Its wheel holds the package alone, so mock-acme's
+own tests run from a clone of its repository.
 
 The last versions kept here are at
 [`ded9818`](https://github.com/rseufert/mock-bank/tree/ded9818/examples).

@@ -306,6 +306,10 @@ class TheIntegrationsThatMoved(unittest.TestCase):
                 self.assertIn("mockacme.%s" % name, str(moved.exception))
                 self.assertIn("https://github.com/rseufert/mock-acme",
                               str(moved.exception))
+                # mock-acme has been on PyPI since 0.1.0 (#202), so the message
+                # carries the one command that fixes the import rather than
+                # sending the reader to a repository to work it out.
+                self.assertIn("pip install mock-acme", str(moved.exception))
 
     def test_the_from_import_a_caller_actually_wrote_gets_that_message(self):
         sys.path.insert(0, ROOT)
