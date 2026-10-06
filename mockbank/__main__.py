@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="account behaviours:\n" + "\n".join(
             "  %-20s %s" % (name, text) for name, text in BEHAVIOURS.items()))
     p.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
-    p.add_argument("--port", type=int, default=8080, help="port (default: 8080)")
+    p.add_argument("--port", type=int, default=8090, help="port (default: 8090)")
     p.add_argument("--db", dest="db_path", default=":memory:",
                    help="SQLite file, or :memory: (default) for a throwaway bank")
     p.add_argument("--timezone", default="UTC",
@@ -176,7 +176,7 @@ def main(argv=None) -> int:
     except OSError as error:
         # A port already in use, or an address this host does not have. The
         # rest of startup refuses by name, and this is the commonest failure of
-        # the lot: a traceback for "something is already on 8080" makes a reader
+        # the lot: a traceback for "something is already on 8090" makes a reader
         # look for a bug in the mock.
         print("mock-bank: cannot listen on %s:%d - %s"
               % (config.host, config.port, error), file=sys.stderr, flush=True)

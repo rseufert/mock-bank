@@ -178,7 +178,7 @@ class DropBox:
 
         A path that cannot be created is refused here, naming the directory and
         the flag that asked for it. It used to surface through `main`'s catch-all
-        as "cannot listen on 127.0.0.1:8080", which sends a reader to look at
+        as "cannot listen on 127.0.0.1:8090", which sends a reader to look at
         the port.
         """
         check_directories(self.drop_dir, self.pickup_dir)
