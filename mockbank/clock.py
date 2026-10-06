@@ -179,9 +179,14 @@ class Clock:
     """
 
     def __init__(self, zone: str = "UTC", cutoff: str = DEFAULT_CUTOFF,
-                 start: str = "", holidays: Optional[Callable[[], Sequence]] = None):
+                 start: str = "", holidays: Optional[Callable[[], Sequence]] = None,
+                 real: Optional[Callable[[], datetime.datetime]] = None):
         self.zone_name = zone or "UTC"
         self.zone = timezone(self.zone_name)
+        # Where real time comes from: the host's clock, unless a test hands in
+        # its own. Bank time passes by itself between advances, and a test of
+        # what happens when it does should not have to sleep to see it (#157).
+        self.real = real or (lambda: datetime.datetime.now(self.zone))
         self.cutoff = cutoff_time(cutoff or DEFAULT_CUTOFF)
         self._holidays = holidays or (lambda: ())
         # Everything a test moves goes through this one offset; see the module
@@ -205,7 +210,7 @@ class Clock:
     # -- reading it -------------------------------------------------------
 
     def _real(self) -> datetime.datetime:
-        return datetime.datetime.now(self.zone)
+        return self.real().astimezone(self.zone)
 
     def now(self) -> datetime.datetime:
         """The current moment in bank time, aware and in the bank's zone."""
