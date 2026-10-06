@@ -14,6 +14,7 @@ from support import MockServerCase
 
 from mockbank import accounts, db
 from mockbank.accounts import BEHAVIOURS
+from mockbank.messages import MSG_ID_ACCOUNT_CHARS
 
 
 def mod97(text):
@@ -187,6 +188,94 @@ class CreatingAnAccount(MockServerCase):
         resp = self.post("/_mock/accounts", self.body(id="ACME"))
         self.assertEqual(resp.status, 400)
         self.assertIn("PATCH", resp.json()["error"])
+
+
+class NoTwoAccountsAreSentOneMsgId(MockServerCase):
+    """An id cut to another account's is refused at creation (#160).
+
+    Every `MsgId` the bank writes for an account is built from the first
+    `MSG_ID_ACCOUNT_CHARS` of its id, which is what keeps it inside ISO's 35
+    characters. Two accounts identical over that much of their ids were
+    therefore sent `MB-C053-ABCDEFGHIJKLMNOPQR-1` each, day after day, and a
+    client that de-duplicates on `MsgId` drops one of the two. The refusal is
+    at creation, beside the trial write `create` already does: the same failure,
+    an input the bank takes and then cannot write a distinguishable answer for.
+    """
+
+    CUT = MSG_ID_ACCOUNT_CHARS
+    LONG = "ABCDEFGHIJKLMNOPQR-ONE"              # 22 characters, cut to 18
+
+    def setUp(self):
+        self.addCleanup(self.post, "/_mock/reset")
+
+    def account(self, identifier, number):
+        return self.post("/_mock/accounts", {
+            "id": identifier, "name": identifier.title(),
+            "iban": db.iban("NL", "MOCK00000090%02d" % number),
+            "bic": "MOCKNL2A", "balance": 100000})
+
+    def msgids(self):
+        """Every `MsgId` the bank has written, read out of the messages."""
+        messages = self.get("/_mock/messages").json()
+        return re.findall(r"<MsgId>(MB-[^<]+)</MsgId>",
+                          "".join(m.get("body") or "" for m in messages))
+
+    def statements_for(self, *identifiers):
+        """Two days of statements for these accounts, with money on each."""
+        for identifier in identifiers:
+            self.assertEqual(self.post("/_mock/credits", {
+                "account": identifier, "amount": 5000,
+                "note": "INV-1"}).status, 201)
+        self.assertEqual(self.post("/_mock/advance?days=2").status, 200)
+
+    def test_an_id_cut_to_an_existing_one_is_refused_naming_both(self):
+        self.assertEqual(self.account(self.LONG, 1).status, 201)
+        refused = self.account("ABCDEFGHIJKLMNOPQR-TWO", 2)
+        self.assertEqual(refused.status, 400)
+        error = refused.json()["error"]
+        for expected in (self.LONG, "ABCDEFGHIJKLMNOPQR-TWO", str(self.CUT),
+                         "MsgId"):
+            self.assertIn(expected, error)
+        held = [row["id"] for row in self.get("/_mock/accounts").json()]
+        self.assertNotIn("ABCDEFGHIJKLMNOPQR-TWO", held)
+
+    def test_an_id_of_exactly_the_cut_collides_with_a_longer_one(self):
+        self.assertEqual(self.account(self.LONG, 1).status, 201)
+        # The cut of a 22-character id is itself a legal id, and it would be
+        # sent the same MsgIds.
+        refused = self.account(self.LONG[:self.CUT], 2)
+        self.assertEqual(refused.status, 400, refused.body)
+        self.assertIn(self.LONG, refused.json()["error"])
+
+    def test_ids_that_differ_inside_the_cut_are_both_held(self):
+        self.assertEqual(self.account("ABCDEFGHIJKLM-ONE", 1).status, 201)
+        # Seventeen characters each, differing at the fourteenth: shorter than
+        # the cut, so nothing is lost and both are ordinary ids.
+        kept = self.account("ABCDEFGHIJKLM-TWO", 2)
+        self.assertEqual(kept.status, 201, kept.body)
+        self.statements_for("ABCDEFGHIJKLM-ONE", "ABCDEFGHIJKLM-TWO")
+        written = self.msgids()
+        self.assertIn("MB-C053-ABCDEFGHIJKLM-ONE-1", written)
+        self.assertIn("MB-C053-ABCDEFGHIJKLM-TWO-1", written)
+
+    def test_no_two_messages_the_bank_writes_share_a_msgid(self):
+        # The rule itself rather than the mechanism that keeps it: ask for both
+        # accounts, take whatever the bank holds afterwards, give each of them
+        # two days of statements and a notification, and no two messages may
+        # share a MsgId. Written this way on purpose - if the refusal goes, the
+        # second account is created and this fails, which a test that only ever
+        # creates the first one cannot do.
+        self.assertEqual(self.account(self.LONG, 1).status, 201)
+        self.account("ABCDEFGHIJKLMNOPQR-TWO", 2)
+        held = {row["id"] for row in self.get("/_mock/accounts").json()}
+        self.statements_for(*[identifier for identifier
+                             in (self.LONG, "ABCDEFGHIJKLMNOPQR-TWO", "ACME")
+                             if identifier in held])
+        written = self.msgids()
+        # Not an empty bank agreeing with itself: the statements are there.
+        self.assertIn("MB-C053-%s-1" % self.LONG[:self.CUT], written)
+        self.assertGreater(len(written), 4, written)
+        self.assertEqual(sorted(written), sorted(set(written)))
 
 
 class AKeyThatIsNotAFieldIsRefusedNotA500(MockServerCase):
