@@ -1,3 +1,13 @@
 include LICENSE README.md CHANGELOG.md CONTRIBUTING.md Dockerfile
 recursive-include examples *.py *.sh *.xml *.md
-recursive-include tests *.py *.xml *.sql *.md *.txt
+# Everything the suite reads, not only the Python: the sdist ships the tests, so
+# `python3 -m unittest discover -s tests` has to pass from an unpacked one, and
+# that is what CI's `distribution` job does with it (#163). A sample or fixture
+# whose extension is missing here is a test that cannot run, and the suite used
+# to lose 98 of them to the NACHA `.ach` files alone.
+recursive-include tests *.py *.xml *.sql *.md *.txt *.ach *.json *.go
+# The tests import all five tools and read what they check, and the release
+# tools' own tests read the workflow they reason about.
+recursive-include tools *.py
+recursive-include docs *.md
+recursive-include .github/workflows *.yml
