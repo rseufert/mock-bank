@@ -47,6 +47,7 @@ TEXT_TYPES = dict(nacha.TEXT_TYPES, **bai2.TEXT_TYPES)
 # `GET /_mock/queue`, and part of the message's key (#155).
 SETTLING, ARRIVING, RETURNED = "payments settling", "money arriving", "payments returned"
 COLLECTED, COLLECTION_RETURNED = "collections settling", "collections returned"
+REJECTED_AT_SETTLEMENT = "payments rejected at settlement"
 
 
 def queue_status(conn, decision, file_id, now, delay_ms=0,
@@ -356,12 +357,24 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
         known = [at for at in (expected.get(entry), since) if at]
         expected[entry] = min(known) if known else None
 
-    for row in db.rows(conn, "SELECT account_id, settlement_date, file.received_at"
+    for row in db.rows(conn, "SELECT account_id, settlement_date, file_id, file.received_at,"
+                             " account.closed, account.format"
                              " FROM payment JOIN file ON file.id = payment.file_id"
-                             " WHERE payment.status = ? AND booked_at IS NULL"
-                             " AND account_id IS NOT NULL", (accounts.ACCEPTED,)):
-        expect(row["settlement_date"], messages.CAMT054.name, row["account_id"],
-               None, SETTLING, row["received_at"])
+                             " JOIN account ON account.id = payment.account_id"
+                             " WHERE payment.status = ? AND booked_at IS NULL",
+                       (accounts.ACCEPTED,)):
+        if not row["closed"]:
+            expect(row["settlement_date"], messages.CAMT054.name, row["account_id"],
+                   None, SETTLING, row["received_at"])
+        # On a closed account it will not settle (#158): what the day brings is
+        # the rejection, which is a return entry where the account is NACHA's.
+        # Reopened before the day, the entry is the debit's again.
+        elif row["format"] == "nacha":
+            expect(row["settlement_date"], nacha.RETURN, row["account_id"],
+                   row["file_id"], RETURNED, row["received_at"])
+        else:
+            expect(row["settlement_date"], messages.PAIN002.name, row["account_id"],
+                   row["file_id"], REJECTED_AT_SETTLEMENT, row["received_at"])
     for row in db.rows(conn, "SELECT credit.account_id, booking_date, received_at FROM credit"
                              " JOIN account ON account.id = credit.account_id"
                              " WHERE booked_at IS NULL AND account.closed = 0"):
@@ -397,12 +410,14 @@ def queued(conn, clock, kind="") -> List[Dict[str, Any]]:
                    None, COLLECTION_RETURNED, row["since"])
     # A payment's return is only ever scheduled as it books, or as its file
     # arrives for a NACHA account's rejection, and both moments are kept.
+    # Money due back to an account closed meanwhile is put off, and listed
+    # again once it reopens, as a credit waiting for one is (#158).
     for row in db.rows(conn, "SELECT payment.*, account.format, file.received_at FROM payment"
                              " JOIN account ON account.id = payment.account_id"
                              " JOIN file ON file.id = payment.file_id"
                              " WHERE return_due IS NOT NULL AND returned_at IS NULL"
                              " AND (payment.status = ? OR (payment.status = ?"
-                             " AND booked_at IS NOT NULL))",
+                             " AND booked_at IS NOT NULL AND account.closed = 0))",
                        (accounts.REJECTED, accounts.ACCEPTED)):
         answer = nacha.RETURN if row["format"] == "nacha" else messages.PACS004.name
         since = (row["booked_at"] if row["status"] == accounts.ACCEPTED
@@ -437,9 +452,10 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
     than optional: a caller that left it out would book payments whose
     returns then silently never happened."""
     promised = _promised(conn, clock)
+    _release_rejections(conn, accounts.reject_closed(conn, today, now), now, promised)
     booked = accounts.book_due(conn, today, now, commit=False)
     accounts.schedule_returns(conn, booked, clock)
-    _release_returns(conn, now, today, promised)
+    _release_returns(conn, now, today, clock, promised)
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in booked:
         groups.setdefault((row["account_id"], row["settlement_date"]), []).append(row)
@@ -469,6 +485,27 @@ def release_due(conn, now, today, clock) -> List[Dict[str, Any]]:
                  " AND due_at <= ?", (stamp, stamp))
     conn.commit()
     return released
+
+
+def _release_rejections(conn, rejected, now, promised):
+    """Tell the client about the payments rejected on their settlement day
+    because the account had closed (#158): a further ``pain.002`` per account,
+    day and original file. A NACHA account's are not here: they go back as
+    return entries, which ``_release_returns`` writes."""
+    by_file: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in rejected:
+        if not row["nacha"]:
+            by_file.setdefault((row["account_id"], row["day"], row["file_id"]), []).append(row)
+    for (account_id, day, file_id), rows in sorted(by_file.items()):
+        msg_id = "MB-P002-S%06d" % db.next_value(conn, "pain002-settlement")
+        body = _written(conn, messages.PAIN002.name, account_id,
+                        lambda: messages.write_pain002_rejections(rows, msg_id, now),
+                        now, day=day, file_id=file_id)
+        if body is None:
+            continue
+        _send(conn, messages.PAIN002.name, account_id, body,
+              _key(conn, messages.PAIN002.name, account_id, day, REJECTED_AT_SETTLEMENT,
+                   file_id), now, promised, file_id)
 
 
 def _release_credits(conn, now, today, clock, promised):
@@ -573,11 +610,11 @@ def queue_refusal(conn, collection, now, delay_ms=0) -> Dict[str, Any]:
             "due_at": due}
 
 
-def _release_returns(conn, now, today, promised):
+def _release_returns(conn, now, today, clock, promised):
     """Credit back what is due to come back, and tell the client twice: a
     ``pacs.004`` per account, day and original file, and a ``camt.054`` credit
     per account and day - the same granularity as the debits."""
-    returned = accounts.book_returns(conn, today, now)
+    returned = accounts.book_returns(conn, today, now, clock)
     by_file: Dict[tuple, List[Dict[str, Any]]] = {}
     by_day: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in returned:

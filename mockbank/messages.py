@@ -465,6 +465,28 @@ def write_pain002_refusal(collection, msg_id, created_at) -> bytes:
                                "TxInfAndSts": [tx]}]}})
 
 
+def write_pain002_rejections(payments, msg_id, created_at) -> bytes:
+    """A further status report for the payments of one file that the bank
+    accepted and then rejected on their settlement day (#158): each one
+    ``RJCT`` with its reason, under its own batch. No group or batch status,
+    as for a refused collection: the file's own report gave those.
+    """
+    batches: Dict[str, list] = {}
+    for payment in payments:
+        tx = {"OrgnlEndToEndId": payment["end_to_end_id"], "TxSts": "RJCT",
+              "StsRsnInf": [_reason(payment["reason"], payment["reason_text"])]}
+        if payment["instruction_id"]:
+            tx["OrgnlInstrId"] = payment["instruction_id"]
+        batches.setdefault(payment["pmt_inf_id"], []).append(tx)
+    return schema.serialize(PAIN002, {"CstmrPmtStsRpt": {
+        "GrpHdr": {"MsgId": msg_id, "CreDtTm": created_at,
+                   "DbtrAgt": {"FinInstnId": {"BICFI": BANK_BIC}}},
+        "OrgnlGrpInfAndSts": {"OrgnlMsgId": payments[0]["msg_id"],
+                              "OrgnlMsgNmId": payments[0]["message"]},
+        "OrgnlPmtInfAndSts": [{"OrgnlPmtInfId": batch, "TxInfAndSts": txs}
+                              for batch, txs in batches.items()]}})
+
+
 # A NACHA account's returns carry NACHA's R codes (#54), but its statement and
 # notifications are still ISO 20022 until BAI2, and RtrInf there takes an ISO
 # code: the same reason, in the other vocabulary.

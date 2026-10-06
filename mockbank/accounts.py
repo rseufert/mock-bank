@@ -920,6 +920,49 @@ def book(conn, decision, received_at):
     return file_id
 
 
+CLOSED_MEANWHILE = "AC04"
+
+
+def reject_closed(conn, today, now):
+    """Reject every accepted payment whose settlement date has come and whose
+    account was closed while it waited (#158). Returns them, oldest first,
+    with their file's ``MsgId`` and the day each would have settled.
+
+    Asked before ``book_due``, which then finds nothing of theirs to debit: a
+    closed account gets no statement, so a debit booked there left the balance
+    with nothing to explain it. The bank checks again on the day and says no,
+    with the reason it gives at the door for a closed debtor account. A NACHA
+    account is told as it is told about any rejection, by a return entry
+    (#54), due the day the payment would have settled: ``_release_returns``
+    sends it in the same release.
+    """
+    due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message, account.format,"
+                        " account.iban AS account_iban FROM payment"
+                        " JOIN file ON file.id = payment.file_id"
+                        " JOIN account ON account.id = payment.account_id"
+                        " WHERE payment.status = ? AND booked_at IS NULL"
+                        " AND settlement_date <= ? AND account.closed = 1"
+                        " ORDER BY payment.id", (ACCEPTED, today.isoformat()))
+    for row_ in due:
+        in_nacha = row_.pop("format") == "nacha"
+        row_["status"], row_["reason"] = REJECTED, CLOSED_MEANWHILE
+        row_["reason_text"] = ("the debtor account %s was closed before the payment "
+                               "settled" % row_.pop("account_iban"))
+        row_["day"] = row_["settlement_date"]
+        if in_nacha:
+            row_["return_due"] = row_["day"]
+            row_["return_reason"] = nacha.RETURN_FOR[CLOSED_MEANWHILE]
+        # No settlement date, as for a payment rejected at the door: it has no
+        # day it settles on.
+        conn.execute("UPDATE payment SET status = ?, reason = ?, reason_text = ?,"
+                     " settlement_date = NULL, return_due = ?, return_reason = ?"
+                     " WHERE id = ?",
+                     (REJECTED, row_["reason"], row_["reason_text"], row_["return_due"],
+                      row_["return_reason"], row_["id"]))
+        row_["nacha"] = in_nacha
+    return due
+
+
 def book_due(conn, today, now, commit=True):
     """Debit every accepted payment whose settlement date has come.
 
@@ -1018,27 +1061,38 @@ def rejected_returns_due(conn, today, now):
     return due
 
 
-def book_returns(conn, today, now):
+def book_returns(conn, today, now, clock):
     """Credit back every payment whose return day has come, and mark it
     returned. Returns those payments, oldest first, with their file's MsgId.
 
     ``now`` is the bank clock's, for the same reason as ``book_due``'s: the
     balance moves because the bank clock reached ``return_due`` (#147).
+
+    Not into an account closed meanwhile, for a credit's reason
+    (``credits.book_due``): the return day moves on a business day each time
+    it comes due, so reopened it books on a day that has a statement (#158).
     """
-    due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message FROM payment"
+    due = db.rows(conn, "SELECT payment.*, file.msg_id, file.message,"
+                        " account.closed AS closed FROM payment"
                         " JOIN file ON file.id = payment.file_id"
+                        " JOIN account ON account.id = payment.account_id"
                         " WHERE payment.status = ? AND booked_at IS NOT NULL"
                         " AND return_due IS NOT NULL AND return_due <= ?"
                         " AND returned_at IS NULL ORDER BY payment.id",
                   (ACCEPTED, today.isoformat()))
-    stamped = db.stamp(now)
+    later, stamped, returned = clock.next_business_day(today).isoformat(), db.stamp(now), []
     for row_ in due:
+        if row_.pop("closed"):
+            conn.execute("UPDATE payment SET return_due = ? WHERE id = ?",
+                         (later, row_["id"]))
+            continue
         conn.execute("UPDATE account SET balance = balance + ? WHERE id = ?",
                      (row_["amount"], row_["account_id"]))
         conn.execute("UPDATE payment SET status = ?, returned_at = ? WHERE id = ?",
                      (RETURNED, stamped, row_["id"]))
         row_["status"], row_["returned_at"] = RETURNED, stamped
-    return due
+        returned.append(row_)
+    return returned
 
 
 def payments(conn, end_to_end_id=None):

@@ -249,7 +249,8 @@ def written_by_the_mock():
     debit notification, the
     return a return-later account brings (a pacs.004 and a camt.054 credit),
     the statements for the days an advance crosses, the return's among
-    them, and intraday reports before and after it."""
+    them, intraday reports before and after it, and the rejection of
+    payments whose account closed before they settled."""
     from mockbank.server import Config, make_server
     httpd = make_server(Config(port=0, quiet=True, clock="2026-10-01T09:00"))
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -303,6 +304,12 @@ def written_by_the_mock():
         # pain.008, and a debit on the camt.054 and the camt.052 below
         call("POST", "/_mock/collections/E2E-DD-0002/refuse", refusal)
         call("POST", "/_mock/accounts/ACME/report")
+        # an account closed before its payments settle (#158): a further
+        # pain.002 rejecting them on the day, with the bank as debtor's agent
+        call("POST", "/payments", sample.replace(b"ACME-20261001-0001", b"ACME-20261008-0001")
+             .replace(b"<Dt>2026-10-01</Dt>", b"<Dt>2026-10-08</Dt>"))
+        call("PATCH", "/_mock/accounts/ACME", json.dumps({"closed": True}).encode("utf-8"))
+        call("POST", "/_mock/advance?to=2026-10-08")
         messages = json.loads(call("GET", "/_mock/mailbox").decode("utf-8"))
     finally:
         httpd.shutdown()
