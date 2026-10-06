@@ -62,6 +62,25 @@ python3 tools/check_xsd.py              # fetches the published XSDs; skips with
 Python 3.8 or newer. There is no build step, no virtualenv to create and
 nothing to compile.
 
+**Checking the sdist needs one, though.** The archive ships the tests and
+everything they read, and CI proves it by unpacking its own build and running
+the suite from it (#163). To do the same by hand you need `build`, which this
+project does not depend on and which a system Python often does not have - so
+make a throwaway one rather than installing into the Python you work in:
+
+```bash
+python3 -m venv /tmp/mb-build && /tmp/mb-build/bin/python -m pip install build
+/tmp/mb-build/bin/python -m build --sdist
+mkdir -p /tmp/mb-sdist && tar -xzf dist/*.tar.gz -C /tmp/mb-sdist
+cd /tmp/mb-sdist/mock_bank-* && python3 -m unittest discover -s tests
+```
+
+Run it from the unpacked tree and nowhere else: inside the checkout, a file the
+archive left out is still on disk and the suite passes for the wrong reason.
+One test skips there and should - the `.gitattributes` guard in
+`tests/test_bai2_external.py` asks git about the vendored samples, and an
+unpacked sdist is not a work tree.
+
 ## How the team works the queue
 
 Two people work the issues, and the maintainer merges. The rules that keep
