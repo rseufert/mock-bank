@@ -367,8 +367,15 @@ def _shares_msg_ids_with(conn, identifier: str) -> Optional[str]:
     return None if row is None else row["id"]
 
 
-def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
-    """Register an account, refusing anything the mock could not then act on."""
+def create(conn, identifier: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Register an account, refusing anything the mock could not then act on.
+
+    The fields are one dictionary rather than keyword arguments, because they
+    come straight from a caller's JSON: as `**fields` a key named `conn` or
+    `identifier` collided with a parameter of this function and raised a
+    `TypeError` before `check` could call it an unknown field, which the control
+    plane answered with a 500 (#161).
+    """
     _check_id(identifier)
     if get(conn, identifier) is not None:
         raise Invalid("there is already an account %r; PATCH it instead"
@@ -428,12 +435,14 @@ def create(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
     return require(conn, identifier)
 
 
-def update(conn, identifier: str, **fields: Any) -> Dict[str, Any]:
+def update(conn, identifier: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     """Change an account, refusing anything the mock could not then act on.
 
     An id cannot be changed: it is what the control plane's URLs are built on.
     An IBAN can, because a tester moving an account onto the IBAN their own
     test data uses is the ordinary case.
+
+    The fields are one dictionary, for the reason `create`'s docstring gives.
     """
     existing = require(conn, identifier)
     if not fields:
