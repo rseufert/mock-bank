@@ -21,7 +21,7 @@ from .state import State
 class Config:
     """Everything the server can be told, with the defaults it runs with."""
 
-    def __init__(self, host="127.0.0.1", port=8080, db_path=":memory:", quiet=False,
+    def __init__(self, host="127.0.0.1", port=8090, db_path=":memory:", quiet=False,
                  timezone="UTC", cutoff=clock_module.DEFAULT_CUTOFF, clock="",
                  allow_duplicates=False, status_delay_ms=0, auth="",
                  keep_requests=5000, retention_days=0.0,

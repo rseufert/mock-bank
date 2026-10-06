@@ -1,8 +1,18 @@
-"""The control plane every other test relies on: health, state, reset."""
+"""The control plane every other test relies on: health, state, reset.
+
+Plus the default port, which is one number repeated in the Dockerfile, the
+README and both examples (#203).
+"""
+import os
+import re
+import unittest
+
 from support import MockServerCase
 
 from mockbank import __version__, db
 from mockbank.accounts import BEHAVIOURS
+from mockbank.__main__ import build_parser
+from mockbank.server import Config
 
 
 class ControlPlane(MockServerCase):
@@ -82,3 +92,54 @@ class ControlPlane(MockServerCase):
         self.assertEqual(state["balances"],
                          {"EUR": sum(row["balance"] for row in listed)})
         self.assertEqual(state["schemaVersion"], db.SCHEMA_VERSION)
+
+
+class TheDefaultPort(unittest.TestCase):
+    """The number a reader gets with no flag, held to everywhere it is repeated.
+
+    It moved from 8080 to 8090 (#203) because mock-edi defaults to 8080 as
+    well, so the two could not both be started without a flag and the second
+    one died on a bind error. Moving it meant editing the Dockerfile, the
+    README, the tour and the example client as well as the code - six copies of
+    one number, which is the shape that drifts back one place at a time. The
+    `Config` default is the one that decides; the rest have to agree with it.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def read(self, *parts):
+        with open(os.path.join(self.ROOT, *parts), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_flag_and_its_help_say_what_the_config_default_is(self):
+        port = Config().port
+        # Not only "they agree": 8080 is mock-edi's, and taking it back is the
+        # bug this number moved to fix.
+        self.assertEqual(port, 8090)
+        action, = [action for action in build_parser()._actions
+                   if "--port" in action.option_strings]
+        self.assertEqual(action.default, port)
+        self.assertIn(str(port), action.help)
+
+    def test_the_image_publishes_the_port_its_entrypoint_binds(self):
+        dockerfile = self.read("Dockerfile")
+        port = str(Config().port)
+        self.assertIn("EXPOSE %s" % port, dockerfile)
+        # The README documents `docker run -p 8090:8090`, which works only if
+        # the entrypoint binds what EXPOSE publishes.
+        self.assertIn('"--port", "%s"' % port, dockerfile)
+
+    def test_the_readme_flag_table_shows_the_default(self):
+        row = re.search(r"^\| `--port` \| `(\d+)` \|", self.read("README.md"), re.M)
+        self.assertIsNotNone(row, "the README's flag table has no --port row")
+        self.assertEqual(int(row.group(1)), Config().port)
+
+    def test_the_tour_and_the_example_client_look_where_it_listens(self):
+        # Both default their base URL instead of being told the mock's, so a
+        # reader who starts the mock with no flag and runs either one gets a
+        # connection refused as soon as these drift.
+        port = str(Config().port)
+        self.assertIn('BASE="${BASE:-http://127.0.0.1:%s}"' % port,
+                      self.read("examples", "demo.sh"))
+        self.assertIn('"BASE", "http://127.0.0.1:%s"' % port,
+                      self.read("examples", "client.py"))

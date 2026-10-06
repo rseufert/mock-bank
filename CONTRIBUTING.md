@@ -52,7 +52,7 @@ Nothing to install:
 ```bash
 git clone https://github.com/rseufert/mock-bank
 cd mock-bank
-python3 -m mockbank --port 8080        # it is already runnable
+python3 -m mockbank --port 8090        # it is already runnable
 python3 -m unittest discover -s tests -v
 python3 tools/check_docs.py
 python3 tools/check_changelog.py

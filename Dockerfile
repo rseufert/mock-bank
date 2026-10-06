@@ -7,5 +7,5 @@ COPY mockbank ./mockbank
 COPY examples ./examples
 COPY pyproject.toml README.md LICENSE ./
 RUN pip install --no-cache-dir .
-EXPOSE 8080
-ENTRYPOINT ["mock-bank", "--host", "0.0.0.0", "--port", "8080"]
+EXPOSE 8090
+ENTRYPOINT ["mock-bank", "--host", "0.0.0.0", "--port", "8090"]

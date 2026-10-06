@@ -172,7 +172,7 @@ def main(argv=None) -> int:
         description="Send a payment file to mock-bank and match every answer "
                     "back to the payment it is about.")
     parser.add_argument("--base", default=os.environ.get(
-        "BASE", "http://127.0.0.1:8080"), help="where the mock is listening")
+        "BASE", "http://127.0.0.1:8090"), help="where the mock is listening")
     parser.add_argument("--auth", default=os.environ.get("BANK_AUTH", ""),
                         metavar="USER:PASSWORD",
                         help="credentials, for a mock started with --auth")
@@ -189,11 +189,11 @@ def main(argv=None) -> int:
         return 2
     if status == 0:
         print("Nothing is listening at %s (%s).\nStart one:  python3 -m mockbank "
-              "--port 8080" % (args.base, bank.unreachable), file=sys.stderr)
+              "--port 8090" % (args.base, bank.unreachable), file=sys.stderr)
         return 2
     if status != 200:
         print("The mock at %s answered %s for /_mock/health.\nStart one:  "
-              "python3 -m mockbank --port 8080" % (args.base, status),
+              "python3 -m mockbank --port 8090" % (args.base, status),
               file=sys.stderr)
         return 2
     print("mock-bank %s, holding %d accounts"
