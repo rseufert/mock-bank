@@ -211,6 +211,18 @@ jobs:
         with:
           name: distributions
           path: dist/*
+      - name: The suite passes from an unpacked sdist
+        run: |
+          set -eu
+          # #163. The sdist ships the tests, so it has to ship what they read as
+          # well - and `MANIFEST.in` says that by extension, which is how 98
+          # tests came to depend on `.ach` files that were never in it. Run from
+          # the unpacked tree, in a directory of its own, so nothing of the
+          # checkout can answer for a file the archive left out.
+          mkdir -p /tmp/from-sdist
+          tar -xzf dist/*.tar.gz -C /tmp/from-sdist
+          cd /tmp/from-sdist/mock_bank-*
+          python -m unittest discover -s tests
       - name: The examples are importable from the installed wheel
         run: |
           set -eu
