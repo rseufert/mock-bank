@@ -6,12 +6,13 @@ reaches them: one `PATCH` turns the bank into one that rejects, and `POST
 see and rely on - the seed being the same seed, a balance being a whole number
 of minor units, and a refusal naming what would have been accepted.
 """
+import inspect
 import os
 import re
 
 from support import MockServerCase
 
-from mockbank import db
+from mockbank import accounts, db
 from mockbank.accounts import BEHAVIOURS
 
 
@@ -186,6 +187,55 @@ class CreatingAnAccount(MockServerCase):
         resp = self.post("/_mock/accounts", self.body(id="ACME"))
         self.assertEqual(resp.status, 400)
         self.assertIn("PATCH", resp.json()["error"])
+
+
+class AKeyThatIsNotAFieldIsRefusedNotA500(MockServerCase):
+    """Every unknown key is the 400 that lists the fields (#161).
+
+    The payload used to reach `accounts.create` and `accounts.update` as
+    `**payload`, so a key with the same name as one of their parameters -
+    `conn`, `identifier` - collided with it and raised a `TypeError` before
+    `check` could call it an unknown field. The control plane answered 500 with
+    the Python error in it. The parameter names are read from the functions here
+    rather than listed, so a parameter added or renamed later is covered without
+    anybody remembering to add it.
+    """
+
+    def setUp(self):
+        self.addCleanup(self.post, "/_mock/reset")
+
+    def parameter_names(self):
+        names = set()
+        for function in (accounts.create, accounts.update):
+            names |= set(inspect.signature(function).parameters)
+        # The shape this is about: the functions take the fields as one
+        # dictionary, and these are the names a key could once collide with.
+        self.assertIn("conn", names)
+        self.assertIn("identifier", names)
+        return sorted(names)
+
+    def test_a_key_named_like_a_parameter_is_the_400_that_lists_the_fields(self):
+        for name in self.parameter_names() + ["nonsense"]:
+            with self.subTest(key=name):
+                patched = self.patch("/_mock/accounts/ACME", {name: 1})
+                self.assertEqual(patched.status, 400, patched.body)
+                self.assertIn(repr(name), patched.json()["error"])
+                self.assertIn("balance", patched.json()["error"])
+
+                created = self.post("/_mock/accounts", {
+                    "id": "OTHER", "iban": db.iban("NL", "MOCK0000000009"),
+                    name: 1})
+                self.assertEqual(created.status, 400, created.body)
+                self.assertIn(repr(name), created.json()["error"])
+                self.assertIn("balance", created.json()["error"])
+
+    def test_the_bank_is_unharmed_by_one(self):
+        # A 500 from a route leaves a reader wondering what else it did. This
+        # says the next request is ordinary.
+        self.assertEqual(self.patch("/_mock/accounts/ACME", {"conn": 1}).status, 400)
+        self.assertEqual(self.patch("/_mock/accounts/ACME",
+                                    {"balance": 10}).json()["balance"], 10)
+        self.assertEqual(self.get("/_mock/accounts/ACME").json()["balance"], 10)
 
 
 class Reset(MockServerCase):

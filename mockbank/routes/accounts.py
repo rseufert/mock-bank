@@ -24,7 +24,7 @@ def create(h) -> None:
                      "\"iban\": \"...\"}"})
     identifier = payload.pop("id", "")
     try:
-        row = accounts.create(h.state.conn, identifier, **payload)
+        row = accounts.create(h.state.conn, identifier, payload)
     except accounts.Invalid as error:
         return h.json(400, {"error": str(error)})
     h.json(201, row)
@@ -49,7 +49,7 @@ def update(h, identifier: str) -> None:
                      "change, as in {\"behaviour\": \"closed-account\"}",
             "fields": sorted(accounts.FIELDS)})
     try:
-        row = accounts.update(h.state.conn, identifier, **payload)
+        row = accounts.update(h.state.conn, identifier, payload)
     except accounts.UnknownAccount:
         return unknown_account(h, identifier)
     except accounts.Invalid as error:
