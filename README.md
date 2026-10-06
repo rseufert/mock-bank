@@ -113,7 +113,7 @@ sends them.
 | --- | --- | --- | --- |
 | `pain.001` | In | You send it | Credit transfers: debtor account, one or more payments, amounts, creditors |
 | `pain.008` | In | You send it | Direct debits: the creditor account, and collections from debtors under their mandates. `POST /payments` and the drop folder decide each collection and answer with a `pain.002`; an accepted one credits the creditor account on its settlement date, with a `camt.054` and an entry on the day's statement, and the debtor's bank can refuse it before settlement or send it back after (#131) |
-| `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only |
+| `pain.002` | Out | Minutes after `pain.001` (`--status-delay-ms`, default at once) | Status per file, batch and payment: `ACCP`, `RJCT` with a reason code, `PART` when some are rejected; a file rejected outright gets its group status only. A further one rejects a payment whose account closed before it settled |
 | `camt.054` | Out | Each payment's settlement date | A debit notification per account each time payments book, an entry per payment, each carrying its `EndToEndId` |
 | `camt.053` | Out | End of each business day | The statement: opening and closing balance, every entry, balances that reconcile; one per open account per business day, empty days included |
 | `camt.052` | Out | When you ask: `POST /_mock/accounts/<id>/report` | The intraday report: the day so far for one account, with its opening balance (`OPBD`), the balance now (`ITBD`) and every entry booked today, on the same terms as the statement the day will end with. `statement-gap` does not apply to it, so a reconciler can see the entry the statement then leaves out |
@@ -734,6 +734,32 @@ for the returns due back and the credits waiting to book (#106). A creditor
 at another bank - a well-formed IBAN the mock does not hold - is not something
 a bank can check at acceptance, so a payment to it settles.
 
+**An account closed while a payment waits to settle.** Acceptance is not the
+bank's last look. A payment accepted for a later day is checked again on that
+day, and if its debtor account has been closed meanwhile it is rejected, `AC04`:
+nothing books, there is no `camt.054`, and a further `pain.002` for the file
+says so - the original `MsgId`, and each such payment `RJCT` under its batch,
+with no group or batch status, since the file's first report gave those. Its
+`MsgId` is `MB-P002-S` and a number. The payment reads `rejected` in
+`GET /_mock/payments`, with no settlement date, and reopening the account later
+does not bring it back. A NACHA account has no message that rejects one entry
+of a file it accepted, so it is told as it is told about any rejection: a
+return entry, `R02`, on the day the payment would have settled
+([#158](https://github.com/rseufert/mock-bank/issues/158)).
+
+`GET /_mock/queue` follows the account. Before it closes, the payment is in the
+`camt.054` entry for its account and day, `payments settling`. While it is
+closed that entry is gone, and there is a `pain.002` entry per file instead,
+`payments rejected at settlement`, due at the start of the same day - a NACHA
+return file, `payments returned`, on a NACHA account. Reopen the account
+before the day and the `camt.054` entry is back, and the payment settles.
+After the day the entry is the message in the mailbox, under the same `key`.
+
+Money due *back* to a closed account is not rejected, because there is nobody to
+reject it to. A `return-later` payment's credit is put off a business day each
+time it comes due, with its `pacs.004` and `camt.054`, and is not in the queue
+until the account reopens - what a credit and a collection already did.
+
 An accepted payment debits its account on its settlement date, not on
 receipt. The mock books the **debit side only**: a payment into an
 account it holds does not credit that account, and a collection from one does
@@ -824,6 +850,7 @@ mailbox, where a single read at the end can pair it on `key`
 | a `camt.054` for payments or collections not yet settled | the file arrived: its `received_at`. With several files for one account and day, the earliest |
 | a `camt.054` for money arriving | the bank heard of it: the credit's `received_at` |
 | what a payment's return brings, under `return-later` | the payment booked and its return was scheduled: its `booked_at`, not the file's arrival |
+| a `pain.002` or a NACHA return file for payments whose account closed before they settle | the file arrived. Not when the account closed: the bank does not keep that moment, and closing and reopening would move it |
 | a NACHA account's rejection coming back as a return file | the file arrived, which is when that return is scheduled |
 | what a refused collection brings | the debtor's bank refused it: the collection's `refused_at`, which can be days after it booked |
 | a status report held back by `--status-delay-ms` | it was written, which is when its file arrived |
