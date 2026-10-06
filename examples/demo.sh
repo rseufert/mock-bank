@@ -4,20 +4,20 @@
 # answer the way a real one does. CI's smoke job runs this on every push, so it
 # is the documentation that cannot rot.
 #
-#   bash examples/demo.sh                             # http://127.0.0.1:8080
+#   bash examples/demo.sh                             # http://127.0.0.1:8090
 #   BASE=http://host:9000 bash examples/demo.sh
 #   BANK_AUTH=user:password bash examples/demo.sh      # a mock started --auth
 #
 # Start the mock first:
 #
-#   python3 -m mockbank --port 8080
+#   python3 -m mockbank --port 8090
 #
 # It asks the mock what it supports and skips what is missing, naming the
 # endpoint, rather than requiring a particular command line. A tour that dies
 # against a mock started slightly differently is a tour nobody runs twice.
 set -eu
 
-BASE="${BASE:-http://127.0.0.1:8080}"
+BASE="${BASE:-http://127.0.0.1:8090}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SAMPLE="$HERE/../tests/samples/pain001_four_payments.xml"
 

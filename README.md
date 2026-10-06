@@ -70,14 +70,19 @@ Install it and start a bank:
 
 ```bash
 pip install mock-bank
-mock-bank --port 8080
+mock-bank --port 8090
 ```
+
+`8090` is the default, so plain `mock-bank` listens there too. The three mocks
+default to different ports on purpose - mock-sap on `8000`, mock-edi on `8080`,
+mock-bank on `8090` - so all three run side by side with no flag to pass and no
+bind error on the second one.
 
 Then, in another terminal:
 
 ```bash
-curl http://127.0.0.1:8080/_mock/health
-curl http://127.0.0.1:8080/_mock/accounts
+curl http://127.0.0.1:8090/_mock/health
+curl http://127.0.0.1:8090/_mock/accounts
 ```
 
 The guided tour lives in the repository rather than in the installed package,
@@ -85,7 +90,7 @@ so it needs a checkout — which needs nothing installed either:
 
 ```bash
 git clone https://github.com/rseufert/mock-bank && cd mock-bank
-python3 -m mockbank --port 8080 &
+python3 -m mockbank --port 8090 &
 bash examples/demo.sh          # the whole choreography, in curl
 python3 examples/client.py     # the same thing, as a client you would copy
 python3 -m unittest discover -s tests -v
@@ -166,8 +171,8 @@ date — otherwise the answer gains a `DT01` warning and this example stops
 matching what you see:
 
 ```
-$ python3 -m mockbank --port 8080 --clock 2026-09-30T09:00 &
-$ curl -s --data-binary @tests/samples/pain001_broken_iban.xml http://127.0.0.1:8080/_mock/validate
+$ python3 -m mockbank --port 8090 --clock 2026-09-30T09:00 &
+$ curl -s --data-binary @tests/samples/pain001_broken_iban.xml http://127.0.0.1:8090/_mock/validate
 pain.001.001.09 ACME-20261001-0001: 1 batch, 4 payments, 1 finding
 error AC01 at /Document/CstmrCdtTrfInitn/PmtInf[1]/CdtTrfTxInf[2]/CdtrAcct/Id/IBAN: NL85MOCK0000000003 fails its check digits
 ```
@@ -194,7 +199,7 @@ first line, a file header starting `101`, and reads it into the same payments
 a `pain.001` becomes:
 
 ```
-$ curl -s --data-binary @tests/samples/nacha_broken_entry_hash.ach http://127.0.0.1:8080/_mock/validate
+$ curl -s --data-binary @tests/samples/nacha_broken_entry_hash.ach http://127.0.0.1:8090/_mock/validate
 NACHA 1234567890-2610010900A: 1 batch, 4 payments, 1 finding
 error FF01 at /line 8 (batch control)/entry hash (columns 11-20): the entry hash says 265100431, but the batch's receiving DFI identifications sum to 26400041, to ten digits
 ```
@@ -322,9 +327,9 @@ bank finds the ones it holds before deciding:
 A NACHA file is in dollars, so an account that sends one is set up for it:
 
 ```
-curl -s -X PATCH http://127.0.0.1:8080/_mock/accounts/ACME \
+curl -s -X PATCH http://127.0.0.1:8090/_mock/accounts/ACME \
      -H 'Content-Type: application/json' -d '{"format": "nacha", "currency": "USD"}'
-curl -s --data-binary @tests/samples/nacha_four_payments_to_the_seed.ach http://127.0.0.1:8080/payments
+curl -s --data-binary @tests/samples/nacha_four_payments_to_the_seed.ach http://127.0.0.1:8090/payments
 ```
 
 A NACHA account held in euros is not refused: each payment is rejected `AM03`,
@@ -473,7 +478,7 @@ that booked has booked, a return that came back has come back — and the messag
 owed you is given up on, with the writer's own complaint kept:
 
 ```bash
-curl -s http://127.0.0.1:8080/_mock/unsent
+curl -s http://127.0.0.1:8090/_mock/unsent
 [{"id": 1, "type": "camt.053.001.08", "account": "OLD", "file_id": null,
   "day": "2026-10-01", "at": "2026-10-01T09:00:00Z",
   "problem": "/Document/BkToCstmrStmt/Stmt[1]/Acct/Ownr/Nm: Nm is empty"}]
@@ -514,7 +519,7 @@ payer controls the reference**. You describe what the payer sent; the bank books
 it and reports it the way it reports anything else.
 
 ```
-curl -s -X POST http://127.0.0.1:8080/_mock/credits -H 'Content-Type: application/json' \
+curl -s -X POST http://127.0.0.1:8090/_mock/credits -H 'Content-Type: application/json' \
      -d '{"account": "ACME", "amount": 118000, "note": "INV-1001 less 70.00 damaged goods",
           "debtor": {"name": "Customer Ltd", "iban": "NL14MOCK0000000002"}}'
 ```
@@ -610,7 +615,7 @@ seed starts with, so it needs nothing set up first:
 
 ```bash
 curl -s --data-binary @tests/samples/pain008_four_collections.xml \
-     http://127.0.0.1:8080/payments
+     http://127.0.0.1:8090/payments
 ```
 
 Two of its four collections are accepted - `DD-2026-0101`, whose debtor is at
@@ -906,7 +911,7 @@ Every flag `mock-bank --help` lists:
 | Flag | Default | What it does |
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Bind address. The Dockerfile binds `0.0.0.0`. |
-| `--port` | `8080` | Port. |
+| `--port` | `8090` | Port. |
 | `--db` | `:memory:` | SQLite file, or `:memory:` for a throwaway bank that forgets everything on exit. |
 | `--timezone` | `UTC` | Bank time's zone, an IANA name such as `Europe/Amsterdam`. It needs `zoneinfo` (Python 3.9+) *and* an IANA database, which Windows does not ship — `pip install tzdata` provides one, and mock-bank will not depend on it because it takes no dependencies. Without both, a named zone is refused at startup rather than silently treated as `UTC`: a settlement date an hour out is the kind of lie this mock exists not to tell. |
 | `--cutoff` | `15:00` | The hour the bank stops taking today's payments for today. At the cutoff exactly it is already too late. |
@@ -930,7 +935,7 @@ SFTP host, and a scheduler that polls them. So the bank has a second door.
 
 ```bash
 mkdir -p bank/in bank/out
-python3 -m mockbank --port 8080 --drop-dir bank/in --pickup-dir bank/out \
+python3 -m mockbank --port 8090 --drop-dir bank/in --pickup-dir bank/out \
         --drop-settle-ms 0
 ```
 
@@ -938,7 +943,7 @@ Then, in another terminal:
 
 ```bash
 cp tests/samples/pain001_four_payments.xml bank/in/
-curl -s -X POST http://127.0.0.1:8080/_mock/drop/scan
+curl -s -X POST http://127.0.0.1:8090/_mock/drop/scan
 ls bank/in/processed bank/out
 ```
 
@@ -1041,7 +1046,7 @@ its repository.
 
 ```bash
 docker build -t mock-bank .
-docker run -p 8080:8080 mock-bank --auth tester:s3cret
+docker run -p 8090:8090 mock-bank --auth tester:s3cret
 ```
 
 The image binds `0.0.0.0`, because `127.0.0.1` inside a container cannot be
