@@ -789,9 +789,12 @@ for the returns due back and the credits waiting to book (#106). A creditor
 at another bank - a well-formed IBAN the mock does not hold - is not something
 a bank can check at acceptance, so a payment to it settles.
 
-**An account closed while a payment waits to settle.** Acceptance is not the
-bank's last look. A payment accepted for a later day is checked again on that
-day, and if its debtor account has been closed meanwhile it is rejected, `AC04`:
+**An account closed while a payment waits to settle.** An account is closed by
+`PATCH /_mock/accounts/<id>` with `{"closed": true}`, and `false` reopens it;
+`closed-account` is a different thing, a behaviour on a creditor. Acceptance
+is not the bank's last look. A payment accepted for a later day is checked
+again on that day, and if its debtor account has been closed meanwhile it is
+rejected, `AC04`:
 nothing books, there is no `camt.054`, and a further `pain.002` for the file
 says so - the original `MsgId`, and each such payment `RJCT` under its batch,
 with no group or batch status, since the file's first report gave those. Its
@@ -956,7 +959,7 @@ like mock-edi's so the two feel the same.
 | Collections | `GET /_mock/collections`, `GET /_mock/collections/<EndToEndId>` | Every direct debit the bank decided on from a `pain.008`, newest first, with its mandate, its debtor, the decision, its settlement date, when its file was received, when it booked and when it went back; or the newest with one `EndToEndId`, `?all` for every one |
 | The debtor's bank says no | `POST /_mock/collections/<EndToEndId>/refuse` | With `{"reason": "MD01"}`. The collection keeps the moment as `refused_at`. Before settlement the collection is rejected and a further `pain.002` says so; after, the money goes back with a `pacs.004` and a `camt.054` debit. For a debtor at another bank: one this bank holds decides by its own behaviour |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
-| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
+| Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`), the domestic `account_number` a NACHA file names it by, and `closed`: `PATCH` it `true` to close the account and `false` to reopen it. A closed account is refused as debtor or creditor with `AC04`, gets no statement, and does not book what comes due to it until it reopens |
 | Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown. Releases before it answers, as a mailbox read does, so a business day that ended on the real clock is in the listing on the first read ([#213](https://github.com/rseufert/mock-bank/issues/213)) |
 | Intraday report | `POST /_mock/accounts/<id>/report` | A `camt.052` for the account now, released to the mailbox and the pickup directory at once; answers `201` with its number, day, opening and interim balance and how many entries it carries. Every account gets one, whatever its `format`; a closed account is `409` |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
