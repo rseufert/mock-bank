@@ -125,6 +125,13 @@ def _reason(conn, creditor, batch, collection, errors, available, room):
     for finding in errors:
         if finding.path == collection.path or finding.path.startswith(collection.path + "/"):
             return finding.code, finding.text
+    if creditor["format"] == "nacha":
+        # The same refusal a payment gets, for the same reason (#218): this door
+        # had neither half of it, so a long InstrId lost the account its whole
+        # return file and one that was not digits made the file unreadable.
+        text = accounts.untraceable(collection.instruction_id, "collection")
+        if text:
+            return schema.STRUCTURAL, text
     if collection.currency != creditor["currency"]:
         return "AM03", ("the amount is in %s but the creditor account %s is held in %s"
                         % (collection.currency, creditor["iban"], creditor["currency"]))
