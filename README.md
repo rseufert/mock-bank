@@ -791,10 +791,11 @@ a bank can check at acceptance, so a payment to it settles.
 
 **An account closed while a payment waits to settle.** An account is closed by
 `PATCH /_mock/accounts/<id>` with `{"closed": true}`, and `false` reopens it;
-`closed-account` is a different thing, a behaviour on a creditor. Acceptance
-is not the bank's last look. A payment accepted for a later day is checked
-again on that day, and if its debtor account has been closed meanwhile it is
-rejected, `AC04`:
+`closed-account` is a different thing, a behaviour: on a payment's creditor
+account, and for a direct debit on the account collected for or from.
+Acceptance is not the bank's last look. A payment accepted for a later day is
+checked again on that day, and if its debtor account has been closed meanwhile
+it is rejected, `AC04`:
 nothing books, there is no `camt.054`, and a further `pain.002` for the file
 says so - the original `MsgId`, and each such payment `RJCT` under its batch,
 with no group or batch status, since the file's first report gave those. Its
