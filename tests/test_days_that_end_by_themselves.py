@@ -5,6 +5,10 @@ Statements used to be issued for the days an advance crossed and no others: a
 mock left running over midnight never issued that day's, and the day's debits
 were then on no statement at all.
 
+Reading the statements listing is one of the releases that issues them (#213).
+It was not, so the one call a tester makes first after leaving a mock running
+overnight was the one call that showed nothing for yesterday.
+
 None of these sleep. The clock is handed its real time, and the night passes
 when a test says so.
 """
@@ -120,6 +124,45 @@ class TheNightPasses(NightCase):
         self.wait(seconds=78)
         self.get("/_mock/mailbox")
         self.assertEqual(self.days(), ["2026-10-01"])
+
+
+class TheListingIsAskedToo(NightCase):
+    """`GET /_mock/accounts/<id>/statements` releases before it answers (#213).
+
+    Every other read of what the bank has done books what is due first. This
+    one did not, so the listing was the one place a day that ended overnight
+    was missing from - until a mailbox read, a file or an advance happened to
+    release, after which it was there all along.
+    """
+
+    def test_the_listing_alone_issues_the_statement_of_the_night_that_passed(self):
+        self.pay()
+        self.wait(seconds=78)
+        # The first thing asked since midnight, and the only thing: no mailbox
+        # read, no advance, no file.
+        issued = self.statements()
+        self.assertEqual([s["day"] for s in issued], ["2026-10-01"],
+                         "the listing is the only thing that has asked")
+        thursday, = issued
+        self.assertEqual(thursday["entries"], 2)
+        self.assertEqual((thursday["opening"], thursday["closing"]),
+                         (12500000, 10875000))
+        # A release and not merely a statement row: the `camt.053` is waiting
+        # for every open account, as it is when an advance issues them.
+        sent = self.get("/_mock/mailbox?type=" + CAMT053).json()
+        self.assertEqual(sorted(m["account"] for m in sent),
+                         ["ACME", "EURODIS", "GLOBEX"])
+
+    def test_reading_it_twice_issues_the_night_once(self):
+        self.wait(seconds=78)
+        self.assertEqual(self.days(), ["2026-10-01"])
+        self.assertEqual(self.days(), ["2026-10-01"])
+
+    def test_a_day_still_running_is_not_in_it(self):
+        # The release must not issue a statement early: at 23:59:50 Thursday
+        # has not ended, and the listing says so after releasing.
+        self.wait(seconds=60)
+        self.assertEqual(self.days(), [])
 
 
 class TheClockIsHandedItsRealTime(MockServerCase):
