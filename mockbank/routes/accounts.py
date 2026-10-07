@@ -63,6 +63,12 @@ def update(h, identifier: str) -> None:
 def statements(h, identifier: str) -> None:
     if accounts.get(h.state.conn, identifier) is None:
         return unknown_account(h, identifier)
+    # A business day that ended on the real clock has its statement issued at
+    # the next release (#157), and asking for the listing is asking what the
+    # bank has issued - so it releases first, as every mailbox read does. Left
+    # out, a mock running overnight showed nothing for yesterday until some
+    # other call happened to release (#213).
+    h.state.release()
     h.json(200, outbox.statements(h.state.conn, identifier))
 
 

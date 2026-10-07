@@ -447,7 +447,11 @@ The clock passes a day's end in two ways, and both count. `POST /_mock/advance`
 issues the statements of the days it crosses as it answers. Bank time also runs
 by itself, so a mock left up over midnight has a day end with nobody asking:
 its statements are issued at the next release - the next mailbox read, file
-received or advance - and are stamped then, not at midnight. A mock on `--db`
+received or advance - and are stamped then, not at midnight. Asking for the
+statements is one of those releases: `GET /_mock/accounts/<id>/statements` books
+what is due before it answers, so a day that ended overnight is in the listing
+on the first read after midnight and not only once something else has asked
+([#213](https://github.com/rseufert/mock-bank/issues/213)). A mock on `--db`
 issues nothing for the days it was not running.
 
 The `camt.054` profile is a choice too: the mock sends one debit notification
@@ -918,7 +922,7 @@ like mock-edi's so the two feel the same.
 | The debtor's bank says no | `POST /_mock/collections/<EndToEndId>/refuse` | With `{"reason": "MD01"}`. The collection keeps the moment as `refused_at`. Before settlement the collection is rejected and a further `pain.002` says so; after, the money goes back with a `pacs.004` and a `camt.054` debit. For a debtor at another bank: one this bank holds decides by its own behaviour |
 | What was asked of it | `GET /_mock/requests` | The newest hundred requests with their status, `?path=` to filter on a prefix: what your client actually sent, rather than what you believe it sent |
 | Accounts | `GET/POST /_mock/accounts`, `GET/PATCH /_mock/accounts/<id>` | Balances, behaviour, behaviour parameters, `format` (`iso20022` or `nacha`) and the domestic `account_number` a NACHA file names it by |
-| Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown |
+| Statements | `GET /_mock/accounts/<id>/statements` | The `camt.053` statements issued for an account: number, day, opening and closing balance, entries shown. Releases before it answers, as a mailbox read does, so a business day that ended on the real clock is in the listing on the first read ([#213](https://github.com/rseufert/mock-bank/issues/213)) |
 | Intraday report | `POST /_mock/accounts/<id>/report` | A `camt.052` for the account now, released to the mailbox and the pickup directory at once; answers `201` with its number, day, opening and interim balance and how many entries it carries. Every account gets one, whatever its `format`; a closed account is `409` |
 | Behaviours | `GET /_mock/behaviours` | Every behaviour with what the bank does, from the table the mock itself dispatches on |
 | Holiday list | `GET/PUT /_mock/holidays` | The days the bank does not settle on, as a JSON list of dates, replaced whole. What is still due on a day that becomes one moves to the next business day; today is refused once something has booked on it |
