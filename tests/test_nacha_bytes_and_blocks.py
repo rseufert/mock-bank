@@ -31,8 +31,12 @@ def sample(name):
 
 
 def twin_lines():
-    """The clean sample: 8 records and the 2 lines of nines that fill its block."""
-    lines = sample("nacha_four_payments_to_the_seed.ach").split(b"\n")[:-1]
+    """The clean sample: 8 records and the 2 lines of nines that fill its block.
+
+    Without their line ends, which are the checkout's and not the file's: a
+    Windows checkout has CRLF, and a line that kept its CR is 95 bytes.
+    """
+    lines = sample("nacha_four_payments_to_the_seed.ach").splitlines()
     assert len(lines) == 10 and lines[8:] == [NINES, NINES]
     return lines
 
