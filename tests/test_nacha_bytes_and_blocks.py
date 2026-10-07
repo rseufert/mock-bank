@@ -195,7 +195,7 @@ class NothingTheBankWritesIsNot94Bytes(MockServerCase):
                             body=dict({"format": "nacha", "currency": "USD"}, **more))
         self.assertEqual(resp.status, 200, resp.body)
 
-    def the_return_file(self, reads_back=True) -> bytes:
+    def the_return_file(self) -> bytes:
         self.assertEqual(self.post("/_mock/advance?to=2026-10-02").status, 200)
         files = self.get("/_mock/mailbox?type=" + nacha.RETURN).json()
         self.assertEqual(len(files), 1)
@@ -203,8 +203,7 @@ class NothingTheBankWritesIsNot94Bytes(MockServerCase):
         lines = raw.split(b"\n")
         self.assertEqual(lines[-1], b"")
         self.assertEqual([len(line) for line in lines[:-1]], [94] * 10)
-        if reads_back:
-            self.assertEqual(nacha.inspect(raw)[1], [], "and it reads back with no finding")
+        self.assertEqual(nacha.inspect(raw)[1], [], "and it reads back with no finding")
         return raw
 
     def test_an_account_whose_name_is_not_ascii(self):
@@ -220,14 +219,15 @@ class NothingTheBankWritesIsNot94Bytes(MockServerCase):
         self.nacha_acme()
         xml = sample("pain001_four_payments.xml").decode("utf-8")
         self.assertIn("Initech", xml)
+        # ...and an InstrId has to be digits, which the sample's are not (#218).
+        self.assertEqual(xml.count("<InstrId>ACME-0001-"), 4)
         xml = xml.replace("Initech", "Initéch").replace('Ccy="EUR"', 'Ccy="USD"') \
-                 .replace("<Ccy>EUR</Ccy>", "<Ccy>USD</Ccy>")
+                 .replace("<Ccy>EUR</Ccy>", "<Ccy>USD</Ccy>") \
+                 .replace("<InstrId>ACME-0001-", "<InstrId>900")
         resp = self.post("/payments", body=xml.encode("utf-8"),
                          headers={"Content-Type": "application/xml"})
         self.assertEqual((resp.status, resp.json()["rejected"]), (202, 2))
-        # Not read back: the sample's InstrId is not a number, and the return
-        # addenda's original entry trace number is. That is its own fault.
-        self.assertIn(b"Initech Services N.V.", self.the_return_file(reads_back=False))
+        self.assertIn(b"Initech Services N.V.", self.the_return_file())
 
 
 if __name__ == "__main__":

@@ -528,6 +528,41 @@ NACHA_TRACE_WIDTH = next(field.width for field in nacha.RETURN_ADDENDA[1]
 NACHA_RETURN_REASON = "R02"
 
 
+def untraceable(instruction_id: Optional[str], what: str) -> Optional[str]:
+    """Why a NACHA return could not carry this ``InstrId`` back, or None.
+
+    Refused at receipt because the bank cannot answer for it later (#166 case
+    c). A NACHA account's rejections come back as returns (#54), and so does a
+    payment or a collection that settles and is sent back, and the return
+    addenda carries the original entry's trace number: 15 digits. At receipt the
+    bank does not know whether this one will come back, so it refuses the value
+    that would make the answer unwritable if it did.
+
+    Two ways it cannot be carried, and both doors ask (#218). Too long, and the
+    writer refuses the record, so the whole return file is given up on. Not
+    digits, and the writer zero-fills it into a numeric field as it is, so the
+    bank sends a file its own reader refuses. ASCII digits only: ``str.isdigit``
+    is true of a superscript two, which is not a digit a NACHA record holds.
+
+    No ``InstrId`` is fine: the return carries zeros, and the client matches on
+    the individual identification number, which is the ``EndToEndId``.
+    """
+    if not instruction_id:
+        return None
+    if len(instruction_id) > NACHA_TRACE_WIDTH:
+        return ("InstrId %r is %d characters; a NACHA return carries the original "
+                "entry trace number in %d, so if this %s came back the bank "
+                "could not write the return"
+                % (instruction_id, len(instruction_id), NACHA_TRACE_WIDTH, what))
+    if not (instruction_id.isascii() and instruction_id.isdigit()):
+        return ("InstrId %r is not a number; a NACHA return carries the original "
+                "entry trace number as %d digits, so if this %s came back the "
+                "bank could not write the return. Send digits, or no InstrId: the "
+                "return then carries the EndToEndId alone"
+                % (instruction_id, NACHA_TRACE_WIDTH, what))
+    return None
+
+
 def return_reason(parameters: Dict[str, Any], account_format: str) -> str:
     """The reason a return-later payment comes back with, for this format."""
     default = NACHA_RETURN_REASON if account_format == "nacha" else RETURN_LATER["reason"]
@@ -816,21 +851,10 @@ def _payment_reason(conn, debtor, batch, payment, errors, available):
     for finding in errors:
         if _under(finding.path, payment.path):
             return finding.code, finding.text
-    if (debtor["format"] == "nacha" and payment.instruction_id
-            and len(payment.instruction_id) > NACHA_TRACE_WIDTH):
-        # Refused here because the bank cannot answer for it later (#166 case c).
-        # A NACHA account's rejections come back as returns (#54), and so does a
-        # `return-later` payment, and the return addenda carries the original
-        # entry's trace number in a fixed width. At receipt the bank does not know
-        # whether this payment will come back, so it refuses the one value that
-        # would make the answer unwritable if it did - rather than accepting it and
-        # answering 500 to every advance and mailbox read from the day it is due.
-        return schema.STRUCTURAL, (
-            "InstrId %r is %d characters; a NACHA return carries the original "
-            "entry trace number in %d, so if this payment came back the bank "
-            "could not write the return"
-            % (payment.instruction_id, len(payment.instruction_id),
-               NACHA_TRACE_WIDTH))
+    if debtor["format"] == "nacha":
+        text = untraceable(payment.instruction_id, "payment")
+        if text:
+            return schema.STRUCTURAL, text
     if payment.currency != debtor["currency"]:
         return "AM03", ("the amount is in %s but the debtor account %s is held in %s"
                         % (payment.currency, debtor["iban"], debtor["currency"]))

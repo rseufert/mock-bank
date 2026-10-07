@@ -243,11 +243,13 @@ class AnInstructionIdANachaReturnCannotCarry(DoorCase):
     def test_one_that_fits_is_decided_on_its_merits(self):
         # The guard is about the width, not about having an InstrId at all: this
         # one is rejected by the behaviour, with the behaviour's own code, and the
-        # return for it is written.
+        # return for it is written. Digits, since #218: fifteen letters fitted
+        # the field and were written into a number, which is its own refusal now
+        # (`tests/test_nacha_trace_number.py`).
         self.nacha_account()
         answer = self.post("/payments", body=pain001(
             "C2", [("C-2", 100000000, GLOBEX)],
-            instr_id="I" * accounts.NACHA_TRACE_WIDTH, ccy="USD"))
+            instr_id="1" * accounts.NACHA_TRACE_WIDTH, ccy="USD"))
         [decided] = answer.json()["payments"]
         self.assertEqual(decided["outcome"], accounts.REJECTED, decided)
         self.assertEqual(decided["reason"], "AM04", decided)
