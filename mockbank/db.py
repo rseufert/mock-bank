@@ -494,15 +494,17 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
 
     ``keep_requests`` keeps the newest that many request-log rows (0 keeps them
     all). ``retention_days`` removes what is older than that many days (0 keeps
-    everything): request-log rows, and messages a client has already taken.
+    everything): request-log rows, messages a client has already taken, and the
+    records of messages the bank owed and could not write.
 
     **Two clocks, and they are not interchangeable.** ``request_log.at`` is when
     an HTTP request arrived, in real UTC, so its age is real elapsed time.
-    ``message.taken_at`` is written from the *bank* clock, which a test moves -
-    so a mock started with ``--clock 2025-01-01`` writes messages dated last
-    year, and measuring their age against real time deleted messages a client
-    had collected seconds earlier. ``bank_now`` is the bank's now; without it
-    both fall back to real time, which is right for a caller that has no clock.
+    ``message.taken_at`` and ``unsent.at`` are written from the *bank* clock,
+    which a test moves - so a mock started with ``--clock 2025-01-01`` writes
+    messages dated last year, and measuring their age against real time deleted
+    messages a client had collected seconds earlier. ``bank_now`` is the bank's
+    now; without it both fall back to real time, which is right for a caller
+    that has no clock.
 
     What is *not* pruned is deliberate. ``payment`` and ``file`` are what the
     bank did, and they are the evidence somebody reads when a test fails - a
@@ -510,6 +512,9 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
     waiting to be collected is kept however old it is, because nobody has seen
     it yet, and so are the accounts, the holidays and the counters: they are
     what the mock *is*, not a record of what it did.
+
+    An ``unsent`` row is not a message waiting: nobody can collect it and
+    nothing will retry it, so it ages on its ``at`` like a request-log row.
     """
     keep_requests = _whole(keep_requests, "keep_requests")
     retention_days = _window(retention_days)
@@ -539,7 +544,10 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
         # GET /_mock/accounts/<id>/statements hand out a message id that answers
         # 404, which is worse than saying the message is gone: the statement row
         # is the record, and it still reconciles.
-        message_cutoff = stamp((bank_now or utcnow()) - window)
+        #
+        # One cutoff for everything aged on the bank clock: collected messages,
+        # and the records of the ones that were never written.
+        bank_cutoff = stamp((bank_now or utcnow()) - window)
         # `require_written` is set when a pickup directory is configured: a
         # message the folder has not been given yet must not be aged out, or it
         # is a message that simply never arrives for a client that polls a
@@ -548,10 +556,23 @@ def prune(conn: sqlite3.Connection, keep_requests: int = 0,
         conn.execute(
             "UPDATE statement SET message_id = NULL WHERE message_id IN"
             " (SELECT id FROM message WHERE taken_at IS NOT NULL"
-            " AND taken_at < ?" + written_only + ")", (message_cutoff,))
+            " AND taken_at < ?" + written_only + ")", (bank_cutoff,))
         gone("message", conn.execute(
             "DELETE FROM message WHERE taken_at IS NOT NULL AND taken_at < ?"
-            + written_only, (message_cutoff,)))
+            + written_only, (bank_cutoff,)))
+        # A message the bank owed and could not write (#166 part 2). An account
+        # whose name no message can carry is given up on once per business day,
+        # for as long as the mock runs, so these grow exactly like the message
+        # table they stand in for - and nothing but a reset removed them (#214).
+        #
+        # **Age alone decides.** The rule that keeps an uncollected message for
+        # ever has nothing to apply to here: there is no message to collect and
+        # nothing retries it, so an unsent row is a record of what the bank did,
+        # like a request-log row, not something still waiting for somebody.
+        # `require_written` is for the same reason not asked: there is no file to
+        # wait for either.
+        gone("unsent", conn.execute(
+            "DELETE FROM unsent WHERE at < ?", (bank_cutoff,)))
     conn.commit()
     return removed
 

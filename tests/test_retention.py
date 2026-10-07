@@ -8,10 +8,15 @@ The other half of this is the indexes, which already existed by the time the
 issue came up: the tests here hold them in place by name, against the query
 plans, so that a schema change cannot quietly drop one and leave a mock that
 works and gets slower every week.
+
+The records of messages the bank could not write grow the same way, one per
+business day for as long as an account the writer refuses is in the database,
+and retention never touched them (#214). They do now, by age alone.
 """
 import datetime
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -22,7 +27,7 @@ sys.path.insert(0, HERE)
 
 from mockbank import db                                        # noqa: E402
 
-from support import MockServerCase                             # noqa: E402
+from support import FileDatabaseCase, MockServerCase           # noqa: E402
 from test_payments import sample                               # noqa: E402
 
 
@@ -153,6 +158,29 @@ class WhatRetentionDaysRemoves(unittest.TestCase):
         self.assertEqual(db.count(self.conn, "account"), len(db.SEED))
         self.assertEqual(db.count(self.conn, "holiday"), 1)
 
+    def add_unsent(self, at, day="2026-01-01"):
+        """A message the bank owed and could not write (#166 part 2)."""
+        self.conn.execute(
+            "INSERT INTO unsent (type, account, day, problem, at)"
+            " VALUES ('camt.053.001.08', 'OLD', ?, 'Nm is only spaces', ?)",
+            (day, at))
+
+    def test_an_old_record_of_a_message_never_written_goes(self):
+        self.add_unsent(self.old(40))
+        self.add_unsent(self.old(8))
+        self.conn.commit()
+        removed = db.prune(self.conn, retention_days=7)
+        self.assertEqual(removed.get("unsent"), 2)
+        self.assertEqual(db.count(self.conn, "unsent"), 0)
+
+    def test_a_record_inside_the_window_stays(self):
+        # Age alone decides, and this one is not old enough. Nothing else can
+        # decide it: there is no message to collect and nothing retries it.
+        self.add_unsent(self.old(6))
+        self.conn.commit()
+        self.assertIsNone(db.prune(self.conn, retention_days=7).get("unsent"))
+        self.assertEqual(db.count(self.conn, "unsent"), 1)
+
     def test_keeping_everything_is_the_default(self):
         self.add_request(self.old(400))
         self.conn.commit()
@@ -192,6 +220,70 @@ class AgeIsMeasuredOnTheRightClock(MockServerCase):
         self.assertGreater(
             self.get("/_mock/state").json()["retention"]["pruned"].get("message", 0),
             0, "bank time moved three months and nothing aged out")
+
+
+class AMockLeftRunningWithOneBadAccount(FileDatabaseCase):
+    """A hundred days of statements nobody could write (#214).
+
+    The input is `test_unsent_messages.py`'s: an account whose name no message
+    can carry, written into a `--db` file with the mock stopped, which is what a
+    database from before #166's guard is. The bank gives up on its statement
+    once per business day, so the rows grow like the message table they stand in
+    for - and until now nothing but a reset removed them.
+
+    This is also where the clock is settled. Bank time starts in January and
+    moves a hundred days; real time does not move at all while the test runs. A
+    cutoff taken from real time would be months past every row here and would
+    take the lot, the window's own included, so keeping the recent ones is what
+    says `unsent.at` is read on the bank clock.
+    """
+
+    # A valid IBAN the seed does not hold, with check digits that agree.
+    SPARE_IBAN = "NL19MOCK0000000009"
+    WINDOW = 30
+    config_kwargs = {"clock": "2026-01-01T09:00", "retention_days": WINDOW}
+
+    def setUp(self):
+        super().setUp()
+        self.stop()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO account (id, name, iban, bic, currency, balance,"
+            " behaviour, parameters, closed, format, account_number)"
+            " VALUES ('OLD', '   ', ?, 'MOCKNL2A', 'EUR', 5000, 'accept', '{}',"
+            " 0, 'iso20022', '')", (self.SPARE_IBAN,))
+        conn.commit()
+        conn.close()
+        self.start()
+
+    def test_a_hundred_days_leaves_the_window_and_says_what_went(self):
+        for _ in range(20):
+            self.assertEqual(self.post("/_mock/advance?days=5").status, 200)
+        state = self.get("/_mock/state").json()
+        rows = self.get("/_mock/unsent").json()
+        today = datetime.date.fromisoformat(state["clock"]["date"])
+        self.assertTrue(rows, "no records at all, so nothing is measured here")
+        # Business days only, so a hundred days is about seventy records; what
+        # is left is the window's worth, and it is the recent ones.
+        self.assertLess(len(rows), 30, "a hundred days of records are all kept")
+        self.assertGreaterEqual(
+            datetime.date.fromisoformat(min(row["at"] for row in rows)[:10]),
+            today - datetime.timedelta(days=self.WINDOW),
+            "a record older than the window is still there")
+        self.assertGreater(state["retention"]["pruned"].get("unsent", 0), 40,
+                           "retention removed none of them")
+        self.assertEqual(state["messages"]["unsent"], len(rows),
+                         "the count and the listing disagree")
+
+    def test_the_day_just_given_up_on_is_not_taken(self):
+        # The flip side of the clock: the newest record is seconds old in bank
+        # time, and a window of thirty days keeps it.
+        self.post("/_mock/advance?days=1")
+        rows = self.get("/_mock/unsent").json()
+        self.assertEqual([row["day"] for row in rows], ["2026-01-01"])
+        self.assertEqual(
+            self.get("/_mock/state").json()["retention"]["pruned"].get("unsent", 0),
+            0, "a record the bank wrote moments ago was pruned")
 
 
 class APrunedStatementMessage(unittest.TestCase):
