@@ -13,6 +13,124 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.8.0] - 2026-10-06
+
+### Changed
+
+- **The `ImportError` for a moved integration names `pip install mock-acme`, and
+  mock-acme is on PyPI** (#202). The message named the repository alone, which was
+  the whole answer while there was nothing to install; mock-acme has been on PyPI
+  since 2026-10-05, so it now names the one command that fixes the import as well.
+  `README.md` and `examples/README.md` said mock-acme was not on PyPI and no
+  longer do. Its wheel holds the package alone, so its own tests still run from a
+  clone.
+
+- **The default port is 8090, not 8080** (#203). mock-edi defaults to `8080` too,
+  so the two could not both be started without a flag - the second one died on a
+  bind error - and mock-sap's `8000`, mock-edi's `8080` and this mock's `8090` are
+  now three distinct numbers a reader can start side by side. Anyone who runs
+  `mock-bank` with no `--port`, or `docker run -p 8080:8080 mock-bank`, is
+  affected: pass `--port 8080` to keep the old one, or publish `-p 8090:8090`.
+
+### Removed
+
+- **The worked integrations have moved to mock-acme, and
+  `mockbank.examples` no longer carries them** (#201). `pay_invoices`,
+  `payment_run`, `procure_to_pay`, `bank_messages` and the copy of mock-sap's
+  `invoice_check` sat between this mock and the other two, so they now live in
+  [mock-acme](https://github.com/rseufert/mock-acme), one copy of each, tested
+  against all three mocks. `from mockbank.examples import payment_run`, which
+  worked from 0.6.0, now raises an `ImportError` that names mock-acme;
+  `mockbank.examples.client` and `mockbank.examples.statement` are still in the
+  wheel. `examples/README.md` says which file became which. The fix to
+  `examples/payment_run.py` recorded under #164 in this release went with the
+  file: it is in mock-acme, not in this package.
+
+### Fixed
+
+- **A business day that ends by itself gets its statement** (#157). Statements were
+  issued for the days a `POST /_mock/advance` crossed and for no others, so a mock
+  left running over midnight never issued that day's, and the day's debits were on
+  no statement at all - the balance was right and nothing explained it. The bank
+  now remembers how far its statements go, and the next release - a mailbox read,
+  a file received, an advance - issues every business day that has ended since,
+  whoever moved the clock. They are stamped when they are issued, not at midnight.
+  `Clock` takes a `real=` source of real time, so a test of a night passing does
+  not sleep through one.
+
+- **A payment whose account closes before it settles is rejected, not booked**
+  (#158). A payment accepted for a later day used to debit the account on that day
+  even if the account had been closed since, and a closed account gets no
+  statement, so the balance moved and no statement showed why. The bank now checks
+  again on the settlement day: the payment is rejected `AC04`, nothing books, no
+  `camt.054` is sent, and a further `pain.002` for the file (`MsgId` `MB-P002-S…`)
+  reports each such payment `RJCT`. A NACHA account is sent a return entry, `R02`,
+  instead. `GET /_mock/queue` shows the `pain.002` in place of the debit's
+  `camt.054` for as long as the account is closed, and the `camt.054` again if it
+  reopens before the day. A `return-later` credit due back to a closed account is
+  now put off a business day at a time until the account reopens, as a credit and
+  a collection already were. **A client that closed an account and relied on its
+  pending payments still booking will see them rejected.**
+
+- **`POST /_mock/reset` is a new bank, its row ids included** (#159). A reset
+  emptied every table and restarted the `counter` table, but not SQLite's
+  `AUTOINCREMENT` sequences - a `DELETE` leaves those where they are - so the same
+  file sent after a reset came back with payment ids 5-8 instead of 1-4, message
+  ids 3-4 instead of 1-2, `MB-P002-000002` instead of `MB-P002-000001`, and
+  pickup file names ending `-3` and `-4`. A test that reset between cases and
+  asserted on an id, a `MsgId` or a file name in the pickup directory passed alone
+  and failed in a suite. The sequences are now restarted with the tables, so the
+  same input gives the same answer on `:memory:` and on `--db`. A *restart* on
+  `--db` still carries on where the old mock left off: that is what a restart is,
+  and it is unchanged.
+
+- **No two accounts are sent the same `MsgId`** (#160). Every `MsgId` the bank
+  writes for an account is built from the first 18 characters of its id, which is
+  what keeps it inside ISO's 35 - so two accounts whose ids were identical over
+  that much of them were sent their statements and notifications under one
+  `MsgId`, day after day, and a client that de-duplicates on `MsgId` dropped one
+  of the two. The second such account is now refused at creation, naming the
+  first and saying to differ inside the first 18 characters: the same answer
+  `POST /_mock/accounts` already gives for an id it could not write messages for
+  at all. The 18 lived at nine places in `outbox.py` and is now one constant and
+  one function, so the refusal and the writers cannot come to disagree about it.
+
+- **An unknown key on an account is the 400 that lists the fields, whatever it is
+  called** (#161). `POST /_mock/accounts` and `PATCH /_mock/accounts/<id>` passed
+  the body to `accounts.create` and `accounts.update` as keyword arguments, so a
+  key named `conn` or `identifier` collided with one of their parameters and
+  raised a `TypeError` before the field check could name it: the answer was a 500
+  carrying "update() got multiple values for argument 'conn'" instead of the 400
+  every other unknown key gets. The fields are now one dictionary, which is what
+  they always were on the wire.
+
+- **The sdist ships everything its tests read, and CI runs them from it** (#163).
+  `MANIFEST.in` named the tests by extension and listed `*.py *.xml *.sql *.md
+  *.txt`, so an unpacked sdist held no NACHA `.ach` sample, no `.json` fixture,
+  no `tools/`, no `docs/` and no workflow - and `python3 -m unittest discover -s
+  tests` from it reported 2 failures and 98 errors, with 92 tests never
+  discovered at all. It now carries those too, and the suite passes from an
+  unpacked sdist, running the same tests the checkout does. CI's `package` job unpacks
+  the archive it just built and runs the suite from the unpacked tree, in a
+  directory of its own so nothing of the checkout can stand in for a file the
+  archive left out. `CONTRIBUTING.md` says how to do the same by hand, in a
+  throwaway virtualenv, since `build` is not a dependency of this project and a
+  system Python usually does not have it.
+
+- **`examples/payment_run.py` writes the currency the run actually pays in**
+  (#164, item 4). The `FINSTA01` it hands SAP had `CUXWAERZ` and `FIIKWAER`
+  hardcoded to EUR whatever account the run paid from, so an ACH run - which pays
+  in dollars, and skips any open item not in them - sent SAP a statement of dollar
+  payments labelled as euros. SAP reconciled it anyway, but only because it did
+  not compare a line's currency against the open item's either; rseufert/mock-sap#88
+  is that half. An amount without a currency is not an amount, and this run has
+  exactly one, so both fields now come from it.
+
+  **The two halves have to land in this order.** Against mock-sap 0.17.1 this
+  change alone is green, because that version ignores the currency. Landing
+  mock-sap's check first instead takes the ACH suite from 26 passing to 4 failing,
+  which is what the two errors cancelling looks like from the other side.
+
 ## [0.7.0] - 2026-10-02
 
 ### Added
@@ -1310,7 +1428,8 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rseufert/mock-bank/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rseufert/mock-bank/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rseufert/mock-bank/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rseufert/mock-bank/compare/v0.4.0...v0.5.0
