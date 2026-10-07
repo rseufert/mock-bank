@@ -205,9 +205,41 @@ error FF01 at /line 8 (batch control)/entry hash (columns 11-20): the entry hash
 ```
 
 A finding names the line, the record and the field with its columns. The file
-checks are a line that is not 94 characters, a routing number that fails its
-check digit (`RC01`), and an entry hash, block count, count (`AM18`) or credit
-total (`AM10`) that disagrees with the entries. Two checks come from the
+checks are a line that is not 94 characters, a byte that is not a NACHA
+character, a routing number that fails its check digit (`RC01`), an entry hash,
+block count, count (`AM18`) or credit total (`AM10`) that disagrees with the
+entries, and lines of nines that do not fill the last block:
+
+- **A record is ASCII, space (`0x20`) to tilde (`0x7E`), one byte a character.**
+  Any other byte is an error, `FF01`, naming the line, the column and the field
+  it falls in: `byte 0xE9 at column 59 (individual name)`. So `é` is refused
+  whether the file is Latin-1 (one byte) or UTF-8 (two, which also makes the
+  line 95 long), and so is a tab. Nacha's table of valid characters gives
+  "ASCII values greater than hexadecimal 1F", and ASCII stops at `7F`.
+  [moov-io/ach](https://github.com/moov-io/ach) is more lenient and takes
+  `0xC0`-`0xFF` as Latin-1 letters; the mock does not, because nothing in the
+  file says which encoding a byte above `7F` is in.
+- **A file is whole blocks of ten.** After the file control come as many lines
+  of nines as fill the last block, no fewer and no more: 8 records are followed
+  by 2, 10 by none. Anything else is an error, `FF01`, at `/`, saying how many
+  lines the file has and how many it needs. An error and not a warning because
+  a wrong block count already is one and this is the other half of the same
+  rule, and because a mock that lets a file through is no help with the bank
+  that will not. Line ends (`LF` or `CRLF`) and blank lines are not counted.
+- **What the bank writes is held to the same.** Every record of a return file
+  is 94 bytes. A name that is not ASCII - an account's, or a creditor's from a
+  `pain.001` - is written without its accents (`Müller` as `Muller`), and any
+  other character the bank cannot write as `?`, one for one.
+
+Sources: Nacha's "Valid Characters for ACH Records"
+(<https://www.nacha.org/system/files/2025-03/Valid%20Characters%20for%20ACH%20Records%20-%20Technical%20Tab%20----%20picture.docx>);
+Nicolet National Bank's specification, linked below, for "fixed length, ASCII,
+record length 94, Block 10" and a block count of "physical blocks"; and
+JPMorgan Chase's (<https://www.chase.com/content/dam/chaseonline/en/demos/cbo/pdfs/cbo_nacha_filespecs.pdf>)
+for "10 lines of data equal 1 block". The Nacha Operating Rules themselves are
+sold, not published, and were not read.
+
+Two checks come from the
 `pain.001` side, where NACHA has no rule of its own: a past effective entry date
 is a `DT01` warning, and an individual identification number used twice is
 `AM05`. A blank file creation time is allowed, as NACHA allows it. Where NACHA
