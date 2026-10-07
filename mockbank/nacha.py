@@ -51,13 +51,19 @@ does say is whether a ``WEB`` or ``TEL`` debit is recurring or single (the
 payment type code), which is its sequence type.
 
 Findings, not exceptions, as in ``validate``: a line that is not 94
-characters, a routing number that fails its check digit, an entry hash, a
-count or a total that disagrees with the entries, and a wrong block count.
-Each names the line, the record and the field with its columns.
+characters, a byte that is not one NACHA allows, a routing number that fails
+its check digit, an entry hash, a count or a total that disagrees with the
+entries, a wrong block count, and lines of nines that do not fill the last
+block. Each names the line, the record and the field with its columns.
+
+A record is 94 bytes as well as 94 characters (#162): the characters NACHA
+allows are ASCII's printable ones, space to tilde, one byte each. The reader
+says where a byte is anything else, and the writer never writes one (``line``).
 """
 from __future__ import annotations
 
 import datetime
+import unicodedata
 from collections import namedtuple
 from decimal import Decimal
 from typing import Dict, List, Optional
@@ -222,6 +228,14 @@ DEBIT_RETURN_REASONS = dict(RETURN_REASONS, **{
     "R29": "the corporate customer advises the debit is not authorized"})
 
 PADDING = "9" * LINE
+
+# The characters a record is made of: ASCII's printable ones, space to tilde.
+# Nacha's table of valid characters gives "ASCII values greater than
+# hexadecimal 1F", and ASCII ends at 7F, which is a control character too.
+FIRST, LAST = 0x20, 0x7E
+# What stands in for a character the bank cannot write, and for a byte the
+# reader could not read: one character for one, so that no column moves.
+UNWRITABLE = "?"
 
 
 def recognise(data: bytes) -> bool:
@@ -440,12 +454,14 @@ def inspect(data: bytes, today: Optional[datetime.date] = None):
     """
     findings: List[Finding] = []
     records: List[Record] = []
-    padding = 0
-    text = data.decode("ascii", "replace")
-    for number, line in enumerate(text.split("\n"), start=1):
-        line = line.rstrip("\r")
-        if not line:
+    padding = lines = 0
+    for number, raw in enumerate(data.split(b"\n"), start=1):
+        raw = raw.rstrip(b"\r")
+        if not raw:
             continue
+        lines += 1
+        line = "".join(chr(byte) if FIRST <= byte <= LAST else UNWRITABLE for byte in raw)
+        findings += _characters(number, raw)
         if len(line) != LINE:
             label = RECORDS[line[:1]][0] if line[:1] in RECORDS else "record"
             findings.append(_finding("/line %d (%s)" % (number, label), "FF01",
@@ -501,6 +517,7 @@ def inspect(data: bytes, today: Optional[datetime.date] = None):
                              "the file holds %d")
         findings += _compare(control, "block count", blocks, "FF01",
                              "its %d records fill %%d block(s) of %d" % (len(records), BLOCK))
+        findings += _blocking(lines, lines - padding, padding)
         findings += _compare(control, "entry/addenda count", count, "AM18",
                              "the file holds %d entries and addenda")
         findings += _compare(control, "entry hash", entry_hash % 10 ** 10, "FF01",
@@ -651,6 +668,45 @@ def _compare(record: Record, name: str, actual: int, code: str, why: str) -> Lis
                      "the %s says %d, but %s" % (name, declared, why % actual))]
 
 
+def _characters(number: int, raw: bytes) -> List[Finding]:
+    """The bytes of a line that are not characters NACHA allows, each by its
+    column and the field it falls in: one finding for the line (#162)."""
+    bad = [(column, byte) for column, byte in enumerate(raw, start=1)
+           if not FIRST <= byte <= LAST]
+    if not bad:
+        return []
+    kind = raw[:1].decode("ascii", "replace")
+    label, fields = RECORDS.get(kind, ("record", ()))
+
+    def where(column):
+        name = next((f.name for f in fields if f.start <= column < f.start + f.width), None)
+        return "column %d%s" % (column, " (%s)" % name if name else "")
+
+    shown = ["byte 0x%02X at %s" % (byte, where(column)) for column, byte in bad[:5]]
+    if len(bad) > len(shown):
+        shown.append("%d more" % (len(bad) - len(shown)))
+    return [_finding(
+        "/line %d (%s)" % (number, label), "FF01",
+        "%s: a NACHA record is ASCII, the characters from space (0x20) to tilde "
+        "(0x7E) and one byte each. A letter with an accent is not one of them, "
+        "in any encoding" % ", ".join(shown))]
+
+
+def _blocking(lines: int, records: int, padding: int) -> List[Finding]:
+    """The lines of nines after the file control against what fills the last
+    block of ten (#162). An error, as a wrong block count is: it is the same
+    rule, and a bank that enforces one enforces the other."""
+    wanted = -records % BLOCK
+    if padding == wanted:
+        return []
+    return [_finding(
+        "/", "FF01",
+        "the file is %d lines, %d record(s) and %d line(s) of nines; NACHA blocks "
+        "records in tens, so %d record(s) are followed by %d line(s) of nines to "
+        "make %d lines, and this file has %d"
+        % (lines, records, padding, records, wanted, records + wanted, padding))]
+
+
 def _numeric(record: Record) -> List[Finding]:
     """A numeric field holding anything but digits, named."""
     out = []
@@ -721,15 +777,35 @@ RETURN = "nacha.return"
 TEXT_TYPES = {ACK: "txt", RETURN: "ach"}
 
 
+def writable(text: str) -> str:
+    """``text`` in the characters a record is made of, one for one (#162).
+
+    A name reaches the writer from an account or from a ``pain.001``, where
+    ``Müller`` is a name like any other. A letter with an accent loses the
+    accent, as a bank that keeps its ACH names in ASCII writes it; anything
+    else that is not printable ASCII becomes ``?``. Never two characters for
+    one (``ß`` is ``?``, not ``ss``), so a value keeps its width.
+    """
+    out = []
+    for char in text:
+        if not FIRST <= ord(char) <= LAST:
+            plain = "".join(c for c in unicodedata.normalize("NFKD", char)
+                            if not unicodedata.combining(c))
+            char = plain if len(plain) == 1 and FIRST <= ord(plain) <= LAST else UNWRITABLE
+        out.append(char)
+    return "".join(out)
+
+
 def line(layout, **values) -> str:
-    """One record from its declaration: numbers zero-filled, text space-filled.
+    """One record from its declaration: numbers zero-filled, text space-filled,
+    and 94 bytes, because every character is one ``writable`` returns.
 
     ``layout`` is a ``RECORDS`` entry or ``RETURN_ADDENDA``; a value that does
     not fit its field is an error in the caller, not something to truncate.
     """
     out = []
     for field in layout[1]:
-        value = "" if values.get(field.name) is None else str(values[field.name])
+        value = "" if values.get(field.name) is None else writable(str(values[field.name]))
         value = value.rjust(field.width, "0") if field.numeric else value.ljust(field.width)
         if len(value) != field.width:
             raise ValueError("%s is %d characters, not %d: %r"
