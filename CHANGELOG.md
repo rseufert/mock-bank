@@ -13,6 +13,59 @@ Entries for the next release are one file each in
 conflict on the same lines of this file. `tools/check_changelog.py --assemble`
 writes them into this section at release time. Nothing is added here by hand.
 
+## [0.9.0] - 2026-10-07
+
+### Fixed
+
+- **A NACHA record is 94 bytes, and a file is whole blocks of ten** (#162). Three
+  faults in one rule. The reader took a byte that is not a NACHA character and
+  said nothing: any byte outside ASCII's space (`0x20`) to tilde (`0x7E`) is now
+  an error, `FF01`, naming the line, the column and the field, as in
+  `byte 0xE9 at column 59 (individual name)`. It never counted the lines of nines after the
+  file control: a file whose records are not followed by exactly the lines of
+  nines that fill the last block of ten - too few, too many, or a whole block too
+  many - is now an error, `FF01`, saying how many lines it has and how many it
+  needs. And the bank itself wrote records of 95 and 96 bytes into a return file
+  when a name was not ASCII, which an account's name or a `pain.001` creditor's
+  may be: it now writes the name without its accents (`Müller` as `Muller`) and
+  `?` for any other character it cannot write. **A client whose NACHA files are
+  not padded to a multiple of ten lines, or carry a character outside ASCII, was
+  accepted and is now refused `FF01`.**
+
+- **A day that ended overnight is in the statements listing on the first read**
+  (#213). Since #157 the statement of a business day that ended on the real clock
+  is issued at the next release - a mailbox read, a file received, an advance -
+  and `GET /_mock/accounts/<id>/statements` was not one of them, so a tester who
+  left a mock running overnight and asked for the statements first saw nothing for
+  yesterday until some other call happened to release. The listing now releases
+  before it answers, as every mailbox read does: the statement is there, with the
+  day's debits on it and its `camt.053` waiting in the mailbox. A day still
+  running is still not in it.
+
+- **`--retention-days` removes the records of messages the bank could not write**
+  (#214). `GET /_mock/unsent` keeps every message the bank owed and gave up on
+  (#166), and retention applied to the request log and to collected messages and
+  never to those - so an account whose name no message can carry earned one record
+  per business day, for as long as the mock ran, and nothing but `POST /_mock/reset`
+  removed them. They now age out on their `at`, the bank-clock moment the bank gave
+  up, the same clock a collected message is measured on, and are counted in
+  `/_mock/state`'s `retention.pruned` under `unsent`. **Age alone decides**: an
+  unsent record is not an uncollected message being kept until somebody reads it -
+  nobody can collect it and nothing retries it - so it ages like a request-log row.
+
+- **A NACHA account's `InstrId` has to be digits, at both doors** (#218). A NACHA
+  account may send a `pain.001` or a `pain.008`, and what comes back to it comes
+  back in a NACHA return file, which carries the `InstrId` as the original entry
+  trace number: 15 digits. An `InstrId` such as `ACME-0001-2` was zero-filled into
+  that field as it was, so the bank sent a return file its own reader refuses; and
+  a collection's `InstrId` was not held to the 15 either, so a longer one cost the
+  account its whole return file for the day, recorded under `/_mock/unsent`. Both
+  are now refused when the file arrives, `FF01`, with a reason that says to send
+  digits or no `InstrId`, as a payment's over-long one has been since 0.6.
+  **A NACHA account whose `pain.001` or `pain.008` carries an `InstrId` that is
+  not digits had it accepted and now has that payment or collection rejected.**
+  An ISO 20022 account is not affected.
+
 ## [0.8.0] - 2026-10-06
 
 ### Changed
@@ -1428,7 +1481,8 @@ story.
   file through the installed console script instead of only asking for its
   health.
 
-[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/rseufert/mock-bank/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/rseufert/mock-bank/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/rseufert/mock-bank/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rseufert/mock-bank/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rseufert/mock-bank/compare/v0.5.0...v0.6.0
