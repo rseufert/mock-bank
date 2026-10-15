@@ -34,7 +34,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://rickseufert.com/#projects"
+Homepage = "https://rickseufert.com/mock-bank/"
 Repository = "https://github.com/rseufert/mock-bank"
 Issues = "https://github.com/rseufert/mock-bank/issues"
 Changelog = "https://github.com/rseufert/mock-bank/blob/main/CHANGELOG.md"
